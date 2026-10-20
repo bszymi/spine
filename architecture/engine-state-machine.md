@@ -58,11 +58,15 @@ Both modes follow the same state machine. The mode does not introduce new states
 | `paused` | `active` | `run.resume` | Blocking condition resolved | Resume from current step; emit `run_resumed` |
 | `paused` | `cancelled` | `run.cancel` | Operator issues cancellation | Terminate live steps as for `active → cancelled`; set `completed_at`; emit `run_cancelled` |
 | `committing` | `completed` | `git.commit_succeeded` | Git commit and merge confirmed | Set `completed_at`; emit `run_completed` |
-| `committing` | `committing` | `git.commit_failed_transient` | Transient Git failure, retries remain | Retry commit |
-| `committing` | `failed` | `git.commit_failed_permanent` | Git commit failed permanently after retries | Preserve runtime state; terminate live steps as for `active → failed`; emit `run_failed` |
-| `committing` | `partially-merged` | `git.code_repo_partial_failure` | Multi-repo run: primary merge landed, at least one code repo merge permanently failed | Preserve per-repo `RepositoryMergeOutcome` rows; emit `run_partially_merged` |
+| `committing` | `committing` | `git.commit_failed_transient` | Transient Git failure, retries remain | Retry commit. The scheduler's automatic retries are bounded (INIT-023 TASK-012): `commitMaxRetries` (`scheduler.WithCommitRetry`; 3 in `spine serve`) counted from `repository_merge_outcomes.attempts` — every recorded attempt for (run, repository), the first included, over the run's lifetime. Only recorded transient merge or push failures count; a governance hold, a lock wait cut short by the caller, or an outcome-persistence error records nothing and is not counted. A push that fails after the merge landed on the local target (failure detail `local merge succeeded (sha=…) but push failed: …`) never exhausts the budget: the merge is on the branch, so the run stays here and its push is retried until it lands (publication pending, an Error log once past the budget). A later attempt that fails before its push, after such a merge or after one recorded `merged` whose completion failed, keeps naming that merge (`local merge succeeded (sha=…) in an earlier attempt; …`) and never exhausts either — within the same committing episode only: a merge carried from an outcome attempted before the run's latest step activity, or from a permanent-class one, is not, so a run a permanent push rejection sent back to `execute` is bounded again in its next episode |
+| `committing` | `failed` | `git.commit_failed_permanent` | Git commit failed permanently, or after retries: once the primary outcome's attempts exceed `commitMaxRetries` with a transient last failure that left nothing on the target (a code repository's exhaustion leads to `partially-merged`, below), `Orchestrator.AbandonExhaustedMerge` (the scheduler's `WithCommitExhausted` handler) routes the run exactly like a permanent failure — a workflow with a publish step takes `merge_failed`, a legacy terminal-commit workflow fails the run; the step carries classification `merge_retries_exhausted` and the outcome's failure detail starts `retries exhausted (attempts=N, max_retries=M): `. An outcome counts only when attempted in the current committing episode (after the run's latest step activity), and in one process the abandonment never overlaps a merge attempt of the same run | Preserve runtime state; terminate live steps as for `active → failed`; emit `run_failed` |
+| `committing` | `partially-merged` | `git.code_repo_partial_failure` | Multi-repo run: primary merge landed, at least one code repo merge permanently failed — or exhausted its transient retries (`AbandonExhaustedMerge` marks the code repository's outcome `retries exhausted (…)`, which the merge loop treats as terminal, and leaves the run in `committing` for the retry that merges the primary; INIT-023 TASK-012) | Preserve per-repo `RepositoryMergeOutcome` rows; emit `run_partially_merged` |
 | `partially-merged` | `committing` | `git.retry_partial_merge` | Operator resolved the failed code repo and requested retry | Re-enter merge pipeline; only repos with non-terminal outcomes are re-attempted |
 | `partially-merged` | `cancelled` | `run.cancel` | Operator cancels a partially-merged run instead of retrying | Terminate live steps as for `active → cancelled`; set `completed_at`; `CleanupRunBranch` runs against per-repo outcomes (failed branches preserved, others deleted); emit `run_cancelled` |
+
+**Held `committing` (governance-path guard; ADR-016, INIT-023 TASK-006).** With the guard on (the `spine serve` default), a governed merge that changes governance paths (`.spine/`, `.spine.yaml`, `workflows/`, `<artifacts_dir>/workflows/`) without an operator approval of its bound commit stays in `committing` — the `committing → committing` row, but nothing is attempted: no code repository or primary merge, no status-cascade commit on the run branch. The hold is recorded on the publish step (or, with no publish step, on the last completed step) as `error_detail.classification = governance_approval_required` and announced by `governance.merge_held`. There is no timeout and no automatic way out (cancel is not allowed from `committing`): an operator approves (the merge runs → `completed`) or rejects (`committing → active` through the publish step's `merge_failed` route, or `committing → failed` with a compare-and-swap on a workflow with no publish step). A merge whose post-merge check finds governed changes the evaluation did not cover (rename following under default git configuration, or non-default merge configuration), or one that can never be evaluated (no merge base, a diff over the git output limit), takes `git.commit_failed_permanent`'s routing (nothing is pushed). An operator decision on a run waits for a merge attempt of it in flight (the governance stripe). Recovery and the commit-retry sweep re-evaluate a held run each tick without changing it.
+
+**Order of the checks in a governed merge (INIT-023 wave 4 integration).** With merge binding on, one attempt of `MergeRunBranch` runs, in this order: the binding (TASK-005: a missing or untrusted binding takes the permanent route) → the declared status lifecycle on the bound diff (TASK-017, §5A: a violation takes the permanent route; a retryable read failure is a counted attempt) → the governance gate (TASK-006: a hold records no attempt; an unevaluable merge takes the permanent route) → the code repositories → the primary merge block on the shared working tree (TASK-012): the run-status re-check, `MergeBound`, the structural check (TASK-005), the merge-result check V1 (TASK-017, §5A.3), the governance post-merge assertion and the consumption marker (TASK-006), then the push. A refusal in the block is taken back before the tree is released — to exactly the base `main` held for V1 and the governance assertion, which run after the structural check accepted the merge — and is recorded and routed after it. So a merge that violates the lifecycle and also touches governance paths is refused, never held; a held merge is never abandoned by the retry budget; and a permanent refusal (lifecycle, governance, structural) is never retried. A failed take-back keeps the shared tree refused until it completes and, with the guard on, blocks every governed merge (KNOWN-LIMITATIONS "Governance-Path Guard" 6).
 
 ### 2.3 Invalid Transitions
 
@@ -153,6 +157,9 @@ Every `failed` StepExecution records a `failure_classification` to distinguish f
 | `git_conflict` | Git commit conflict during durable outcome | No (operator intervention) |
 | `timeout` | Step exceeded its configured timeout | Depends on `timeout_outcome` |
 | `run_terminated` | The step was live when its run was cancelled or failed; recorded on a `skipped` execution (the step status has no `cancelled` value) by the step-entry policy's `TerminateStepsOnCancel`. Under `EnforceRunStatus` a late result submission on such an execution answers 409. | No |
+| `status_lifecycle_violation` | The governed merge was refused by the declared artifact-status lifecycle (§5A): the run branch changed a status the run does not own, or the run's own change is not a declared transition. Recorded on the last completed step when the merge is refused; the merge outcome row carries class `precondition` with a `status_lifecycle_violation:` detail. | No — the branch or the workflow must change |
+| `merge_retries_exhausted` | The governed merge's automatic retries were spent on transient failures (the retry budget, `AbandonExhaustedMerge`; INIT-023 TASK-012). Recorded on the step the run routes from; the run took the permanent-failure route (`merge_failed` back to execute through a publish step, or a failed run), and the exhausted merge outcome's failure detail opens with `retries exhausted (`. Never recorded on a run held for a governance decision, a run whose refused merge is still blocked on the local `main`, or a run whose merge may be on the local `main` unverified. | No — the run was routed; a rework re-enters `committing` with a fresh budget |
+| `governance_approval_required` | The governed merge is held for an operator decision by the governance-path guard (ADR-016; INIT-023 TASK-006): it changes a governance path and no approval of its bound commit is recorded. Recorded on the publish step (or, on a workflow without one, the last completed step) while the run waits in `committing`, with rule `governance-path-guard`. Cleared by the decision (`POST /runs/{run_id}/governance-decision`) and by any later attempt the guard allows. | No — an operator approves or rejects it |
 
 The classification determines whether retry is attempted and informs operator diagnostics. It is stored in the `error_detail` JSONB field alongside the error message.
 
@@ -173,7 +180,7 @@ The classification determines whether retry is attempted and informs operator di
 | `assigned` | Check actor availability; if still reachable, wait; if not, transition to `waiting` for reassignment |
 | `in_progress` | Check for pending result; if none, apply timeout logic |
 | `blocked` | Remain blocked; check if blocking condition resolved |
-| `completed` | No action (terminal) |
+| `completed` | No action on the step (terminal). If the run did not advance past it (the process stopped between the completion write and routing), the stored outcome is routed again through `Orchestrator.RecoverCompletedStep` — only while the run is active, at that step and has no later execution. `SubmitStepResult` never routes an execution that is already terminal (INIT-023 TASK-008). |
 | `failed` | Check retry eligibility; if eligible, create new execution |
 | `skipped` | No action (terminal) |
 
@@ -265,6 +272,106 @@ The `divergence_window` must be `closed` before transitioning to `converging` (e
 
 ---
 
+## 5A. Artifact Status Lifecycle (Declared)
+
+Runs, steps, divergences and branches have the machines above. An artifact's `status` front
+matter gets one too (INIT-023 TASK-017, audit P3-21): `domain.StatusLifecycle`, declared in code
+(a table a run branch could edit would judge itself). `domain.DefaultStatusLifecycle()` is this
+table. Every terminal status (Completed, Cancelled, Rejected, Abandoned, Superseded, Deprecated)
+is final. Task `In Progress` is declared although `ValidStatusesForType(Task)` and
+`governance/task-lifecycle.md` §3.3 do not list it (SMP's `task-default` commits it). Identity
+(`S → S`) is allowed for every declared status; nothing is allowed for an undeclared status or an
+unknown type. `Workflow` definitions carry no status and are not in the table.
+
+<!-- status-lifecycle-table:begin (pinned by core/domain TestStatusLifecycleDocTable) -->
+| Type | Initial (may be created with) | Transitions |
+|---|---|---|
+| ADR | Proposed | Accepted → Deprecated, Accepted → Superseded, Proposed → Accepted, Proposed → Deprecated, Proposed → Superseded |
+| Architecture | Living Document, Stable | Living Document → Stable, Living Document → Superseded, Stable → Living Document, Stable → Superseded |
+| Epic | Draft, Pending | Draft → Pending, Draft → Superseded, In Progress → Completed, In Progress → Superseded, Pending → Completed, Pending → In Progress, Pending → Superseded |
+| Governance | Foundational, Living Document | Foundational → Living Document, Foundational → Superseded, Living Document → Foundational, Living Document → Superseded |
+| Initiative | Draft, Pending | Draft → Pending, Draft → Superseded, In Progress → Completed, In Progress → Superseded, Pending → Completed, Pending → In Progress, Pending → Superseded |
+| Product | Living Document, Stable | Living Document → Stable, Living Document → Superseded, Stable → Living Document, Stable → Superseded |
+| Task | Draft, Pending | Draft → Cancelled, Draft → Pending, In Progress → Abandoned, In Progress → Cancelled, In Progress → Completed, In Progress → Rejected, In Progress → Superseded, Pending → Abandoned, Pending → Cancelled, Pending → Completed, Pending → In Progress, Pending → Rejected, Pending → Superseded |
+<!-- status-lifecycle-table:end -->
+
+### 5A.1 Where it is enforced
+
+The lifecycle is enforced at the one point every change a run makes reaches `main`: the governed
+merge (`MergeRunBranch`), opt-in through `Orchestrator.WithStatusLifecycle` (the embedded zero
+value is no enforcement; `spine serve` turns it on with no switch). It judges the **bound commit**
+(merge binding, TASK-005) and therefore requires binding: with the lifecycle on and binding off
+the merge is refused as a configuration error (`ErrUnavailable`, the run stays `committing`).
+It judges exactly the paths the projection treats as artifacts (`artifact.PathScope`: under
+`artifacts_dir`, `.md`, not under `templates/`), with `run.TaskPath` resolved under
+`artifacts_dir` (`Orchestrator.WithArtifactsDir`). The "from" status is the merge-base's, never
+the branch's own value. `workflow.Service` refuses a workflow whose `commit.status` is not a
+declared status of its `applies_to` types at create/update time
+([Workflow Validation](/architecture/workflow-validation.md) §5.5).
+
+### 5A.2 Ownership and rules
+
+A run **owns** its TaskPath and, in a planning run, every artifact it adds. Renamed, modified and
+deleted paths are never owned (a rename *onto* the TaskPath is judged with the old path's
+status). `final` is the outcome's `commit.status` for an owned path, else the bound commit's own
+status.
+
+| Case | Rule | Refusal reason |
+|---|---|---|
+| Owned, exists at the merge-base, effect declared | same type; `Allows(type, base status, final)`; no blocking status-conflict finding | `type_changed`, `undeclared_status`, `illegal_transition`, `status_conflict` |
+| Owned, exists at the merge-base, no effect declared | same type; status unchanged | `type_changed`, `status_change_without_effect` |
+| Owned, new, effect declared | `final` is a status of the type (the package is normalised to it) | `status_not_in_type` |
+| Owned, new, no effect declared | the authored status is initial | `illegal_initial_status` |
+| TaskPath not an artifact at the bound commit (effect declared, or it was one at the merge-base) | — | `not_an_artifact` |
+| Not owned, exists at the merge-base | same type; status unchanged (raw comparison: an undeclared status already on `main` is kept) | `type_changed`, `non_owned_status_change` |
+| Not owned, exists at the merge-base, and deleted, renamed out of scope, no longer parsing, or replaced by a symlink or gitlink | — | `non_owned_removal` |
+| Not owned, new | the authored status is initial | `illegal_initial_status` |
+| A diff path C-quoted and ending `.md"` (either side of a rename) | — | `unparseable_path` |
+| A diff-listed path that cannot be read for a reason a retry cannot change (too large, not a blob, not found) | — | `unreadable_artifact` |
+| No merge-base with `main`, or a permanent merge-base / diff failure | — | `unreadable_diff` |
+| The cascade's rewrite of an owned path does not re-parse to exactly `final` with nothing else changed | — | `status_rewrite_failed` |
+| The merge result (before any push) changes, relative to `main` before the merge, something the rules above did not allow (§5A.3) | — | `merge_result_mismatch` |
+
+The cascade rewrites only owned paths whose status differs from `final`, in one commit onto the
+bound commit. A retryable git error (or a non-git store or transport error) keeps the run in
+`committing` for a retry; it never degrades to an unjudged merge. A refusal records the primary
+merge outcome as failed (class `precondition`), classifies the last completed step
+`status_lifecycle_violation` (§3.3.1) and takes the permanent route: a publish-step workflow sends
+the run back to its producer (`merge_failed`), any other workflow fails the run. The blocking
+status-conflict check reads the projection, so it can lag `main` by one sync (KNOWN-LIMITATIONS);
+it is asked under the name `main` gives the artifact (when `main` renamed it after the fork, the
+projection keys it there; a merge that would land it under yet another name is retried), and it is
+not asked about a change `main` already holds (the merge then lands no status change there), which
+covers a resumed run whose merge already landed.
+
+### 5A.3 The merge result
+
+The rules above judge the bound diff against one merge-base (`git merge-base main <bound>`), but
+`git merge` merges against the virtual base of every best common ancestor, and against `main` as it
+is when the merge runs. So after the local merge and before any push, the engine judges what the
+merge actually changes, `Diff(<main before the merge>, <merge result>)` with renames detected,
+relative to `main`:
+
+- The merge-base of `main` before the merge and the merged commit must still be the one the plan
+  judged against. When `main` gained commits of the bound history between the judgement and the
+  merge, it is not: the merge is taken back off the local `main` and the attempt retried (the run
+  stays `committing`), so the next attempt judges against the base git now merges with.
+- The run's own artifact whose status the plan sets must land at the planned type and status, from
+  the judged status on `main` (or `main` already holding the planned one); one the plan creates must
+  not overwrite an artifact `main` holds. A rename `main` made after the merge-base is followed for
+  the TaskPath (git merges the rename and the status change cleanly).
+- Every other artifact `main` holds keeps its type, its status and its existence (and, when it
+  parses for the projection on `main`, keeps parsing); an artifact the merge adds must carry an
+  initial status of its type. A rename `main` made after the fork is `main`'s state, not a change of
+  the merge.
+
+Anything else is refused `merge_result_mismatch` (a side that cannot be read, `unreadable_artifact`)
+and the refused merge is taken back off the local `main`; nothing is pushed. This covers a
+`*.md merge=union` attribute that keeps two status lines without a conflict, a criss-cross history
+whose virtual base the plan never saw, and a concurrent merge of commits the bound commit builds on.
+
+---
+
 ## 6. Engine Responsibility
 
 ### 6.1 Who Drives Transitions
@@ -328,6 +435,41 @@ State transitions within a single entity are atomic:
 - Multiple StepExecutions may be active concurrently within a Run (during divergence)
 - Multiple Branches execute concurrently within a DivergenceContext
 - The Workflow Engine must use optimistic concurrency control or row-level locking to prevent conflicting state transitions on the same entity
+
+#### Concurrent writes (INIT-023 TASK-008)
+
+- **Run status writes are compare-and-swap with re-evaluation.** Every engine run
+  mutator (complete, fail, cancel, pause, resume, start, the permanent-merge-failure
+  path) evaluates its trigger against the status it read and writes with
+  `TransitionRunStatus(from = that status)`. A lost race re-reads and re-evaluates
+  (at most three attempts), so the trigger is judged against the state that won and
+  never written over it: a cancel that raced a pause still cancels, a cancel that
+  raced a merge start answers 409 (`run.cancel` is invalid from `committing`), and a
+  completion that raced a cancel never resurrects the run. Events, branch cleanup and
+  step termination follow an applied write only. The scheduler's run-timeout cancel
+  and startup recovery, and the gateway's no-orchestrator cancel, are conditional too.
+- **Step execution writes are compare-and-swap on (status, actor) when the store
+  supports it** (the optional `engine.StepExecutionTransitioner`; the standalone
+  PostgreSQL store does, an embedder opts in). A writer that lost its race writes
+  nothing and stops without side effects: no event, no routing, no assignment
+  delivery, no handler run, no retry execution. A claim that lost removes the
+  assignment row it created first, because the claim never bound its actor
+  (`engine.AssignmentRowDeleter` on the assignment store; without it the row is
+  cancelled, and separation of duties and the prior-holder re-offer then read it as a
+  binding: KNOWN-LIMITATIONS "Engine State Writes …" 11). Without the capability step writes
+  stay blind (an embedder serialises them itself). An acknowledgment that loses to the
+  same actor's identical transition (a concurrent retry, or the actor's own submit
+  auto-acknowledging) answers like the sequential retry — the idempotent `in_progress`
+  result, subject to the run-status check — and any other lost race keeps the 409.
+- **A terminal execution is never routed twice.** `step.submit` on `completed` is a
+  no-op transition, which a (status, actor) comparison cannot see, so the submit path
+  refuses an execution that is terminal when read, and one that moved since the
+  submission was validated (the step's own actor acknowledging it, `assigned →
+  in_progress`, is the one move that is not a conflict); a lost submit race answers
+  with the persisted state.
+- **Not transactional:** a step's terminal write and the creation of the next
+  execution are separate writes. A cancel between them leaves a `waiting` execution
+  on the cancelled run, which the run-status entry checks keep inert.
 
 ---
 

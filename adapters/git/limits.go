@@ -9,17 +9,23 @@ package git
 // customer-app process down — every workspace on the replica, on every
 // projection sync that re-read it. Three bounds now apply:
 //
-//   - Spine's heap. ReadFile probes the blob's size (`git cat-file -s`)
-//     before reading and refuses anything over the per-blob limit; the
-//     read itself goes into one buffer pre-sized to the probed size and
-//     capped at the limit. Every other command's stdout is capped at the
-//     per-command limit. Stderr keeps its head and tail (64 KiB in all).
+//   - Spine's heap. ReadFile probes the blob's size (`git ls-tree -l`;
+//     `git cat-file -s` before the wave 4 follow-up) before reading and
+//     refuses anything over the per-blob limit; the read itself goes
+//     into one buffer pre-sized to the probed size and capped at the
+//     limit. Every other command's stdout is capped at the per-command
+//     limit. Stderr keeps its head and tail (64 KiB in all).
 //   - git's own heap. The git child runs in the same cgroup. The size
 //     probe sees only the target object, so a small blob stored as a
-//     delta on a huge base, or a gitlink named *.md that `git show`
-//     renders as a commit with its patch, passes the probe and then
-//     makes git allocate the large object. Read commands therefore run
-//     with GIT_ALLOC_LIMIT, which git checks on every heap allocation
+//     delta on a huge base passes the probe and then makes git allocate
+//     the large object. (A gitlink named *.md that `git show` rendered
+//     as a commit with its patch was the other bypass, and one that
+//     GIT_ALLOC_LIMIT did not stop — a diff queue is millions of small
+//     allocations. Since the wave 4 follow-up ReadFile reads blobs only,
+//     with `git cat-file blob` after `git cat-file -t` has proved the
+//     object is one, and refuses a gitlink unread.) Read
+//     commands therefore run with GIT_ALLOC_LIMIT, which git checks on
+//     every heap allocation
 //     (wrapper.c memory_limit_check): it refuses instead of allocating,
 //     and the refusal is mapped to the same typed errors as a stdout
 //     overflow, before git's own text ("packed object … is corrupt")
@@ -152,9 +158,9 @@ func WithMaxGitAllocBytes(n int64) CLIOption {
 }
 
 // ErrBlobTooLarge is what every ReadFile size refusal matches with
-// errors.Is: the blob (or what `git show` renders for the path) exceeds
-// the per-blob read limit, or git refused an allocation over its alloc
-// limit while producing it. A retry cannot shrink the object.
+// errors.Is: the blob exceeds the per-blob read limit, or git refused an
+// allocation over its alloc limit while producing it. A retry cannot
+// shrink the object.
 var ErrBlobTooLarge = errors.New("git: blob exceeds the read limit")
 
 // ErrOutputTooLarge is what every other command's size refusal matches
@@ -168,19 +174,22 @@ var ErrOutputTooLarge = errors.New("git: command output exceeds the read limit")
 // false; errors.Is / errors.As reach it through GitError.Unwrap.
 type BlobTooLargeError struct {
 	Ref, Path string
-	// Size is the size `git cat-file -s` reported, or -1 when the read
-	// itself overran Limit (the object changed after the probe, `git
-	// show` rendered more than the probed object — a tree or a gitlink —
-	// or git refused an allocation over its alloc limit).
+	// Size is the size the probe reported (`git ls-tree -l`, which reads
+	// only the object header), or -1 when the read itself overran Limit
+	// (the probe under-reported, or the entry probe's own output did) or
+	// git refused an allocation over its alloc limit.
 	Size  int64
 	Limit int64
 	// GitAllocLimit is non-zero when git itself refused an allocation
 	// over this GIT_ALLOC_LIMIT while producing the content (Size is then
 	// -1). The content may well be under Limit: what git could not
 	// allocate is something larger it needed to build it — the base of a
-	// small blob stored as a delta on a large one, or the patch of a
-	// gitlink rendered as a commit. Error() says so, so a 3 MB file is
-	// never reported as over a 4 MiB limit (review round 1).
+	// small blob stored as a delta on a large one, or a tree object on
+	// the path. (Before the wave 4 follow-up it could also be the patch
+	// of a gitlink rendered as a commit; ReadFile now refuses a gitlink
+	// as ErrNotBlob without reading it, but Error() keeps its wording.)
+	// Error() says so, so a 3 MB file is never reported as over a 4 MiB
+	// limit (review round 1).
 	GitAllocLimit int64
 }
 
@@ -198,6 +207,77 @@ func (e *BlobTooLargeError) Error() string {
 
 // Is makes errors.Is(err, ErrBlobTooLarge) hold.
 func (e *BlobTooLargeError) Is(target error) bool { return target == ErrBlobTooLarge }
+
+// ErrNotBlob is what ReadFile's other content refusal matches with
+// errors.Is (INIT-023 wave 4 follow-up): the commit's tree records a
+// directory (a tree) or a gitlink (mode 160000, a commit) at the path, not
+// a file — or a file entry whose recorded object is not a blob (a tag, a
+// tree or a commit; NotBlobError.FileEntry). ReadFile reads blobs only:
+// `git show <rev>:<path>` used to render a directory as a listing and a
+// gitlink whose commit is in the repository as that commit with its whole
+// patch — content no file holds, and a diff queue no GIT_ALLOC_LIMIT
+// bounds (272 MiB in the git child, measured by SMP at ae513dca). Like a
+// size refusal it is a property of the commit: no retry can make the path
+// a file.
+var ErrNotBlob = errors.New("git: the path names no file")
+
+// ObjectTag is the type `git cat-file -t` prints for an annotated tag
+// object. A tree entry never has it as its own type (ls-tree types an
+// entry from its mode); it is the type a NotBlobError with FileEntry
+// reports when a file entry records a tag's id.
+const ObjectTag = "tag"
+
+// NotBlobMessage is the GitError.Message of every ErrNotBlob refusal.
+const NotBlobMessage = "object is not a file"
+
+// NotBlobError is the typed cause of ReadFile's not-a-file refusal. It is
+// returned inside the envelope
+// *GitError{Kind: ErrKindPermanent, Op: "read_file", Message: NotBlobMessage},
+// the Kind a dangling gitlink always had, so IsRetryable is false and a
+// caller that keys on ErrKindNotFound never takes it for "absent" (a
+// directory or a gitlink at a governed path is not a missing file).
+//
+// Type is the type of the object the path names. For a directory or a
+// gitlink it is the tree entry's type as `git ls-tree` prints it
+// (TreeEntryTree or TreeEntryCommit, from the entry's mode — the object is
+// never read). For a file entry (FileEntry) it is the recorded object's own
+// type as `git cat-file -t` prints it: ObjectTag, TreeEntryTree or
+// TreeEntryCommit. Ref and Path are caller- and branch-controlled text,
+// kept for callers that sanitise them; Error never prints them.
+type NotBlobError struct {
+	Ref, Path, Type string
+	// FileEntry is true when the tree entry at the path is a file — a blob
+	// mode: 100644, 100755 or the symlink mode 120000, all of which ls-tree
+	// prints as "blob" — that records the id of an object that is not a
+	// blob (adversarial review of the wave 4 follow-up). Nothing makes the
+	// recorded id match the mode: `update-index --cacheinfo`, mktree or any
+	// tree writer records whatever id it is given, and a push with the
+	// default receive config checks only that the object exists. git diff
+	// shows such an entry as the object's own text; `git cat-file blob`
+	// would peel a tag to its target blob — content no diff shows — so
+	// ReadFile refuses it unread instead.
+	FileEntry bool
+}
+
+func (e *NotBlobError) Error() string {
+	if e.FileEntry {
+		switch e.Type {
+		case ObjectTag, TreeEntryTree, TreeEntryCommit:
+			return "the path's file entry records a " + e.Type + " object, not file content"
+		}
+		return "the path's file entry records an object that is not file content"
+	}
+	switch e.Type {
+	case TreeEntryTree:
+		return "the path names a directory (tree), not a file"
+	case TreeEntryCommit:
+		return "the path names a gitlink (commit), not a file"
+	}
+	return "the path does not name a file"
+}
+
+// Is makes errors.Is(err, ErrNotBlob) hold.
+func (e *NotBlobError) Is(target error) bool { return target == ErrNotBlob }
 
 // OutputTooLargeError is the typed cause of a non-ReadFile size refusal.
 type OutputTooLargeError struct {

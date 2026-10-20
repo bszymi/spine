@@ -58,10 +58,13 @@ type MergeOpts struct {
 	// hex object id); Source is then used only for messages. Callers
 	// that leave it empty get the branch-name merge (INIT-023 TASK-005).
 	SourceSHA string
-	Target    string // Branch to merge into (empty = current branch)
-	Strategy  string // "fast-forward" or "merge-commit"
-	Message   string // Merge commit message (for merge-commit strategy)
-	Trailers  map[string]string
+	// Target is the branch to merge into. Required (INIT-023 TASK-012):
+	// CLIClient refuses an empty Target, except for the abort sentinel
+	// (Strategy "abort" or Source "--abort"), which must have none.
+	Target   string
+	Strategy string // "fast-forward" or "merge-commit"
+	Message  string // Merge commit message (for merge-commit strategy)
+	Trailers map[string]string
 }
 
 // MergeResult contains the result of a successful merge.

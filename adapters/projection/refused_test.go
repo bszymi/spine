@@ -197,14 +197,61 @@ func TestFullRebuild_OversizedArtifactIsSkippedAndRecorded(t *testing.T) {
 }
 
 // Review round 1 (P3): a file git refuses to produce under its
-// allocation limit is reported with that limit. Here a gitlink named
-// *.md records an in-repo commit that adds an 8 MiB blob: the size probe
-// sees the small commit object, and `git show` would render the commit
-// with its patch, so git refuses the allocation. The record must say
-// which limit refused it (git_alloc_limit_bytes = the 4 MiB alloc limit
-// that WithMaxBlobBytes(1 MiB) derives) instead of reading as a file
-// "over" the 1 MiB read limit, and the rebuild still advances.
+// allocation limit is reported with that limit. Here initiatives/g.md is
+// a 512 KiB file (under the 1 MiB read limit) stored as a delta on its
+// own 8 MiB previous version: the size probe sees the small target, and
+// git would have to inflate the 8 MiB base, so it refuses the
+// allocation. The record must say which limit refused it
+// (git_alloc_limit_bytes = the 4 MiB alloc limit that WithMaxBlobBytes(1
+// MiB) derives) instead of reading as a file "over" the 1 MiB read limit,
+// and the rebuild still advances. (Until the INIT-023 wave 4 follow-up
+// this fixture was a gitlink to an in-repo commit that adds an 8 MiB
+// blob, which `git show` rendered with its patch; that gitlink is now a
+// not_a_file refusal, read unread — TestFullRebuild_GitlinkIsNotAFile.)
 func TestFullRebuild_GitAllocRefusalNamesItsLimit(t *testing.T) {
+	ctx := context.Background()
+	repo := newScratchRepo(t)
+	big := eightMiB(refusedGovDoc)
+	repo.write("initiatives/g.md", big)
+	repo.commit("big")
+	repo.write("initiatives/g.md", big[:512<<10])
+	head := repo.commit("trimmed")
+	repo.run("repack", "-adf", "-q", "--window=10", "--depth=10")
+	tip := repo.run("rev-parse", head+":initiatives/g.md")
+	idx, _ := filepath.Glob(filepath.Join(repo.dir, ".git", "objects", "pack", "*.idx"))
+	if len(idx) != 1 {
+		t.Fatalf("packs: %v", idx)
+	}
+	deltified := false
+	for _, l := range strings.Split(repo.run("verify-pack", "-v", idx[0]), "\n") {
+		if strings.HasPrefix(l, tip+" ") && len(strings.Fields(l)) >= 7 {
+			deltified = true
+		}
+	}
+	if !deltified {
+		t.Fatal("precondition: repack did not store the 512 KiB tip as a delta on the 8 MiB base")
+	}
+	st := newMapStore()
+	ev := &recordingRouter{}
+	const allocLimit = 4 * refusedTestLimit // the documented default: 4 x the per-blob limit
+	svc := NewService(boundedClient(repo.dir), st, ev, 0)
+	if err := svc.FullRebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.artifacts["initiatives/g.md"]; ok {
+		t.Fatal("the delta-on-a-large-base file was projected")
+	}
+	if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != head {
+		t.Fatalf("sync state = %+v, want idle@%s", got, head)
+	}
+	assertOneSkipAlloc(t, ev, head, "initiatives/g.md", "oversized", -1, refusedTestLimit, allocLimit)
+}
+
+// INIT-023 wave 4 follow-up: a gitlink named *.md that records an in-repo
+// commit adding an 8 MiB blob is refused as not a file — never read, so
+// neither its patch nor any alloc limit is involved — reported as a
+// not_a_file skip without sizes, and the rebuild advances.
+func TestFullRebuild_GitlinkIsNotAFile(t *testing.T) {
 	ctx := context.Background()
 	repo := newScratchRepo(t)
 	repo.write("governance/g.md", refusedGovDoc)
@@ -217,7 +264,6 @@ func TestFullRebuild_GitAllocRefusalNamesItsLimit(t *testing.T) {
 	head := repo.commitIndex("gitlink")
 	st := newMapStore()
 	ev := &recordingRouter{}
-	const allocLimit = 4 * refusedTestLimit // the documented default: 4 x the per-blob limit
 	svc := NewService(boundedClient(repo.dir), st, ev, 0)
 	if err := svc.FullRebuild(ctx); err != nil {
 		t.Fatal(err)
@@ -228,7 +274,7 @@ func TestFullRebuild_GitAllocRefusalNamesItsLimit(t *testing.T) {
 	if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != head {
 		t.Fatalf("sync state = %+v, want idle@%s", got, head)
 	}
-	assertOneSkipAlloc(t, ev, head, "initiatives/g.md", "oversized", -1, refusedTestLimit, allocLimit)
+	assertOneSkip(t, ev, head, "initiatives/g.md", "not_a_file", nil, nil)
 }
 
 // AC 11.3: a projected artifact modified past the limit loses its row

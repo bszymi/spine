@@ -100,6 +100,20 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 	if err := orch.EnableMergeBinding(engine.MergeBindingConfig{}); err != nil {
 		return fmt.Errorf("workspace orchestrator merge binding: %w", err)
 	}
+	// Declared artifact-status lifecycle (INIT-023 TASK-017), as on the
+	// process-level orchestrator, under this workspace's artifacts_dir
+	// (the workspace artifact service's, which StartRun reads with).
+	orch.WithStatusLifecycle(domain.DefaultStatusLifecycle())
+	orch.WithArtifactsDir(ss.Artifacts.ArtifactsDir())
+	// Governance-path guards (INIT-023 TASK-006), as on the process-level
+	// orchestrator and projection: the engine guard over this workspace
+	// projection's workflow directories, and the projection's
+	// protection-removal guard. The builder runs before the ServiceSet is
+	// returned, so no sync has run yet.
+	if err := enableGovernanceGuard(orch, workspaceWorkflowDirs(ss)); err != nil {
+		return fmt.Errorf("workspace orchestrator governance guard: %w", err)
+	}
+	enableProtectionRemovalGuard(ss.ProjSync, ss.Store)
 	// Engine step-entry policy (INIT-023 TASK-007), same selection as the
 	// process-level orchestrator.
 	orch.WithStepEntryPolicy(stepEntryPolicy)
@@ -178,19 +192,14 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 		ss.EvidenceQuerier = evidence.NewQuerier(ss.GitClient)
 	}
 
-	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
-		return orch.MergeRunBranch(ctx, runID)
-	}
-	ss.StepRecoveryFn = func(ctx context.Context, execID string) error {
-		exec, err := ss.Store.GetStepExecution(ctx, execID)
-		if err != nil {
-			return err
-		}
-		if exec.Status == domain.StepStatusCompleted {
-			return orch.SubmitStepResult(ctx, execID, engine.StepResult{OutcomeID: exec.OutcomeID})
-		}
-		return orch.RetryStep(ctx, exec)
-	}
+	ss.CommitRetryFn = commitRetryFor(orch)
+	// The merge retry budget's exhaustion handler (INIT-023 TASK-012,
+	// P3-27), so a future wiring of the multi-workspace scheduler gets the
+	// bound (owner question 3: wiring it is a follow-up).
+	ss.CommitExhaustedFn = orch.AbandonExhaustedMerge
+	// Recovery re-routes a completed execution through RecoverCompletedStep,
+	// never SubmitStepResult (INIT-023 TASK-008; stepRecoveryFor).
+	ss.StepRecoveryFn = stepRecoveryFor(ss.Store, orch)
 	ss.RunFailFn = func(ctx context.Context, runID, reason string) error {
 		return orch.FailRun(ctx, runID, reason)
 	}
@@ -199,6 +208,16 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 	ss.RunTerminatedFn = orch.TerminateLiveSteps
 
 	return nil
+}
+
+// workspaceWorkflowDirs is the workflow-directory set of a workspace's
+// projection (its artifacts_dir), or the root set when the ServiceSet has
+// no projection service.
+func workspaceWorkflowDirs(ss *workspace.ServiceSet) []string {
+	if ss.ProjSync != nil {
+		return ss.ProjSync.WorkflowDirs()
+	}
+	return workflowDirsFor(nil)
 }
 
 // newPooledWorkspaceBuilder composes the orchestrator wiring with

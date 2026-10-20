@@ -96,6 +96,7 @@ func TestCreateBranchAndMergeFastForward(t *testing.T) {
 	checkout(t, repo, "main")
 	result, err := client.Merge(ctx, git.MergeOpts{
 		Source:   "feature",
+		Target:   "main",
 		Strategy: "fast-forward",
 	})
 	if err != nil {
@@ -143,6 +144,7 @@ func TestCreateBranchAndMergeCommit(t *testing.T) {
 	checkout(t, repo, "main")
 	result, err := client.Merge(ctx, git.MergeOpts{
 		Source:   "feature",
+		Target:   "main",
 		Strategy: "merge-commit",
 		Message:  "Merge feature",
 		Trailers: map[string]string{"Trace-ID": "merge-trace"},

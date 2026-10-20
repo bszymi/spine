@@ -50,6 +50,23 @@ const (
 	// (as `skipped`) because its run was cancelled or failed
 	// (INIT-023 TASK-007). Not retryable.
 	FailureRunTerminated FailureClassification = "run_terminated"
+	// FailureMergeRetriesExhausted marks the step whose outcome led to a
+	// governed merge whose automatic retries were spent on transient
+	// failures (INIT-023 TASK-012, audit P3-27). Not retryable: the run
+	// took the permanent-failure route.
+	FailureMergeRetriesExhausted FailureClassification = "merge_retries_exhausted"
+	// FailureStatusLifecycle marks a governed merge the declared
+	// artifact-status lifecycle refused (INIT-023 TASK-017): the run
+	// branch changed a status the run does not govern, or its own status
+	// change is not a declared transition. Not retryable — the branch (or
+	// the workflow) must change first.
+	FailureStatusLifecycle FailureClassification = "status_lifecycle_violation"
+	// FailureGovernanceApprovalRequired marks the step a governed merge is
+	// held on (the publish step, or the last completed step on a workflow
+	// with no publish step) while it waits for an operator to approve or
+	// reject a governance change (ADR-016; INIT-023 TASK-006). Not
+	// retryable: the decision API, not a retry, clears it.
+	FailureGovernanceApprovalRequired FailureClassification = "governance_approval_required"
 )
 
 // IsRetryable returns true if this failure classification allows retry.

@@ -86,6 +86,17 @@ type CrossArtifactValidator interface {
 	Validate(ctx context.Context, artifactPath string) domain.ValidationResult
 }
 
+// StatusChangeValidator is implemented by *validation.Engine (INIT-023
+// TASK-017). It is optional and found by type assertion on the validator
+// installed with WithValidator, so no implementer of CrossArtifactValidator
+// has to change: when the orchestrator's validator implements it and the
+// status lifecycle is on, an owned status change the merge would land is
+// also checked against the blocking status-conflict (SC-*) rules. A
+// returned error is a transient failure (the run stays in committing).
+type StatusChangeValidator interface {
+	ValidateStatusChange(ctx context.Context, artifactPath string, newStatus domain.ArtifactStatus) (domain.ValidationResult, error)
+}
+
 // RepositoryResolver resolves a workspace repository ID to its merged
 // catalog/binding view at run-start time, returning the typed errors
 // from the repository package (ErrRepositoryNotFound,
@@ -116,16 +127,26 @@ type RepositoryGitClients interface {
 }
 
 // DivergenceHandler manages divergence lifecycle for the orchestrator.
+//
+// CreateExploratoryBranch takes the divergence's run (INIT-023 TASK-012):
+// the new branch forks from its run branch and is refused for any other
+// run.
 type DivergenceHandler interface {
 	StartDivergence(ctx context.Context, run *domain.Run, divDef domain.DivergenceDefinition, convergenceID string) (*domain.DivergenceContext, error)
-	CreateExploratoryBranch(ctx context.Context, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
+	CreateExploratoryBranch(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
 	CloseWindow(ctx context.Context, divCtx *domain.DivergenceContext) error
 }
 
 // ConvergenceHandler manages convergence lifecycle for the orchestrator.
+//
+// EvaluateAndCommit takes the divergence's run (INIT-023 TASK-012, audit
+// F8): the selected branches are merged into run.BranchName — never into
+// whatever a working tree has checked out — and a run that is not the
+// divergence's, or has no spine/ branch, is refused before anything
+// changes.
 type ConvergenceHandler interface {
 	CheckEntryPolicy(ctx context.Context, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) (bool, error)
-	EvaluateAndCommit(ctx context.Context, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) error
+	EvaluateAndCommit(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) error
 }
 
 // DiscussionChecker checks discussion thread state for precondition evaluation.
@@ -155,7 +176,11 @@ type WorkflowWriter interface {
 }
 
 // CollisionHandler detects and resolves artifact ID collisions during merge.
-// Used by planning runs when a merge fails due to a path conflict.
+// Used by planning runs when a merge fails due to a path conflict. It runs
+// after the primary merge block has released the working tree, so an
+// implementation that changes the shared tree must run its git sequence
+// through git.WorkingTreeGuard (INIT-023 TASK-012). Neither product wires
+// one today.
 type CollisionHandler interface {
 	// DetectAndRenumber checks if a merge conflict is an ID collision and,
 	// if so, renumbers the artifact on the branch. Returns the new artifact path

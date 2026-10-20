@@ -17,8 +17,10 @@ type DiscoveryResult struct {
 	Errors    []DiscoveryError   // files that failed to parse
 	// Refused lists the candidates discovery declined to project — an
 	// oversized .md, or an artifact or workflow candidate at an
-	// UnsafePath (INIT-023 TASK-003). They are not Errors: a refused file
-	// never makes a rebuild end in error.
+	// UnsafePath (INIT-023 TASK-003), or a .md that is a gitlink, not a
+	// file, or a file entry recording a tag, a tree or a commit (wave 4
+	// follow-up and its review). They are not Errors: a refused file never
+	// makes a rebuild end in error.
 	Refused []RefusedFile
 }
 
@@ -53,10 +55,12 @@ type ChangeSet struct {
 	ReadErrors []DiscoveryError
 	// Refused lists the changed files discovery declined to project
 	// (INIT-023 TASK-003): an added, modified or renamed-to .md that is
-	// oversized or at an UnsafePath. A refused file is never in Created
-	// or Modified; a governed row it replaces is in Deleted. Refusals are
-	// deterministic for the commit, so they are not ReadErrors and never
-	// hold a sync.
+	// oversized or at an UnsafePath, or that is a gitlink rather than a
+	// file, or a file entry recording a tag, a tree or a commit
+	// (git.ErrNotBlob, wave 4 follow-up and its review). A refused file
+	// is never in Created or Modified; a governed row it replaces is in
+	// Deleted. Refusals are deterministic for the commit, so they are not
+	// ReadErrors and never hold a sync.
 	Refused []RefusedFile
 }
 
@@ -201,7 +205,10 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 // core.quotePath=false before TASK-003 may hold its row, which must not
 // outlive the file (wave 3 integration). Invalid UTF-8 never reaches the
 // store. A read the git client refuses for size (git.ErrBlobTooLarge) is
-// not a ReadError:
+// not a ReadError, and neither is one it refuses because the path names a
+// gitlink, a directory or a file entry recording a tag, a tree or a commit
+// (git.ErrNotBlob, RefusedNotAFile; INIT-023 wave 4 follow-up and its
+// review) — "oversized" below covers both:
 //
 //	added     unsafe or oversized new path        → Refused
 //	deleted   old content oversized               → Deleted (idempotent: no stale row survives)

@@ -659,7 +659,171 @@ paths:
               schema:
                 $ref: '#/components/schemas/RunCancelResponse'
         '409':
-          $ref: '#/components/responses/Conflict'
+          description: |
+            Operation conflicts with current state — including a cancel that
+            lost a race to a merge start (the run is now `committing`, where
+            cancel is invalid) or to another writer (INIT-023 TASK-008: run
+            status writes are compare-and-swap; retry against the new state).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  errors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Error'
+
+  /runs/{run_id}/governance-decision:
+    post:
+      operationId: run.governance.decide
+      summary: Approve or reject a governed merge held by the governance-path guard
+      description: |
+        ADR-016 (INIT-023 TASK-006). With the governance-path guard on (the
+        `spine serve` default; `SPINE_GOVERNANCE_GUARD=off` disables it), a
+        governed merge that changes `.spine/`, `.spine.yaml`, `workflows/`
+        or `<artifacts_dir>/workflows/` is held: the run stays `committing`
+        until an operator decides. `commit_sha` must be the run's bound
+        commit (`GET /runs/{run_id}/governance` shows it); an approval
+        binds to that commit only.
+
+        - `approve` records the approval (reserved `commit_meta` keys,
+          `governance.merge_decided` event) — only while the run is still
+          `committing` — and runs the merge at once. A merge that then
+          fails is reported in `merge_error`; the approval stands, and
+          approving the same commit again retries the merge.
+        - `reject` (a `reason` is required) revokes any approval and takes
+          the workflow's `merge_failed` route (back to `execute` in
+          task-default), or fails a run whose workflow has no publish step
+          (the branch is kept).
+
+        A decision waits for a merge attempt of the run already in flight
+        and then sees its result: a reject after the approved merge
+        completed or reached the local `main` is `409` (the merge won).
+
+        Operator or admin only; the engine checks the role again.
+      tags: [Workflow]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/XTraceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, commit_sha]
+              properties:
+                decision:
+                  type: string
+                  enum: [approve, reject]
+                commit_sha:
+                  type: string
+                  pattern: '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
+                  description: The run's bound commit (full hex id).
+                reason:
+                  type: string
+                  maxLength: 2000
+                  description: Required for reject.
+      responses:
+        '200':
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id: { type: string }
+                  commit_sha: { type: string }
+                  decision: { type: string, enum: [approve, reject] }
+                  paths:
+                    type: array
+                    items: { type: string }
+                    description: Governance paths the merge changes (capped).
+                  path_count: { type: integer }
+                  merge_attempted: { type: boolean }
+                  merge_error:
+                    type: string
+                    description: Approve only — the merge after the approval did not complete (including a merge refused after the approval whose take-back failed; the run then stays `committing`).
+                  run_status: { type: string }
+        '400':
+          description: Malformed body, unknown decision, malformed commit_sha, a reason over 2000 bytes, or a reject without a reason
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The run is not committing (an approve that finds it left committing records nothing), commit_sha is not the run's bound commit (the message names the bound commit), a reject after the approved merge already reached the local main, or a reject while a refused merge of the run that could not be taken back is still on the local main (`blocked` in `GET /runs/{run_id}/governance`)
+        '412':
+          description: The run's merge changes no governance path, or can never be evaluated (no merge base, a diff over the git output limit — the guard refuses it on its next attempt); there is nothing to decide
+        '503':
+          description: The governance-path guard is off, the engine is not wired, the merge's changed paths could not be computed this time, another decision or merge attempt on the run did not finish in time, or the run's exhausted merge retries are being abandoned at that moment (retry; nothing was recorded)
+
+  /runs/{run_id}/governance:
+    get:
+      operationId: run.governance.status
+      summary: Read a run's governance-path guard state
+      description: |
+        Whether the run's merge changes governance paths, whether it is held
+        for an operator decision, the bound commit, the paths (capped,
+        `truncated` when cut) and exemptions, and the recorded approval.
+        `evaluated` is false (with `evaluation_error`) when the run has no
+        bound commit yet or its changed paths could not be computed.
+        Requires the `run.status` permission.
+      tags: [Workflow]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Governance state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id: { type: string }
+                  run_status: { type: string }
+                  evaluated: { type: boolean }
+                  evaluation_error: { type: string }
+                  bound_sha: { type: string }
+                  required: { type: boolean }
+                  held:
+                    type: boolean
+                    description: Held for an operator decision (never while `blocked`).
+                  blocked:
+                    type: boolean
+                    description: |
+                      A merge of the run that was refused, or whose approval
+                      could not be recorded, could not be taken back and is
+                      still on the local `main` (`blocked_merge_sha`).
+                      Governed merges are blocked on it; the run stays
+                      `committing` and its next attempt takes it back first.
+                      The paths are then computed against a `main` that
+                      holds that merge. A reject is `409` meanwhile.
+                  blocked_merge_sha: { type: string }
+                  paths:
+                    type: array
+                    items: { type: string }
+                  path_count: { type: integer }
+                  truncated: { type: boolean }
+                  exempt_paths:
+                    type: array
+                    items: { type: string }
+                  approval:
+                    type: object
+                    nullable: true
+                    properties:
+                      sha: { type: string }
+                      actor_id: { type: string }
+                      actor_role: { type: string }
+                      approved_at: { type: string }
+                      merge_sha: { type: string }
+                      base_sha: { type: string }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: The governance-path guard is off or the engine is not wired
 
   /steps/{assignment_id}/submit:
     post:
@@ -681,7 +845,11 @@ paths:
               $ref: '#/components/schemas/StepSubmitRequest'
       responses:
         '200':
-          description: Step result accepted
+          description: |
+            Step result accepted, or — for a duplicate submission or one that
+            lost a race to another writer (another submit, the timeout
+            scanner; INIT-023 TASK-008) — the execution's persisted terminal
+            state, unchanged.
           headers:
             X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
@@ -708,9 +876,18 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            `forbidden`: the step execution is bound to another actor. The
+            gateway checks it, and the engine checks it again with the
+            authenticated actor (INIT-023 TASK-008), before anything else —
+            on a completed execution too — so a non-owner can neither
+            complete nor fail another actor's step.
         '409':
           description: |
-            Operation conflicts with current state. With SHA-bound merges
+            Operation conflicts with current state — including an execution
+            that moved (rebound, released) between the submission's
+            validation and its write (INIT-023 TASK-008). With SHA-bound merges
             (INIT-023 TASK-005) `detail.reason` names a run-branch head
             conflict, and `detail.head_sha` the head the server resolved:
             - `run_branch_moved`: `expected_head_sha` is not the run
@@ -1582,6 +1759,68 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/StepExecution'
+        step_output_evidence:
+          type: array
+          description: |
+            Step-output evidence (INIT-023 TASK-008, audit P3-19), one entry
+            per completed primary-branch execution that recorded it, oldest
+            first. Read from the run's reserved `commit_meta` keys
+            (`spine.evidence.<execution_id>`), so it survives event-log
+            retention; recorded only with SHA-bound merges on. Absent when
+            there is none or the reader failed (logged).
+          items:
+            $ref: '#/components/schemas/StepOutputEvidence'
+
+    StepOutputEvidence:
+      type: object
+      required: [execution_id, step_id, attempt, outcome_id, branch_change, required_outputs_unchanged]
+      properties:
+        execution_id: { type: string }
+        step_id: { type: string }
+        attempt: { type: integer }
+        actor_id: { type: string }
+        outcome_id: { type: string }
+        required_outputs:
+          type: array
+          items: { type: string }
+          description: The step's declared required_outputs (logical labels).
+        required_outputs_unchanged:
+          type: boolean
+          description: |
+            The step declared required_outputs and the run branch content is
+            provably unchanged (`branch_change.status` `unchanged`, including a
+            moved head whose diff found no changed path).
+        branch_change:
+          $ref: '#/components/schemas/BranchChange'
+
+    BranchChange:
+      type: object
+      required: [repository_id, status]
+      description: |
+        Whether the run branch moved between the run's previous recorded
+        head and the head recorded for one execution (primary repository
+        only). Evidence, not enforcement.
+      properties:
+        repository_id: { type: string, enum: [spine] }
+        status: { type: string, enum: [unchanged, changed, unknown, not_applicable] }
+        head_sha: { type: string }
+        previous_sha: { type: string }
+        previous_source:
+          type: string
+          description: The previous binding's `spine.bound_by`, or `baseline`.
+        changed_paths:
+          type: integer
+          description: 0 when unchanged; the diff's entry count when changed; absent otherwise.
+        reason:
+          type: string
+          description: |
+            For `unknown` / `not_applicable`: `head_sha_unrecorded`,
+            `no_previous_sha`, `diff_failed:<kind>`, `divergence_branch`,
+            `no_run_branch` or `recovered`. For `unchanged`:
+            `head_moved_tree_unchanged` when the head moved but the diff of
+            the previous and the recorded head found no changed path (an
+            empty commit, a change and its revert); absent when the two heads
+            are equal.
 
     RunCancelResponse:
       type: object

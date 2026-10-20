@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
 )
@@ -168,29 +169,52 @@ func (s *Service) EvaluateConvergence(ctx context.Context, input ConvergenceInpu
 	return output, nil
 }
 
-// CommitConvergence finalizes the convergence: merges selected artifacts, updates state, emits event.
-func (s *Service) CommitConvergence(ctx context.Context, divCtx *domain.DivergenceContext, output *ConvergenceOutput) error {
+// CommitConvergence finalizes the convergence: merges the selected
+// branches into the run branch, updates state, emits the event.
+//
+// INIT-023 TASK-012 (audit F8). It used to merge with no Target, which
+// the git client read as "into whatever is checked out" — in standalone's
+// shared working tree that is main between sequences, so divergence-branch
+// content (whoever can push the deterministic spine/<run>/<div>/<branch>
+// ref authors it) landed on the governed branch while the run was still
+// active and its review step still waiting, without the governed merge,
+// and with branch protection asked only about the source ref. Now:
+//
+//  1. Guard (convergenceTargetGuard): the run must be the divergence's
+//     own run and have a spine/ run branch, checked before any git or
+//     store call. "Converge into main" or "into another run's branch" is
+//     unrepresentable.
+//  2. Branch protection is consulted for every selected branch against
+//     the branch that actually moves (run.BranchName), before the tree is
+//     taken (policy evaluation is not git).
+//  3. The merges name run.BranchName as Target and, for a shared-tree
+//     client (git.WorkingTreeGuard: standalone's CLIClient), run as one
+//     sequence that holds the working tree; a failed merge is aborted
+//     there before the tree is released, so a conflict no longer leaves
+//     the shared tree mid-merge. The abort is never sent to any other
+//     client (SMP's adapter would turn it into a push of HEAD).
+//  4. The divergence transition, the store write and the
+//     convergence_completed event run after the tree is released.
+func (s *Service) CommitConvergence(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, output *ConvergenceOutput) error {
+	if err := convergenceTargetGuard(run, divCtx); err != nil {
+		return err
+	}
 	log := observe.Logger(ctx)
 	now := time.Now()
 
-	// Merge selected branch artifacts to the task branch
-	for _, branchID := range s.selectedBranchIDs(output) {
-		gitBranch := fmt.Sprintf("spine/%s/%s/%s", divCtx.RunID, divCtx.DivergenceID, extractBranchSuffix(branchID, divCtx.DivergenceID))
+	selected := s.selectedBranchIDs(output)
+	for range selected {
 		// Route through branch-protection policy (ADR-009 §3) for audit
-		// consistency. Divergence merges target the parent run branch
-		// (spine/*), so no user rule matches — the check is a no-op at
-		// the decision level but keeps the audit trail symmetric with
+		// consistency, naming the branch the merge moves: the run branch
+		// (spine/*), which no user rule matches, so the check is a no-op
+		// at the decision level and keeps the audit trail symmetric with
 		// the MergeRunBranch guard.
-		if err := s.evaluateBranchOp(ctx, gitBranch, branchprotect.OpGovernedMerge, divCtx.RunID); err != nil {
+		if err := s.evaluateBranchOp(ctx, run.BranchName, branchprotect.OpGovernedMerge, divCtx.RunID); err != nil {
 			return err
 		}
-		if _, err := s.git.Merge(ctx, git.MergeOpts{
-			Source:   gitBranch,
-			Strategy: "merge-commit",
-			Message:  fmt.Sprintf("Converge branch %s", branchID),
-		}); err != nil {
-			return fmt.Errorf("merge branch %s failed: %w", branchID, err)
-		}
+	}
+	if err := s.mergeSelected(ctx, run, divCtx, selected); err != nil {
+		return err
 	}
 
 	// Transition to resolved
@@ -226,6 +250,63 @@ func (s *Service) CommitConvergence(ctx context.Context, divCtx *domain.Divergen
 		"divergence_id", divCtx.DivergenceID,
 		"strategy", output.Result.StrategyApplied,
 	)
+	return nil
+}
+
+// mergeSelected merges every selected divergence branch into the run
+// branch: inside the shared working tree's lock when s.git is a
+// git.WorkingTreeGuard (and then a failed merge is aborted before the tree
+// is released), directly otherwise. Git only: nothing is emitted or stored.
+func (s *Service) mergeSelected(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, selected []string) error {
+	merge := func(ctx context.Context, abortOnError bool) error {
+		for _, branchID := range selected {
+			gitBranch := fmt.Sprintf("spine/%s/%s/%s", divCtx.RunID, divCtx.DivergenceID, extractBranchSuffix(branchID, divCtx.DivergenceID))
+			if _, err := s.git.Merge(ctx, git.MergeOpts{
+				Source:   gitBranch,
+				Target:   run.BranchName,
+				Strategy: "merge-commit",
+				Message:  fmt.Sprintf("Converge branch %s", branchID),
+			}); err != nil {
+				if abortOnError {
+					if _, abortErr := s.git.Merge(ctx, git.MergeOpts{Source: "--abort", Strategy: "abort"}); abortErr != nil {
+						observe.Logger(ctx).Warn("convergence: aborting the failed merge failed; the next sequence's restore aborts it",
+							"divergence_id", divCtx.DivergenceID, "branch_id", branchID, "error", abortErr)
+					}
+				}
+				return fmt.Errorf("merge branch %s failed: %w", branchID, err)
+			}
+		}
+		return nil
+	}
+	if guard, ok := s.git.(git.WorkingTreeGuard); ok {
+		return guard.WithWorkingTree(ctx, func(ctx context.Context) error { return merge(ctx, true) })
+	}
+	return merge(ctx, false)
+}
+
+// convergenceTargetGuard is the F8 guard (INIT-023 TASK-012): a
+// convergence (and an exploratory branch) needs the divergence's own run,
+// whose branch is a Spine run branch. Every run branch the engine creates
+// is spine/run/… or spine/plan/… (core/engine/branchname.go), so main, a
+// missing branch or another run's branch is refused before anything
+// happens.
+func convergenceTargetGuard(run *domain.Run, divCtx *domain.DivergenceContext) error {
+	switch {
+	case divCtx == nil:
+		return domain.NewError(domain.ErrPrecondition, "divergence: no divergence context")
+	case run == nil:
+		return domain.NewError(domain.ErrPrecondition,
+			fmt.Sprintf("divergence %s: the run is required (its branch is the convergence target)", divCtx.DivergenceID))
+	case run.RunID != divCtx.RunID:
+		return domain.NewError(domain.ErrPrecondition,
+			fmt.Sprintf("divergence %s belongs to run %s, not %s", divCtx.DivergenceID, divCtx.RunID, run.RunID))
+	case run.BranchName == "":
+		return domain.NewError(domain.ErrPrecondition,
+			fmt.Sprintf("divergence %s: run %s has no branch to converge into", divCtx.DivergenceID, run.RunID))
+	case !strings.HasPrefix(run.BranchName, "spine/"):
+		return domain.NewError(domain.ErrPrecondition,
+			fmt.Sprintf("divergence %s: run %s branch %q is not a Spine run branch", divCtx.DivergenceID, run.RunID, run.BranchName))
+	}
 	return nil
 }
 

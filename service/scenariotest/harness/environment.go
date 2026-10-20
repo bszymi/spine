@@ -22,6 +22,21 @@ type envConfig struct {
 	seedWorkflows  bool
 	artifactsDir   string // empty means default "/"
 	runtimeOpts    []RuntimeOption
+	noHomeBranch   bool
+	// governanceGuard: WithRuntimeGovernanceGuard (applied with the
+	// final artifactsDir, whatever the option order).
+	governanceGuard bool
+}
+
+// WithoutHomeBranch builds the repository's client without
+// git.WithHomeBranch("main") (INIT-023 TASK-012), so its working tree is
+// never restored and "HEAD" reads follow the checked-out branch. For a
+// scenario that must observe a non-restored tree; every use must say why
+// in a comment. Also accepted by NewTestRepo.
+func WithoutHomeBranch() EnvOption {
+	return func(c *envConfig) {
+		c.noHomeBranch = true
+	}
 }
 
 // WithGovernance seeds the repository with governance documents.
@@ -71,6 +86,26 @@ func WithRuntimeWithoutMergeBinding() EnvOption {
 	}
 }
 
+// WithStatusLifecycle builds the runtime with the declared artifact-status
+// lifecycle on (INIT-023 TASK-017; see WithDeclaredStatusLifecycle): the
+// orchestrator, the workflow service and the validator, together with the
+// merge binding the lifecycle requires (on by default). Off by default, so
+// existing scenarios are unchanged.
+func WithStatusLifecycle() EnvOption {
+	return func(c *envConfig) {
+		c.runtimeOpts = append(c.runtimeOpts, WithDeclaredStatusLifecycle())
+	}
+}
+
+// WithRuntimeGovernanceGuard turns on both governance-path guards in the
+// runtime (see WithGovernanceGuard), over this environment's
+// artifacts_dir.
+func WithRuntimeGovernanceGuard() EnvOption {
+	return func(c *envConfig) {
+		c.governanceGuard = true
+	}
+}
+
 // WithArtifactsDir configures the artifacts directory for the test environment.
 // Seeds and artifact service use this directory instead of the repo root.
 func WithArtifactsDir(dir string) EnvOption {
@@ -105,7 +140,11 @@ func NewTestEnvironment(t *testing.T, opts ...EnvOption) *TestEnvironment {
 		opt(cfg)
 	}
 
-	repo := NewTestRepo(t)
+	var repoOpts []EnvOption
+	if cfg.noHomeBranch {
+		repoOpts = append(repoOpts, WithoutHomeBranch())
+	}
+	repo := NewTestRepo(t, repoOpts...)
 
 	if cfg.seedGovernance {
 		repo.SeedGovernance(t)
@@ -115,11 +154,21 @@ func NewTestEnvironment(t *testing.T, opts ...EnvOption) *TestEnvironment {
 	}
 
 	db := NewTestDB(t)
-	rt := NewTestRuntime(t, repo, db, cfg.runtimeOpts...)
+	runtimeOpts := cfg.runtimeOpts
+	if cfg.governanceGuard {
+		runtimeOpts = append(append([]RuntimeOption(nil), runtimeOpts...), WithGovernanceGuard(cfg.artifactsDir))
+	}
+	rt := NewTestRuntime(t, repo, db, runtimeOpts...)
 
 	// Configure artifacts directory if specified.
 	if cfg.artifactsDir != "" {
 		rt.Artifacts.WithArtifactsDir(cfg.artifactsDir)
+		// The governed merge's status lifecycle resolves run.TaskPath
+		// under the same directory (INIT-023 TASK-017); without a
+		// lifecycle the setting is inert.
+		if rt.Orchestrator != nil {
+			rt.Orchestrator.WithArtifactsDir(cfg.artifactsDir)
+		}
 	}
 
 	t.Cleanup(func() {

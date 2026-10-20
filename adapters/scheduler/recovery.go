@@ -3,14 +3,15 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/repository"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/workflow"
 )
 
@@ -114,8 +115,16 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 
 		now := time.Now()
 		if err := s.store.WithTx(ctx, func(tx store.Tx) error {
-			if err := tx.UpdateRunStatus(ctx, runs[i].RunID, tr.ToStatus); err != nil {
+			// Compare-and-swap from pending (INIT-023 TASK-008): a run that
+			// left pending since the listing (StartRun activated it, an
+			// operator cancelled it) is not written over; the transaction
+			// rolls back and the run is skipped.
+			applied, err := tx.TransitionRunStatus(ctx, runs[i].RunID, runs[i].Status, tr.ToStatus)
+			if err != nil {
 				return err
+			}
+			if !applied {
+				return errRecoveryRunMoved
 			}
 			if hasEntryStep {
 				return nil // entry step already exists, skip creation
@@ -130,6 +139,10 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 				CreatedAt:    now,
 			})
 		}); err != nil {
+			if errors.Is(err, errRecoveryRunMoved) {
+				log.Info("pending run changed before recovery activated it; skipped", "run_id", runs[i].RunID)
+				continue
+			}
 			log.Error("activate pending run failed", "run_id", runs[i].RunID, "error", err)
 			continue
 		}
@@ -139,6 +152,10 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 	}
 	return nil
 }
+
+// errRecoveryRunMoved rolls back a pending-run activation whose
+// compare-and-swap missed.
+var errRecoveryRunMoved = errors.New("run left pending before recovery activated it")
 
 // recoverActiveRuns inspects each active run's current step and applies recovery.
 func (s *Scheduler) recoverActiveRuns(ctx context.Context, result *RecoveryResult) error {
@@ -195,8 +212,16 @@ func (s *Scheduler) recoverStep(ctx context.Context, run *domain.Run, exec *doma
 				return fmt.Errorf("reset assigned to waiting: %w", err)
 			}
 			exec.Status = result.ToStatus
-			if err := s.store.UpdateStepExecution(ctx, exec); err != nil {
+			applied, err := s.transitionStep(ctx, exec, domain.StepStatusAssigned, exec.ActorID)
+			if err != nil {
 				return fmt.Errorf("update step execution: %w", err)
+			}
+			if !applied {
+				// The step moved since the listing (INIT-023 TASK-008): a
+				// live replica acknowledged or completed it. Leave it.
+				log.Info("assigned step changed before recovery reset it; skipped",
+					"run_id", run.RunID, "step_id", exec.StepID)
+				return nil
 			}
 		}
 		log.Info("step ready for reassignment", "run_id", run.RunID, "step_id", exec.StepID, "status", exec.Status)
@@ -283,6 +308,9 @@ func (s *Scheduler) recoverCommittingRuns(ctx context.Context, result *RecoveryR
 		if s.commitThreshold > 0 && time.Since(runs[i].CreatedAt) < s.commitThreshold {
 			continue
 		}
+		if s.commitBudgetSpent(ctx, runs[i].RunID) {
+			continue
+		}
 
 		log.Info("retrying commit for stuck run", "run_id", runs[i].RunID)
 		if err := s.commitRetryFn(ctx, runs[i].RunID); err != nil {
@@ -355,8 +383,11 @@ func (s *Scheduler) retryRunsByStatus(ctx context.Context, status domain.RunStat
 		return
 	}
 
-	for i := range runs {
-		runID := runs[i].RunID
+	for it := newBudgetIter(ctx, "commit-retry:"+string(status), len(runs)); it.next(); {
+		runID := runs[it.i].RunID
+		if resumeTrigger == "" && s.commitBudgetSpent(ctx, runID) {
+			continue
+		}
 		if resumeTrigger != "" {
 			if status == domain.RunStatusPartiallyMerged {
 				eligible, err := codeRepoOutcomesAllowResume(ctx, s.store, runID)
@@ -406,6 +437,55 @@ func (s *Scheduler) retryRunsByStatus(ctx context.Context, status domain.RunStat
 			log.Error("commit retry failed", "run_id", runID, "error", err)
 		}
 	}
+}
+
+// commitBudgetSpent is the retry-budget gate in front of every automatic
+// commit retry of a committing run (INIT-023 TASK-012, audit P3-27). It
+// reports true when the run must not be retried this tick:
+//
+//   - commitMaxRetries <= 0: never (unbounded, the pre-TASK-012 behaviour).
+//   - an exhaustion handler is wired: whatever it reports — it ends the run
+//     when the budget is spent. Its error is logged and the run is
+//     skipped; the next tick asks again.
+//   - none is wired: the run is skipped, with an Error log, while one of
+//     its outcomes is exhausted (domain.FirstExhaustedOutcome), so a
+//     misconfiguration stops the loop instead of retrying forever. A store
+//     error is logged and the run skipped.
+//
+// The partially-merged resume pass is not gated: an operator resolution
+// resets that path, and codeRepoOutcomesAllowResume already stops it
+// flapping.
+func (s *Scheduler) commitBudgetSpent(ctx context.Context, runID string) bool {
+	if s.commitMaxRetries <= 0 {
+		return false
+	}
+	log := observe.Logger(ctx)
+	if s.commitExhaustedFn != nil {
+		abandoned, err := s.commitExhaustedFn(ctx, runID, s.commitMaxRetries)
+		if err != nil {
+			log.Error("merge retry budget check failed; run skipped this tick",
+				"run_id", runID, "max_retries", s.commitMaxRetries, "error", err)
+			return true
+		}
+		if abandoned {
+			log.Warn("merge retries exhausted; run taken off the retry loop",
+				"run_id", runID, "max_retries", s.commitMaxRetries)
+		}
+		return abandoned
+	}
+	outcomes, err := s.store.ListRepositoryMergeOutcomes(ctx, runID)
+	if err != nil {
+		log.Error("merge retry budget check failed; run skipped this tick",
+			"run_id", runID, "max_retries", s.commitMaxRetries, "error", err)
+		return true
+	}
+	if ex := domain.FirstExhaustedOutcome(outcomes, s.commitMaxRetries); ex != nil {
+		log.Error("merge retries exhausted; no exhaustion handler wired; run left in committing",
+			"run_id", runID, "repository_id", ex.RepositoryID, "attempts", ex.Attempts,
+			"max_retries", s.commitMaxRetries)
+		return true
+	}
+	return false
 }
 
 // codeRepoOutcomesAllowResume reports whether a partially-merged run

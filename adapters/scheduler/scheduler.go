@@ -20,9 +20,12 @@ type Scheduler struct {
 	commitRetryFn    CommitRetryFunc
 	commitMaxRetries int
 	commitThreshold  time.Duration
-	stepRecoveryFn   StepRecoveryFunc
-	runFailFn        RunFailFunc
-	runTerminatedFn  RunTerminatedFunc
+	// commitExhaustedFn ends a committing run whose retry budget is spent
+	// (WithCommitExhausted, INIT-023 TASK-012).
+	commitExhaustedFn CommitExhaustedFunc
+	stepRecoveryFn    StepRecoveryFunc
+	runFailFn         RunFailFunc
+	runTerminatedFn   RunTerminatedFunc
 	// now is the clock source for scan-loop time reads (run timeouts,
 	// step timeouts, orphan threshold). Production keeps the default
 	// time.Now; scenario tests inject a controllable clock via
@@ -102,4 +105,12 @@ func (s *Scheduler) Start(ctx context.Context) {
 // Stop signals the scheduler to shut down.
 func (s *Scheduler) Stop() {
 	close(s.done)
+}
+
+// CommitRetryBudget reports the configured commit retry budget
+// (WithCommitRetry's maxRetries; 0 is unbounded) and whether an exhaustion
+// handler (WithCommitExhausted) is wired — for wiring checks (INIT-023
+// TASK-012).
+func (s *Scheduler) CommitRetryBudget() (maxRetries int, exhaustionHandler bool) {
+	return s.commitMaxRetries, s.commitExhaustedFn != nil
 }

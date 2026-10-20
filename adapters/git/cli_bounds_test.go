@@ -139,8 +139,15 @@ func TestReadFile_AtLimitIsOnePreSizedBuffer(t *testing.T) {
 	ctx := context.Background()
 	const limit = 1 << 20
 	body := repeatTo(limit)
-	dir, commit := blobRepo(t, map[string][]byte{"at.md": body, "empty.md": {}})
+	dir, commit := blobRepo(t, map[string][]byte{"at.md": body, "empty.md": {}, "one.md": []byte("1")})
 	c := git.NewCLIClient(dir, git.WithMaxBlobBytes(limit))
+
+	// A read's fixed cost — one git child per step (the entry probe, the
+	// object-type check of the adversarial review of the wave 4 follow-up,
+	// the read), each with os/exec's environment copy and io.Copy's 32 KiB
+	// buffers for stdout and stderr — is not the buffer under test: it is
+	// measured on a 1-byte file and left out of the bound.
+	overhead := allocDuring(func() { _, _ = c.ReadFile(ctx, commit, "one.md") })
 
 	var got []byte
 	var err error
@@ -151,8 +158,9 @@ func TestReadFile_AtLimitIsOnePreSizedBuffer(t *testing.T) {
 	if !bytes.Equal(got, body) {
 		t.Fatalf("ReadFile returned %d bytes, not the %d-byte blob", len(got), len(body))
 	}
-	if alloc > limit+limit/4 {
-		t.Errorf("ReadFile of a %d-byte blob allocated %d KiB; want <= 1.25 MiB (one pre-sized buffer)", limit, alloc>>10)
+	if alloc > overhead+limit+limit/4 {
+		t.Errorf("ReadFile of a %d-byte blob allocated %d KiB beyond a 1-byte read's %d KiB; want <= 1.25 MiB (one pre-sized buffer)",
+			limit, (alloc-min(alloc, overhead))>>10, overhead>>10)
 	}
 
 	empty, err := c.ReadFile(ctx, commit, "empty.md")
@@ -186,13 +194,19 @@ func TestReadFile_ReadCapIsTheSecondLineOfDefence(t *testing.T) {
 	}
 }
 
-// AC 5 (I2): every error is the one the unbounded read gives. The
-// expected Kind and Message come from running today's argv
-// (`git show [eoo] <spec> --`) and classifying its stderr, so the probe
-// can never change a miss's kind or text. Since INIT-023 TASK-002 every
-// miss is "bad revision" (ErrKindNotFound) — including an unknown ref and
-// a path that exists only in the working tree, which the design (written
-// on 61994fe, before that change) listed as Permanent.
+// AC 5 (I2): every miss is the error the unbounded read gives. The
+// expected Kind and Message come from running TASK-003's argv
+// (`git show [eoo] <spec> --`) and classifying its stderr, so the blob-only
+// read (wave 4 follow-up), which builds a miss's error itself, can never
+// change its kind or text. Since INIT-023 TASK-002 every miss is "bad
+// revision" (ErrKindNotFound) — including an unknown ref and a path that
+// exists only in the working tree, which the design (written on 61994fe,
+// before that change) listed as Permanent.
+//
+// The wave 4 follow-up changed two rows on purpose: a gitlink (here one
+// whose commit is absent, which show worded "bad object") and a directory
+// (which show listed) are the not-a-file refusal now — Permanent, as the
+// dangling gitlink always was.
 func TestReadFile_ErrorKindParity(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -207,14 +221,14 @@ func TestReadFile_ErrorKindParity(t *testing.T) {
 	}
 	t3git(t, dir, nil, "add", "-A")
 	t3git(t, dir, nil, "commit", "-q", "-m", "one")
-	// A gitlink whose commit is absent: cat-file -s and git show word it
-	// differently; the show's error wins.
+	// A gitlink whose commit is absent.
 	t3git(t, dir, nil, "update-index", "--add", "--cacheinfo", "160000,"+strings.Repeat("ab", 20)+",gl.md")
 	t3git(t, dir, nil, "commit", "-q", "-m", "gitlink")
 	if err := os.WriteFile(filepath.Join(dir, "disk-only.md"), []byte("untracked\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	head := t3git(t, dir, nil, "rev-parse", "HEAD")
+	topBlob := t3git(t, dir, nil, "rev-parse", head+":top.md")
 	c := git.NewCLIClient(dir)
 
 	unbounded := func(spec string) (string, *git.GitError) {
@@ -238,7 +252,7 @@ func TestReadFile_ErrorKindParity(t *testing.T) {
 		{"unknown ref", "badref", "top.md", git.ErrKindNotFound},
 		{"unknown ref at an object id", strings.Repeat("cd", 20), "top.md", git.ErrKindNotFound},
 		{"present on disk, not at the ref", head, "disk-only.md", git.ErrKindNotFound},
-		{"gitlink to an absent commit", head, "gl.md", git.ErrKindPermanent},
+		{"ref naming a blob", topBlob, "top.md", git.ErrKindNotFound},
 	} {
 		_, err := c.ReadFile(ctx, tc.ref, tc.path)
 		ge, ok := err.(*git.GitError)
@@ -261,18 +275,69 @@ func TestReadFile_ErrorKindParity(t *testing.T) {
 		}
 	}
 
-	// A tree path keeps today's `git show` listing, byte for byte.
-	got, err := c.ReadFile(ctx, head, "docs")
-	if err != nil {
-		t.Fatalf("ReadFile of a tree path: %v", err)
+	// A gitlink and a directory: show failed on the one ("bad object",
+	// Permanent) and listed the other; both are the not-a-file refusal.
+	if _, want := unbounded(head + ":gl.md"); want == nil || want.Kind != git.ErrKindPermanent {
+		t.Fatalf("fixture: show of the dangling gitlink = %v, want a Permanent failure", want)
 	}
-	want, gerr := unbounded(head + ":docs")
-	if gerr != nil {
-		t.Fatal(gerr)
+	if listing, want := unbounded(head + ":docs"); want != nil || !strings.Contains(listing, "a.md") {
+		t.Fatalf("fixture: show of the tree path = %q, %v, want its listing", listing, want)
 	}
-	if string(got) != want {
-		t.Fatalf("tree path output:\n got %q\nwant %q", got, want)
+	for _, tc := range []struct{ path, typ string }{{"gl.md", git.TreeEntryCommit}, {"docs", git.TreeEntryTree}} {
+		got, err := c.ReadFile(ctx, head, tc.path)
+		assertNotBlob(t, tc.path, got, err, head, tc.path, tc.typ)
 	}
+}
+
+// assertNotBlob checks ReadFile's not-a-file refusal (wave 4 follow-up)
+// of a directory or a gitlink entry: no content, the direct
+// *git.GitError{Permanent, "read_file", NotBlobMessage} wrapping a
+// *git.NotBlobError of the entry's type with FileEntry false, and never a
+// size refusal or a miss.
+func assertNotBlob(t *testing.T, label string, got []byte, err error, ref, path, typ string) {
+	t.Helper()
+	assertNotBlobObject(t, label, got, err, ref, path, typ, false)
+}
+
+// assertNotBlobObject is assertNotBlob for either shape of the refusal:
+// fileEntry is true for a file entry that records an object that is not a
+// blob (typ is then that object's own type; adversarial review of the
+// wave 4 follow-up), false for a directory or a gitlink entry.
+func assertNotBlobObject(t *testing.T, label string, got []byte, err error, ref, path, typ string, fileEntry bool) {
+	t.Helper()
+	if got != nil {
+		t.Errorf("%s: ReadFile returned %d bytes (%q), want none", label, len(got), truncateForTest(got))
+	}
+	ge, ok := err.(*git.GitError)
+	if !ok {
+		t.Fatalf("%s: err = %T %v, want a direct *git.GitError", label, err, err)
+	}
+	if ge.Kind != git.ErrKindPermanent || ge.IsRetryable() || ge.Op != "read_file" || ge.Message != git.NotBlobMessage {
+		t.Errorf("%s: %+v, want {Permanent read_file %q}", label, ge, git.NotBlobMessage)
+	}
+	var nb *git.NotBlobError
+	if !errors.Is(err, git.ErrNotBlob) || !errors.As(err, &nb) {
+		t.Fatalf("%s: %v does not match ErrNotBlob / *NotBlobError", label, err)
+	}
+	if nb.Ref != ref || nb.Path != path || nb.Type != typ || nb.FileEntry != fileEntry {
+		t.Errorf("%s: NotBlobError = %+v, want {%q %q %q FileEntry:%v}", label, nb, ref, path, typ, fileEntry)
+	}
+	if fileEntry && !strings.Contains(nb.Error(), typ) {
+		t.Errorf("%s: NotBlobError text %q does not name the recorded object's type %q", label, nb.Error(), typ)
+	}
+	if errors.Is(err, git.ErrBlobTooLarge) || errors.Is(err, git.ErrOutputTooLarge) {
+		t.Errorf("%s: %v also matches a size refusal", label, err)
+	}
+	if len(path) > 4 && strings.Contains(nb.Error(), path) { // a short path is a substring of the fixed text
+		t.Errorf("%s: NotBlobError text %q prints the branch-controlled path", label, nb.Error())
+	}
+}
+
+func truncateForTest(b []byte) string {
+	if len(b) > 120 {
+		return string(b[:120]) + "…"
+	}
+	return string(b)
 }
 
 // AC 6: every other read command fails past the per-command ceiling;
@@ -589,7 +654,7 @@ func TestMutatingCommands_DrainOutput(t *testing.T) {
 	}
 
 	t3git(t, dir, nil, "checkout", "-q", "main")
-	mr, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Strategy: "fast-forward"})
+	mr, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Target: "main", Strategy: "fast-forward"})
 	mainNow := t3git(t, dir, nil, "rev-parse", "refs/heads/main")
 	if mainNow != tip {
 		t.Fatalf("refs/heads/main = %s, want the fast-forwarded tip %s", mainNow, tip)
@@ -734,7 +799,7 @@ func TestMerge_TinyOutputLimitKeepsTheResult(t *testing.T) {
 	t3git(t, dir, nil, "checkout", "-q", "main")
 
 	c := git.NewCLIClient(dir, git.WithMaxOutputBytes(1))
-	mr, err := c.Merge(ctx, git.MergeOpts{Source: "feature"})
+	mr, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Target: "main"})
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
@@ -955,7 +1020,7 @@ func TestCommands_RunUnderTheirClassEnvironment(t *testing.T) {
 		{"Checkout", func() error { return c.Checkout(ctx, "n1") }},
 		{"WriteAndStageFile", func() error { return c.WriteAndStageFile(ctx, "h.md", "three\n") }},
 		{"Commit", func() error { _, err := c.Commit(ctx, git.CommitOpts{Message: "three"}); return err }},
-		{"Merge", func() error { _, err := c.Merge(ctx, git.MergeOpts{Source: "feature"}); return err }},
+		{"Merge", func() error { _, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Target: "n1"}); return err }},
 		{"Push", func() error { return c.Push(ctx, "origin", "n1") }},
 		{"DeleteBranch", func() error {
 			if err := c.Checkout(ctx, "main"); err != nil {
@@ -974,7 +1039,7 @@ func TestCommands_RunUnderTheirClassEnvironment(t *testing.T) {
 	type env struct{ alloc, lcAll, language, params string }
 	readEnv := env{fmt.Sprint(alloc), "C", "", inherited + " " + cache}
 	want := map[string]env{
-		"cat-file": readEnv, "show": readEnv, "ls-tree": readEnv, "log": readEnv, "rev-parse": readEnv, "merge-base": readEnv,
+		"cat-file": readEnv, "ls-tree": readEnv, "log": readEnv, "rev-parse": readEnv, "merge-base": readEnv,
 		"diff":     {"unset", "C", "", inherited + " " + cache},
 		"show-ref": {"unset", "C", "", inherited}, // the exact branch lookup (refgrammar.go)
 		"branch":   {"unset", "POSIX", "t003", inherited}, "switch": {"unset", "POSIX", "t003", inherited},

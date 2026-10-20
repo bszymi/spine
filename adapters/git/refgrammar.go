@@ -191,7 +191,7 @@ func checkRemote(op, remote string) error {
 // failure is the classified *GitError, and the caller fails closed on
 // it — there is no DWIM fallback.
 func lookupBranch(ctx context.Context, dir, op, short string) (string, bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--hash", headsPrefix+short)
+	cmd := newGitCmd(ctx, "show-ref", "--verify", "--hash", headsPrefix+short)
 	cmd.Dir = dir
 	// "not a valid ref" is a translatable message: force the C locale so
 	// a host with a translated git still reports a missing branch as
@@ -320,7 +320,7 @@ var gitVersionPattern = regexp.MustCompile(`^git version (\d+)\.(\d+)`)
 // message, and there is deliberately no fallback argv without the
 // terminator.
 func CheckGitVersion(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "git", "version").Output()
+	out, err := newGitCmd(ctx, "version").Output()
 	if err != nil {
 		return fmt.Errorf("git version check: cannot run git: %w", err)
 	}

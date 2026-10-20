@@ -94,6 +94,30 @@ const (
 	// The event id is deterministic per (commit, reason, path). INIT-023
 	// TASK-003; architecture/event-schemas.md §4.15.
 	EventProjectionFileSkipped EventType = "projection_file_skipped"
+
+	// Governance-path guard events (ADR-016; INIT-023 TASK-006, audit F3).
+	// architecture/event-schemas.md §4.16-§4.18.
+	//
+	// EventGovernanceMergeHeld is emitted when a governed merge changes
+	// governance paths and waits for an operator decision (the run stays
+	// in committing), and when a merge's post-merge assertion refuses it
+	// (post_merge: true). Payload: run_id, task_path, bound_sha, paths
+	// (capped), path_count, exempt_paths, stale_approval_sha, post_merge.
+	// The event id is deterministic per bound commit and hold episode, so
+	// re-evaluation on every scheduler tick emits it once.
+	EventGovernanceMergeHeld EventType = "governance.merge_held"
+	// EventGovernanceMergeDecided is emitted when an operator approves or
+	// rejects a held merge. Payload: run_id, bound_sha, decision
+	// (approved | rejected), actor_id, actor_role, reason, paths,
+	// path_count.
+	EventGovernanceMergeDecided EventType = "governance.merge_decided"
+	// EventBranchProtectionRemovalRefused is emitted when the projection
+	// refuses to install a branch-protection config that removes
+	// protection from the authoritative branch without a database record
+	// of an operator act that changed the config; the previous rules stay
+	// installed. Payload: branch, installed_kinds, candidate_kinds,
+	// head_commit, installed_source_commit, records_checked.
+	EventBranchProtectionRemovalRefused EventType = "branch_protection.removal_refused"
 )
 
 // Event represents a domain or operational event emitted by the system.

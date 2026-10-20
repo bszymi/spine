@@ -223,6 +223,8 @@ The full directory layout for a run with three affected repositories:
 
 Committing under the primary repo satisfies AC "Evidence is auditable from primary-repo history" — every state change to evidence is a Git commit visible in the ledger.
 
+> **Governance-path guard carve-out ([ADR-016](/architecture/adr/ADR-016-governance-path-guard.md); INIT-023 TASK-006).** `/.spine/` is a guarded governance path: a governed merge that changes it waits for an operator approval. A run's **own** evidence directory, `/.spine/runs/<its run_id>/evidence/` (byte-exact), is excused when the deployment enables the carve-out (`spine serve` does), so evidence written under this convention never holds a run. Another run's evidence directory, and any other path under `/.spine/runs/<run_id>/`, stays guarded: writing it would forge that run's evidence.
+
 ### 6.2 Run-Branch Artifact Variant
 
 Producers MAY also generate evidence as an artifact on the run branch (in the relevant code repo) before the merge step. This is appropriate when the producer is the runner that just completed the work and the primary repo's evidence file is written from the run-branch artifact during the merge step.

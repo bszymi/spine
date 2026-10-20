@@ -1,0 +1,416 @@
+//go:build integration
+
+package store_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
+)
+
+// INIT-023 TASK-008 AC 8: the conditional step-execution write and the
+// conditional run-timeout write.
+
+func casFixture(t *testing.T) (*store.PostgresStore, context.Context, string) {
+	t.Helper()
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	runID := fmt.Sprintf("run-t008-cas-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_ = s.ExecRaw(ctx, `DELETE FROM runtime.step_executions WHERE run_id = $1`, runID)
+		_ = s.ExecRaw(ctx, `DELETE FROM runtime.runs WHERE run_id = $1`, runID)
+	})
+	if err := s.CreateRun(ctx, &domain.Run{RunID: runID, TaskPath: "tasks/t.md", WorkflowPath: "workflows/w.yaml",
+		WorkflowID: "w", WorkflowVersion: "v1", Status: domain.RunStatusActive, TraceID: "trace-" + runID,
+		CreatedAt: time.Now().UTC().Truncate(time.Microsecond)}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	return s, ctx, runID
+}
+
+func casExec(t *testing.T, s *store.PostgresStore, ctx context.Context, runID, stepID string, st domain.StepExecutionStatus, actorID string) *domain.StepExecution {
+	t.Helper()
+	e := &domain.StepExecution{
+		ExecutionID: runID + "-" + stepID + "-1", RunID: runID, StepID: stepID,
+		Status: st, ActorID: actorID, Attempt: 1, CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
+	}
+	if err := s.CreateStepExecution(ctx, e); err != nil {
+		t.Fatalf("create step execution: %v", err)
+	}
+	return e
+}
+
+// utcExec returns a copy of e with every timestamp in UTC, so rows read
+// back from PostgreSQL (session time zone) compare with values built here.
+func utcExec(e domain.StepExecution) domain.StepExecution {
+	utc := func(p *time.Time) *time.Time {
+		if p == nil {
+			return nil
+		}
+		u := p.UTC()
+		return &u
+	}
+	e.CreatedAt = e.CreatedAt.UTC()
+	e.StartedAt, e.CompletedAt, e.RetryAfter = utc(e.StartedAt), utc(e.CompletedAt), utc(e.RetryAfter)
+	return e
+}
+
+func TestTransitionStepExecution_AppliesOnMatch(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	e := casExec(t, s, ctx, runID, "execute", domain.StepStatusInProgress, "actor-a")
+
+	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	completed := time.Now().UTC().Truncate(time.Microsecond)
+	retry := completed.Add(time.Hour)
+	want := *e
+	want.Status = domain.StepStatusCompleted
+	want.OutcomeID = "done"
+	want.StartedAt = &started
+	want.CompletedAt = &completed
+	want.RetryAfter = &retry
+	want.ErrorDetail = &domain.ErrorDetail{Classification: domain.FailurePermanent, Message: "m", StepID: "execute"}
+	want.EligibleActorIDs = []string{"actor-a", "actor-c"}
+	want.ActorID = "actor-c" // every column of the update set is written
+
+	applied, err := s.TransitionStepExecution(ctx, &want, domain.StepStatusInProgress, "actor-a")
+	if err != nil || !applied {
+		t.Fatalf("TransitionStepExecution = (%v, %v), want (true, nil)", applied, err)
+	}
+	got, err := s.GetStepExecution(ctx, e.ExecutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(utcExec(*got), utcExec(want)) {
+		t.Fatalf("row after the conditional write:\n got %+v\nwant %+v", *got, want)
+	}
+
+	// The blind update writes the same column set: the same values through
+	// UpdateStepExecution read back identically.
+	e2 := casExec(t, s, ctx, runID, "review", domain.StepStatusInProgress, "actor-a")
+	want2 := want
+	want2.ExecutionID, want2.StepID, want2.CreatedAt = e2.ExecutionID, e2.StepID, e2.CreatedAt
+	if err := s.UpdateStepExecution(ctx, &want2); err != nil {
+		t.Fatal(err)
+	}
+	got2, err := s.GetStepExecution(ctx, e2.ExecutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(utcExec(*got2), utcExec(want2)) {
+		t.Fatalf("UpdateStepExecution and TransitionStepExecution write different columns:\n got %+v\nwant %+v", *got2, want2)
+	}
+}
+
+func TestTransitionStepExecution_MissesOnMismatch(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	bound := casExec(t, s, ctx, runID, "execute", domain.StepStatusAssigned, "actor-a")
+	unbound := casExec(t, s, ctx, runID, "review", domain.StepStatusWaiting, "")
+
+	for _, tc := range []struct {
+		name   string
+		exec   *domain.StepExecution
+		status domain.StepExecutionStatus
+		actor  string
+	}{
+		{"status mismatch", bound, domain.StepStatusInProgress, "actor-a"},
+		{"actor mismatch", bound, domain.StepStatusAssigned, "actor-b"},
+		{"empty expectation vs bound actor", bound, domain.StepStatusAssigned, ""},
+		{"actor expectation vs NULL actor", unbound, domain.StepStatusWaiting, "actor-a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before, err := s.GetStepExecution(ctx, tc.exec.ExecutionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := *before
+			w.Status = domain.StepStatusCompleted
+			w.OutcomeID = "stale"
+			w.ActorID = "actor-x"
+			applied, err := s.TransitionStepExecution(ctx, &w, tc.status, tc.actor)
+			if err != nil || applied {
+				t.Fatalf("TransitionStepExecution = (%v, %v), want (false, nil)", applied, err)
+			}
+			after, err := s.GetStepExecution(ctx, tc.exec.ExecutionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("a missed write changed the row: %+v -> %+v", before, after)
+			}
+		})
+	}
+
+	// NULL and '' both mean "no actor": a row whose actor_id is '' (an
+	// embedder fixture writing the column directly) matches "".
+	if err := s.ExecRaw(ctx, `UPDATE runtime.step_executions SET actor_id = '' WHERE execution_id = $1`, unbound.ExecutionID); err != nil {
+		t.Fatal(err)
+	}
+	w := *unbound
+	w.Status = domain.StepStatusAssigned
+	w.ActorID = "actor-a"
+	if applied, err := s.TransitionStepExecution(ctx, &w, domain.StepStatusWaiting, ""); err != nil || !applied {
+		t.Fatalf("'' actor vs empty expectation = (%v, %v), want (true, nil)", applied, err)
+	}
+}
+
+func TestTransitionStepExecution_MissingRow(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	applied, err := s.TransitionStepExecution(ctx, &domain.StepExecution{
+		ExecutionID: runID + "-ghost-1", RunID: runID, StepID: "ghost", Status: domain.StepStatusCompleted,
+	}, domain.StepStatusInProgress, "actor-a")
+	var se *domain.SpineError
+	if applied || !errors.As(err, &se) || se.Code != domain.ErrNotFound {
+		t.Fatalf("missing row = (%v, %v), want (false, ErrNotFound)", applied, err)
+	}
+}
+
+func TestTransitionStepExecution_OneOfTwoRacersApplies(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	for round := 0; round < 20; round++ {
+		stepID := fmt.Sprintf("race%d", round)
+		e := casExec(t, s, ctx, runID, stepID, domain.StepStatusInProgress, "actor-a")
+		var wg sync.WaitGroup
+		results := make([]bool, 2)
+		errs := make([]error, 2)
+		for i := range results {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				w := *e
+				w.Status = domain.StepStatusCompleted
+				w.OutcomeID = fmt.Sprintf("outcome-%d", i)
+				results[i], errs[i] = s.TransitionStepExecution(ctx, &w, domain.StepStatusInProgress, "actor-a")
+			}(i)
+		}
+		wg.Wait()
+		if errs[0] != nil || errs[1] != nil {
+			t.Fatalf("round %d: errors %v / %v", round, errs[0], errs[1])
+		}
+		if results[0] == results[1] {
+			t.Fatalf("round %d: applied = %v / %v, want exactly one", round, results[0], results[1])
+		}
+		got, err := s.GetStepExecution(ctx, e.ExecutionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		winner := 0
+		if results[1] {
+			winner = 1
+		}
+		if got.OutcomeID != fmt.Sprintf("outcome-%d", winner) {
+			t.Fatalf("round %d: stored outcome %q, want the winner's outcome-%d", round, got.OutcomeID, winner)
+		}
+	}
+}
+
+func TestTransitionRunStatusAt(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	at := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	// A miss: the run is not in the expected status. Nothing changes.
+	applied, err := s.TransitionRunStatusAt(ctx, runID, domain.RunStatusCommitting, domain.RunStatusCancelled, at)
+	if err != nil || applied {
+		t.Fatalf("miss = (%v, %v), want (false, nil)", applied, err)
+	}
+	run, err := s.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != domain.RunStatusActive || run.CompletedAt != nil {
+		t.Fatalf("a missed write changed the run: status=%s completed_at=%v", run.Status, run.CompletedAt)
+	}
+
+	// A hit stamps the supplied completed_at.
+	applied, err = s.TransitionRunStatusAt(ctx, runID, domain.RunStatusActive, domain.RunStatusCancelled, at)
+	if err != nil || !applied {
+		t.Fatalf("hit = (%v, %v), want (true, nil)", applied, err)
+	}
+	run, err = s.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != domain.RunStatusCancelled || run.CompletedAt == nil || !run.CompletedAt.Equal(at) {
+		t.Fatalf("after the hit: status=%s completed_at=%v, want cancelled at %v", run.Status, run.CompletedAt, at)
+	}
+
+	// A missing run is a miss, not an error (TransitionRunStatus's contract).
+	if applied, err := s.TransitionRunStatusAt(ctx, runID+"-ghost", domain.RunStatusActive, domain.RunStatusCancelled, at); err != nil || applied {
+		t.Fatalf("missing run = (%v, %v), want (false, nil)", applied, err)
+	}
+}
+
+// TransitionCurrentStep (codex review round 2): the conditional cursor move
+// crash recovery uses.
+func TestTransitionCurrentStep(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	if err := s.UpdateCurrentStep(ctx, runID, "execute"); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := s.TransitionCurrentStep(ctx, runID, "review", "publish"); err != nil || applied {
+		t.Fatalf("wrong from = (%v, %v), want (false, nil)", applied, err)
+	}
+	if applied, err := s.TransitionCurrentStep(ctx, runID, "execute", "review"); err != nil || !applied {
+		t.Fatalf("hit = (%v, %v), want (true, nil)", applied, err)
+	}
+	run, err := s.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.CurrentStepID != "review" {
+		t.Fatalf("cursor = %q, want review", run.CurrentStepID)
+	}
+	// Not active: no move.
+	if err := s.UpdateRunStatus(ctx, runID, domain.RunStatusCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := s.TransitionCurrentStep(ctx, runID, "review", "publish"); err != nil || applied {
+		t.Fatalf("cancelled run = (%v, %v), want (false, nil)", applied, err)
+	}
+	if applied, err := s.TransitionCurrentStep(ctx, runID+"-ghost", "review", "publish"); err != nil || applied {
+		t.Fatalf("missing run = (%v, %v), want (false, nil)", applied, err)
+	}
+}
+
+// Review round 1 (codex): the conditional branch-cursor move a
+// divergence-branch recovery uses. Only current_step_id is written, only
+// while the branch is open and at the expected step (NULL matching "");
+// a closed, moved or missing branch is (false, nil) and unchanged.
+func TestTransitionBranchCursor(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	divID, branchID := "div-t008", runID+"-b1"
+	t.Cleanup(func() {
+		_ = s.ExecRaw(ctx, `DELETE FROM runtime.branches WHERE run_id = $1`, runID)
+		_ = s.ExecRaw(ctx, `DELETE FROM runtime.divergence_contexts WHERE run_id = $1`, runID)
+	})
+	if err := s.CreateDivergenceContext(ctx, &domain.DivergenceContext{DivergenceID: divID, RunID: runID,
+		Status: domain.DivergenceStatusActive, DivergenceMode: domain.DivergenceModeStructured}); err != nil {
+		t.Fatalf("create divergence: %v", err)
+	}
+	if err := s.CreateBranch(ctx, &domain.Branch{BranchID: branchID, RunID: runID, DivergenceID: divID,
+		Status: domain.BranchStatusPending, ArtifactsProduced: []string{"a.md"}}); err != nil {
+		t.Fatalf("create branch: %v", err)
+	}
+	get := func() *domain.Branch {
+		t.Helper()
+		b, err := s.GetBranch(ctx, branchID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	// NULL cursor matches "".
+	if applied, err := s.TransitionBranchCursor(ctx, branchID, "", "draft"); err != nil || !applied {
+		t.Fatalf("NULL → draft = (%v, %v), want (true, nil)", applied, err)
+	}
+	if applied, err := s.TransitionBranchCursor(ctx, branchID, "review", "polish"); err != nil || applied {
+		t.Fatalf("wrong from = (%v, %v), want (false, nil)", applied, err)
+	}
+	if b := get(); b.CurrentStepID != "draft" {
+		t.Fatalf("cursor = %q after a miss, want draft", b.CurrentStepID)
+	}
+	if applied, err := s.TransitionBranchCursor(ctx, branchID, "draft", "polish"); err != nil || !applied {
+		t.Fatalf("hit = (%v, %v), want (true, nil)", applied, err)
+	}
+	b := get()
+	if b.CurrentStepID != "polish" || b.Status != domain.BranchStatusPending || len(b.ArtifactsProduced) != 1 {
+		t.Fatalf("branch = %+v; want cursor polish and every other column untouched", b)
+	}
+
+	// Closed: no move, and the stored status is not rewritten.
+	done := time.Now().UTC().Truncate(time.Microsecond)
+	b.Status, b.CompletedAt = domain.BranchStatusCompleted, &done
+	if err := s.UpdateBranch(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := s.TransitionBranchCursor(ctx, branchID, "polish", "end"); err != nil || applied {
+		t.Fatalf("completed branch = (%v, %v), want (false, nil)", applied, err)
+	}
+	if b := get(); b.Status != domain.BranchStatusCompleted || b.CurrentStepID != "polish" {
+		t.Fatalf("completed branch changed: %+v", b)
+	}
+	if applied, err := s.TransitionBranchCursor(ctx, branchID+"-ghost", "polish", "end"); err != nil || applied {
+		t.Fatalf("missing branch = (%v, %v), want (false, nil)", applied, err)
+	}
+}
+
+// TestDeleteAssignment: the removal of a lost claim's row (INIT-023
+// TASK-008 review round 2, codex). It deletes only the row that still
+// names the execution and the actor, in any status. Deleting nothing is
+// not an error, and once the row is gone the same deterministic id can be
+// created again. Under a cancelled row that id collided on the primary
+// key, so the actor could never claim that execution again.
+func TestDeleteAssignment(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	t.Cleanup(func() { // runs before casFixture's cleanup (LIFO): rows reference the run
+		_ = s.ExecRaw(ctx, `DELETE FROM runtime.actor_assignments WHERE run_id = $1`, runID)
+	})
+	e := casExec(t, s, ctx, runID, "execute", domain.StepStatusWaiting, "")
+	other := casExec(t, s, ctx, runID, "review", domain.StepStatusWaiting, "")
+	id := "claim-" + e.ExecutionID + "-actor-a"
+	create := func(t *testing.T) {
+		t.Helper()
+		if err := s.CreateAssignment(ctx, &domain.Assignment{AssignmentID: id, RunID: runID, ExecutionID: e.ExecutionID,
+			ActorID: "actor-a", Status: domain.AssignmentStatusActive, AssignedAt: time.Now().UTC()}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	exists := func(t *testing.T) bool {
+		t.Helper()
+		_, err := s.GetAssignment(ctx, id)
+		if err == nil {
+			return true
+		}
+		var se *domain.SpineError
+		if errors.As(err, &se) && se.Code == domain.ErrNotFound {
+			return false
+		}
+		t.Fatalf("get %s: %v", id, err)
+		return false
+	}
+
+	create(t)
+	for _, miss := range []struct{ name, exec, actor string }{
+		{"another actor", e.ExecutionID, "actor-b"},
+		{"another execution", other.ExecutionID, "actor-a"},
+	} {
+		if err := s.DeleteAssignment(ctx, id, miss.exec, miss.actor); err != nil {
+			t.Fatalf("%s: %v", miss.name, err)
+		}
+		if !exists(t) {
+			t.Fatalf("%s: the row was deleted although it names %s / actor-a", miss.name, e.ExecutionID)
+		}
+	}
+	if err := s.DeleteAssignment(ctx, id, e.ExecutionID, "actor-a"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if exists(t) {
+		t.Fatal("the row survived its delete")
+	}
+	if err := s.DeleteAssignment(ctx, id, e.ExecutionID, "actor-a"); err != nil {
+		t.Fatalf("deleting nothing: %v, want nil", err)
+	}
+
+	// The same id is free again: the actor's next claim does not collide.
+	create(t)
+	// A row a terminating cancel already closed goes too.
+	if err := s.UpdateAssignmentStatus(ctx, id, domain.AssignmentStatusCancelled, timePtr(time.Now().UTC())); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if err := s.DeleteAssignment(ctx, id, e.ExecutionID, "actor-a"); err != nil {
+		t.Fatalf("delete cancelled: %v", err)
+	}
+	if exists(t) {
+		t.Fatal("a cancelled row survived its delete")
+	}
+	if err := s.DeleteAssignment(ctx, "claim-ghost", e.ExecutionID, "actor-a"); err != nil {
+		t.Fatalf("missing row: %v, want nil", err)
+	}
+}

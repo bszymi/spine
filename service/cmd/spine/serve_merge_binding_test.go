@@ -35,7 +35,7 @@ func TestServeWiring_EnablesMergeBinding(t *testing.T) {
 
 	st := newTimeoutStore()
 	_, wfProvider := buildWorkflowResolver(st, gitClient)
-	orch := buildOrchestrator(st, wfProvider, gitClient, events, q, nil, nil, engine.StrictStepEntryPolicy(), observe.Logger(ctx))
+	orch := buildOrchestrator(st, wfProvider, gitClient, events, q, nil, nil, engine.StrictStepEntryPolicy(), nil, observe.Logger(ctx))
 	if orch == nil {
 		t.Fatal("buildOrchestrator returned nil")
 	}

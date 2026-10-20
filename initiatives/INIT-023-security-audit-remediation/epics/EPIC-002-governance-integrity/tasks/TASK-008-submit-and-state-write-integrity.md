@@ -2,10 +2,10 @@
 id: TASK-008
 type: Task
 title: "Submit ownership, step-output evidence and compare-and-swap state writes"
-status: Pending
+status: In Progress
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-19
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -488,7 +488,7 @@ the store ever stops satisfying the port. The standalone store passed to `engine
 | `activateInternalStep` (`handlers.go:117`) | Return the conflict. The handler (`:135`) is **not** invoked, so a concurrent activation cannot run the merge handler twice. |
 | `advancePublishStepIfAny` (`handlers.go:199`) | Return nil (a sibling attempt won). No `step_completed`, no route-back. This matches the comment at `:173-177`. |
 | `AssignStep` (`assign.go:70`), `AcknowledgeStep` (`acknowledge.go:70`), `ReleaseStep` (`release.go:76`) | Return the conflict. |
-| `ClaimStep` (`claim.go:169`) | Return the conflict **and** cancel the assignment row it created at `:158-163` (`UpdateAssignmentStatus(cancelled)`). Otherwise the active-assignment unique index blocks every later claim. |
+| `ClaimStep` (`claim.go:169`) | Return the conflict **and** remove the assignment row it created at `:158-163`. It must not stay active, or the active-assignment unique index blocks every later claim. It must not stay cancelled either, or TASK-007's separation-of-duties ledger and prior-holder re-offer read it as a binding. With the optional `engine.AssignmentRowDeleter` it is deleted; without the port it is cancelled (`UpdateAssignmentStatus(cancelled)`). *Amended in review round 2 (Deviation 18); this cell first said "cancel the assignment row".* |
 | `recordGitConflictOnStep` (`merge.go:503`) | Log, as today. |
 | Any step write TASK-007 adds (for example closing executions in `CancelRun`) | Goes through the helper. A miss means the step already finished, so skip it. |
 
@@ -589,6 +589,7 @@ type BranchChange struct {
 	ChangedPaths   *int   `json:"changed_paths,omitempty"`   // 0 when unchanged; n when diffed; nil otherwise
 	Reason         string `json:"reason,omitempty"`          // head_sha_unrecorded | no_previous_sha |
 	                                                          // diff_failed:<git.ErrorKind> | divergence_branch | no_run_branch
+	                                                          // | head_moved_tree_unchanged (on unchanged; Deviation 17)
 }
 
 type StepOutputEvidence struct {
@@ -655,7 +656,12 @@ type StepOutputEvidence struct {
 - `HeadSHA == PreviousSHA` → `unchanged`, `ChangedPaths = 0`. **No git call.**
 - Otherwise call `o.git.Diff(ctx', PreviousSHA, HeadSHA)` (`core/engine/interfaces.go:167`) under a
   10 s `context.WithTimeout`:
-  - success → `changed` with `len(diffs)`;
+  - success with at least one entry → `changed` with `len(diffs)`;
+  - success with no entry → `unchanged`, `ChangedPaths = 0`, `reason: head_moved_tree_unchanged`
+    (the head moved but the tree did not: an empty commit, or a change and its revert). It is
+    therefore flagged by the rule below. *Amended in review round 2 (Deviation 17); this bullet
+    first read "success → `changed` with `len(diffs)`", and review round 1 finding 4 changed the
+    code;*
   - error → `unknown` with `diff_failed:<kind>`. The kind is from `errors.As(*git.GitError)`, else
     `error`. The raw message is logged, never put in the event.
 - `RequiredOutputsUnchanged = len(stepDef.RequiredOutputs) > 0 && Status == "unchanged"`. When it is
@@ -1298,3 +1304,695 @@ labelled "design check".
 
 ## Implementation Notes
 
+Implemented on branch `init/INIT-023-TASK-008-submit-and-state-write-integrity`, from Spine local
+`main` `ae513dca` (origin `61994fe` + the INIT-023 scaffold + waves 1–3 + the codex 6.1
+catch-up). Diff base: `git diff main...HEAD`. Status stays In Progress; the orchestrator closes it
+after merge.
+
+### Orchestrator rulings recorded (owner questions take their defaults, pending the owner)
+
+- Scope: audit P3-17 (Spine half), P3-19 and P3-24, as designed, with every design-check note
+  applied. Built on TASK-005's head capture and `commit_meta` contract (b911c04: the captured
+  binding is written before the step completes, in one write) and on TASK-007's opt-in
+  `StepEntryPolicy`.
+- **OQ1** (default, pending owner): `required_outputs` unchanged is **flagged only** —
+  `required_outputs_unchanged`, a Warn log and the run-detail evidence. Nothing is refused.
+- **OQ2** (default, pending owner): a cancel that loses the race to a merge start returns **409**
+  (the state machine's `ErrConflict` from `committing`).
+- **OQ3** (default, pending owner): SMP opts into the step-execution compare-and-swap in **SMP
+  TASK-011**. Here the port is opt-in: a store without it keeps the blind `UpdateStepExecution`.
+- **OQ4** (default, pending owner): failing closed on an empty `SubmitRequest.ActorID` is a
+  **follow-up after SMP TASK-011**, not this task (SMP sends no `ActorID` yet).
+- **OQ5** (default, pending owner): run-detail evidence through the reserved
+  `spine.evidence.<execution_id>` `commit_meta` keys, written in TASK-005's single binding write
+  (`headBinding.extra` → `mergeCommitMeta`), never a second whole-map replace. TASK-005's recovery
+  per-run lock (`lockRecoveryBinding`) is untouched: it still serialises only the bound recovery
+  ledger; the step write does not take it (KNOWN-LIMITATIONS "Engine State Writes …" 5).
+
+### What was built
+
+| Commit | Content |
+|---|---|
+| `28da58bc` | `adapters/store`: `TransitionStepExecution` (shared `stepExecUpdateSet` / `stepExecUpdateArgs` with `UpdateStepExecution`; `AND status = $10 AND COALESCE(actor_id,'') = $11`; on 0 rows an `EXISTS` probe → `ErrNotFound` or `(false, nil)`) and `TransitionRunStatusAt` (`UpdateRunStatusAt` + `AND status = $4`); integration tests (AC 8). |
+| `1df5cb54` | `core/engine/state_cas.go` (`transitionRun` with `runCASAttempts = 3`, `ErrRunStateChanged`, the optional `StepExecutionTransitioner`, `stepState`/`stateOf`, `writeStepExecution`, `ErrStepStateChanged`); every run mutator on `transitionRun` / `TransitionRunStatus`; every engine step writer on `writeStepExecution` with the §3 miss behaviour; `SubmitRequest.ActorID`, `StepResult.ActorID`, the unexported `StepResult.expect` snapshot handoff, `checkSubmitter`, the §3a terminal guard, `lostSubmitRace` (D9 mapping), `RecoverCompletedStep`; `ReleaseStep` owner guard; the consumer's `ActorID` and conflict mapping; tests (`state_cas_test.go`, `submit_ownership_test.go`, fixture `state_cas_fixture_test.go`). Two TASK-005 tests that pinned the old re-route adapted (Deviation 2). |
+| `8b8aeeec` | `core/engine/output_evidence.go` (`BranchChange`, `StepOutputEvidence`, constants, `branchChangeAtSubmit`, `requiredOutputsUnchanged`, `evidenceMetaEntry`, the `step_completed` payload and per-execution id, `Orchestrator.StepOutputEvidence`); `headBinding.extra` in `commitmeta.go`; `emitEventAs`; the publish step's base payload; tests (`output_evidence_test.go`). |
+| `4ade922d` | Standalone: gateway forwards `ResultSubmission.ActorID` (also with no store wired), cancel fallback and fallback assigner conditional (409), `StepOutputEvidenceReader` + `step_output_evidence` on `GET /runs/{run_id}`; `resultAdapter` forwards `ActorID`; compile-time `var _ engine.StepExecutionTransitioner = (*store.PostgresStore)(nil)` in `serve_wiring.go`; both recovery callbacks on `RecoverCompletedStep`; scheduler timeout / run-timeout / startup recovery conditional; `core/actor` `ProcessResult` guards; tests, including a PostgreSQL scenario test. |
+| `bef50715` | Docs: `event-schemas.md` §4.2 and the emitter table, `engine-state-machine.md` "Concurrent writes" + the completed-step recovery row, `workflow-definition-format.md` §5.3 implementation status, `KNOWN-LIMITATIONS.md` (two sections + the TASK-007 bullet), `api/spec.yaml`, `CHANGELOG.md` ("Changed (embedders)"), `docs/integration-guide.md` §10. |
+| `be492156` | gocritic findings on the new code (no behaviour change). |
+| `5b7ce6d6`, `e190b4af`, `58bcfd17`, `f1614a9c`, `d88a6f88`, `5921c180` | Review round 1 and codex round 8 (see "Review round 1"): evidence judged on the tree and the Warn after the applied write; the same-actor acknowledge answer and the consumer's in-process guard; the gateway and scenario test fixes; docs; the CI step; the conditional branch-cursor move (`engine.BranchCursorTransitioner`, `(*store.PostgresStore).TransitionBranchCursor`). |
+| `1ce429b7`, `55d2a366` | Review round 2 and codex round 10 (see "Review round 2"): a lost claim removes its assignment row (`engine.AssignmentRowDeleter`, `(*store.PostgresStore).DeleteAssignment`, asserted in `serve_wiring.go`; `claim_lost_race_test.go`, `TestDeleteAssignment` in CI's TASK-008 step); docs. |
+| `c8b56b34`, `7ce1bbee`, `38b15f36`, `bd3b3c50`, `61a2b9e0`, `ccfe4ea4` | Codex rounds 1–6 fixes (see "Codex review"): recovery resumes a successor routing created but did not point the run at; the conditional cursor move (`engine.RunCursorTransitioner`, `(*store.PostgresStore).TransitionCurrentStep`); `ReleaseStep` compensation; the same-actor acknowledgment is not a conflict; a submit retry keeps its evidence comparison point; the consumer finishes a completed step's incomplete routing and treats only resolved executions as done; branch-aware recovery; recovery claims the routing (pinned successor attempt, create first). |
+
+### Per-AC evidence
+
+| AC | Status | Evidence |
+|---|---|---|
+| 1 | done | `core/engine/submit_ownership_test.go::TestIngestResult_RefusesNonOwnerSubmitter` (committed form of PoC `…SubmitHasNoSubmitter`): `actor-b` on `actor-a`'s `in_progress` execution → `ErrForbidden`, row deep-equal to before, no `UpdateStepExecution`, no `step_completed`, no `review` execution; `ActorID` `actor-a` and `""` complete and route. Mutation M1 (`checkSubmitter` disabled) kills it. |
+| 2 | done | `TestIngestResult_NonOwnerCannotFailStep`: a non-owner submit that omits `deliverable` → 403; execution still `in_progress` with no error detail, no `execute-2`, run `active`. |
+| 3 | done | `TestSubmitOwnership_TerminalParityAndReread`: (a) foreign duplicate on a completed execution → 403; a completed execution with no actor + any `ActorID` → the idempotent response; (b) a store hook rebinds to `actor-b` between `IngestResult`'s and `SubmitStepResult`'s reads, `actor-a` submits → 403, no write, no event, no routing (with and without the capability); (c) `Consumer.executeAndSubmit` with `req.ActorID = actor-a` on an execution bound to `actor-b` → 403, untouched; a redelivered assignment for a completed step → nil; (d) the same rebind with `ActorID: ""` → `ErrConflict` wrapping `ErrStepStateChanged`, row still `actor-b`, nothing written/emitted/routed, with and without the capability. Mutation M2 (expect comparison dropped) kills (d). |
+| 4 | done | (a) `service/internal/gateway/state_cas_test.go::TestStepSubmit_ForwardsAuthenticatedActor` (capturing handler sees `ActorID: alice`), `service/cmd/spine/serve_submit_actor_test.go::TestResultAdapter_PassesActorID` (a foreign `ActorID` through `resultAdapter` → 403 from the real engine); (b) `TestStepSubmit_EngineRefusesForeignSubmitterWithoutStore`: no `Store` in `ServerConfig`, an engine-backed handler (mirrors `resultAdapter`), `alice` submits `bob`'s step → 403. Mutation M13 (gateway does not forward) kills both gateway tests. |
+| 5 | done | `TestIngestResult_NonOwnerMakesNoGitCall`: binding on, an `expected_head_sha` and (second request) a missing output; both 403 and the fake binder/`GitOperator` recorded **zero** calls. |
+| 6 | done | `core/engine/state_cas_test.go::TestCompleteRun_DoesNotResurrectCancelledRun` (committed form of PoC `…CompleteRunResurrectsCancelledRun`): a `CancelRun` committed inside `CompleteRun`'s read → final `cancelled`, 0 merges, no `run_completed`, `ErrConflict`, 0 blind writes. Mutation M3 (blind `UpdateRunStatus` restored) kills it. |
+| 7 | done | `grep -n 'store.UpdateRunStatus(' core/engine/*.go` (non-test) prints nothing. `TestRunMutators_LostRaceNeverOverwrites` (CompleteRun with and without commit, FailRun, CancelRun, PauseRun, ResumeRun, `failRunOnMergeError` through a permanent merge failure): the run stays `cancelled`, no status write, no event, no `DeleteBranch`, no `git_conflict` detail. `TestCancelRun_ReevaluatesAfterLostRace`: raced a pause → `cancelled` with exactly one `run_cancelled`; raced a merge start → `ErrConflict`, stays `committing`. Plus `TestTransitionRun_GivesUpAfterBoundedAttempts` (three attempts, `ErrRunStateChanged`) and `TestStartRunCommon_ActivationIsConditional`. Mutation M17 (blind `failRunOnMergeError`) kills the table. |
+| 8 | done | `adapters/store/postgres_steps_cas_integration_test.go` (`-tags integration`, PostgreSQL 18.6): applies on match with every column read back and equal to `UpdateStepExecution`'s write; `(false, nil)` on status, actor, empty-vs-bound and actor-vs-NULL mismatches (row unchanged); `''` and NULL both match `""`; `ErrNotFound` for a missing row; exactly one of two racing goroutines applies (20 rounds, winner's outcome stored); `TestTransitionRunStatusAt` misses, applies and stamps the supplied `completed_at`. The compile-time assertion is in `serve_wiring.go`; an overlay that renames the store method makes `go build ./service/...` fail ("does not implement engine.StepExecutionTransitioner (missing method TransitionStepExecution)"). |
+| 9 | done | `TestSubmitStepResult_DoesNotOverwriteTimedOutStep` (committed form of PoC `…SubmitOverwritesTimedOutStep`, fake with the capability): through `SubmitStepResult` → `ErrStepStateChanged`; through `IngestResult` (timeout after read 1 or 2) → `{status: failed}`, nil error; the step stays `failed`, no `review` execution, no `step_completed`. Mutation M4 (blind write) kills it. |
+| 10 | done | `grep -n 'store.UpdateStepExecution(' core/engine/*.go` (non-test) prints only the line inside `writeStepExecution` (`state_cas.go:160` at first; `:288` at review round 2). `TestStepWriters_LostRaceHasNoSideEffects` rows: SubmitStepResult auto-ack, failStepWithClassification (no retry execution, run active), ActivateStep no-actor / auto-assign (no `DeliverAssignment`, no `step_assigned`, no assignment row) / precondition persist, activateInternalStep (handler not run, run stays active), advancePublishStepIfAny (nil, no event, no route-back), AssignStep, AcknowledgeStep (no `step_started`), ReleaseStep (assignment row stays active), ClaimStep (its row cancelled; since review round 2 removed, Deviation 18), recordGitConflictOnStep, terminateLiveSteps. The terminal-write row is AC 9. Mutation M10 (lost claim keeps its row) kills the table. *Review round 2:* `claim_lost_race_test.go::TestClaimStep_LostRaceLeavesNoLedgerRow` covers four cases. Under separation of duties the lost claimant is not a run author: it claims the review, while the executing actor is refused. The prior holder's re-offer survives its own lost claim: another actor is refused, and the holder's next claim binds. Without `engine.AssignmentRowDeleter` the row is cancelled, the documented residual. A failing delete falls back to cancelling. Also `adapters/store::TestDeleteAssignment` (PostgreSQL). Mutants r42 to r45 are killed. |
+| 11 | done | `TestStepWrites_FallbackWithoutCapability`: a blind store records exactly `[exec in_progress, exec completed, review-1 waiting]` and no conditional call. The pre-existing `core/engine` suite passes; two TASK-005 tests were edited (Deviation 2). |
+| 12 | done | `adapters/scheduler/state_cas_test.go`: `TestScanTimeouts_SubmitWinsTheRace` (stays `completed`, no `step_timeout`, `TimeoutsDetected` unchanged; HEAD writes `failed` — M12 kills it), `TestScanTimeouts_ConditionalWriteApplies`, `TestScanRunTimeouts_RunMovedToCommittingIsNotCancelled` (no event, hook not fired), `TestRecoverPendingRuns_MissSkipsTheRun` (no entry step), `TestRecoverAssignedStep_MissSkips`. Gateway: `TestStoreFallbacks_LostRaceAnswers409` (cancel fallback and fallback assigner 409 after one conditional write). `core/actor/gateway_test.go::TestProcessResult_Guards` (failed / skipped not overwritten, waiting not completed, foreign actor 403, a lost race changes nothing). |
+| 13 | done | AC 10's grep covers `terminateLiveSteps`; its row in the table (a submit completed the execution inside the cancel → not overwritten). `TestSubmitRacingTerminatingCancel`: a cancel (TerminateStepsOnCancel) lands after the submit's read → the execution stays `skipped`/`run_terminated`, no `review`, no `step_completed`, run `cancelled`. |
+| 14 | done | `core/engine/output_evidence_test.go::TestStepCompleted_FlagsRequiredOutputsWithoutBranchChange` (committed form of PoC `…StepCompletedCarriesNoBranchEvidence`), real `captureHead`, binding on, fake `CommitBinder`: (a) head == baseline → exact `{spine, unchanged, head, previous=baseline, source baseline, changed_paths 0}`, flag true, 0 `Diff`; (b) `changed`, 3, flag false, one `Diff(previous, head)` (M7 kills); (c) `unknown`/`diff_failed:transient`, no count, the git message not in the event, submit succeeds; (d) attempt 2 vs the review's binding, `previous_source` `step:review:run-1-review-1`; (e) review without outputs never flagged, no `required_outputs` key (M8 kills); (f) 40 artifacts → 32, count 40, a long entry cut to a UTF-8 prefix ≤ 512 bytes; (g) binding off → `{unknown, head_sha_unrecorded}`, zero git calls, no `spine.evidence.*` written; (h) a `Diff` blocking on `ctx.Done()` → `diff_failed:timeout`, submit returns (default bound asserted 3 s); (i) the stored `spine.evidence.<id>` decodes to the event's values, in the single `commit_meta` write with the binding (M14 kills), and a workflow `commit: {spine.evidence.…}` is stripped. `TestEvidenceKeysRideTheBindingWrite` (`mergeCommitMeta` keeps earlier keys, drops non-reserved extras). *Review round 1:* (j) a moved head whose diff has no entry → `unchanged`, `changed_paths 0`, `reason head_moved_tree_unchanged`, flagged, one Warn; `output_evidence_git_test.go::TestStepOutputEvidence_EmptyCommitIsFlagged` (real `git.CLIClient`: empty commit and change+revert flagged, a real change not); `TestStepCompleted_WarnOnlyAfterTheSubmitApplied`. |
+| 15 | done | `TestStepCompleted_EventIDs`: two `execute` attempts → two ids containing their execution ids (M15 kills); `RecoverCompletedStep` re-emits the same id with `unknown`/`recovered`, and a deduplicating log keeps the original `unchanged` payload; the publish step's event carries the base fields and no `branch_change`. `TestStepCompleted_BasePayload` (every base field, `branch_id: null`, envelope actor). |
+| 16 | done | Gateway: `TestRunStatus_StepOutputEvidence` (reader with entries → key; reader error, empty, no reader → absent, 200) and `TestRunStatus_StepOutputEvidenceFromOrchestrator` (the orchestrator as `RunCanceller`; an execution without a key omitted; `casNoGit` records no call). Engine: `TestStepOutputEvidence_FromCommitMeta` (no git call; events cleared; no key → nil without loading the workflow). PostgreSQL + git: scenario `TestStepOutputEvidence_RecordedAndReadBack` (execute 1 unchanged/flagged vs baseline, review changed with 1 path, execute 2 unchanged/flagged vs the review's binding; read back after deleting the run's `runtime.event_log` rows). *Review round 1:* the scenario now subscribes `spine serve`'s `DeliverySubscriber`, so the run's three `step_completed` rows are in `runtime.event_log` and carry the same evidence; the delete removes them (asserted) and run detail is deep-equal before and after. The gateway tests assert zero git calls (`casNoGit.requireNoCall`). |
+| 17 | done | `KNOWN-LIMITATIONS.md` "Step Outputs Are Self-Attested Labels" (every shipped value with `file:line` in both corpora — re-located: `initrepo.go:518`; SMP's constant `deliverable`; the evidence fields) and "Engine State Writes and Submit Ownership: What INIT-023 TASK-008 Leaves Open"; `event-schemas.md` §4.2 (fields, per-execution id); `engine-state-machine.md` "Concurrent writes". Also `workflow-definition-format.md` §5.3, `api/spec.yaml`, `CHANGELOG.md`, `docs/integration-guide.md` §10. |
+| 18 | done | `git diff --stat main -- migrations/` is empty (0 lines); no SMP migration needed. |
+| 19 | done | SMP compatibility gate below; re-run in review round 1 with `GOFLAGS=-mod=mod`, the flag the AC names. |
+| 20 | done | Gates below. |
+| 21 | done | `TestSubmitStepResult_NeverReroutesCompletedExecution` and `TestIngestResult_LostRaceKeepsWinnerOutcome` (committed forms of the design-check PoCs), each with and without the capability: rejected stays rejected, run active, 0 merges, no `step_completed`, no new execution; through `IngestResult` → `completed`/`rejected`, nil. M5 (terminal guard deleted) kills the first; see Deviation 4 for the second. `TestRecoverCompletedStep` (routes the stored outcome with no write to the completed row; refuses a non-active run, another current step, a later execution of the same step, a successor no longer waiting, more than the successor, a non-completed execution — M16 kills). `grep -n 'SubmitStepResult(' service/cmd/spine/*.go` prints nothing. Scenario `TestCompletedStep_IsNotReRouted` (PostgreSQL). Codex-round additions (Deviation 6): `TestRecoverCompletedStep_ResumesStrandedSuccessor`, `…_DoesNotRewindAMovedCursor`, `…_DivergenceBranch`, `…_ConcurrentRecoveriesRouteOnce`, `…_BranchResumesItsOwnClaim`. |
+| 22 | done | `TestSubmitStepResult_AutoAckUnderCapability`: conditional writes are exactly `(assigned, actor-a)→in_progress` then `(in_progress, actor-a)→completed`, both applied; the step routes. M6 (pre-ack snapshot reused) kills it. |
+| 23 | done | `TestReleaseStep_OwnerGuard` (with and without the capability): `actor-a`'s stale claim on an execution bound to `actor-b` → 403, execution `(assigned, actor-b)`, assignment `active`; the owner still releases (row cancelled). The lost-race half is AC 10's ReleaseStep row. M9 kills it. |
+| 24 | done | `TestTransitionRun_StoreErrorIsNotRetried`: a `TransitionRunStatus` returning `(false, errRunNotFound)` → `CancelRun` error `errors.Is` the store's error after exactly 1 attempt. M11 (retry on error) kills it. |
+
+### Deviations and design points resolved against the real code (with reasons)
+
+1. **Ownership is checked before TASK-007's run-terminated answer in `IngestResult`.** TASK-007
+   left "this check stays first" for TASK-008's *terminal guard*, which lives in
+   `SubmitStepResult` (§3a) and does come after it; §1 places the ownership check "immediately
+   after the execution is loaded … before every later check". So a non-owner submitting to a
+   run-terminated execution gets 403 instead of TASK-007's 409 — a non-owner learns nothing about
+   the execution. Callers that send no `ActorID` (SMP today) see TASK-007's order unchanged.
+2. **Two TASK-005 tests were edited (AC 11 says none).** `merge_binding_test.go`
+   `TestRecoveryResubmitAndAssertionOrdering/recovery re-submit of a completed gate` and
+   `merge_binding_recovery_test.go` `TestBindingSurvivesAFailureAfterCompletion` were written after
+   this design and pinned `SubmitStepResult` re-routing a completed execution — exactly what §3a /
+   AC 21 remove. They now assert the refusal and use `RecoverCompletedStep`; what they protect
+   (no head resolution on recovery, reserved keys unchanged; the binding survives and the moved
+   branch is refused at the review) still holds. No other existing test changed.
+3. **Evidence is derived before the step write, not "after the §3 write is applied".** Since
+   b911c04 a captured binding is written before the terminal write, and the orchestrator ruling
+   puts the evidence key into that same write. So `SubmitStepResult` derives the evidence (with its
+   one time-boxed diff) right after `captureHead` and before the auto-acknowledge, carries it in
+   `hb.extra` through `recordStepCommitMeta` → `mergeCommitMeta`, and emits `step_completed` only
+   after the terminal write applied. A submit that then loses its compare-and-swap has written its
+   binding and evidence key like TASK-005's binding (KNOWN-LIMITATIONS "Engine State Writes …" 5);
+   `StepOutputEvidence` returns only completed executions. *Review round 1:* the derivation is now
+   side-effect free — the `required outputs declared but run branch unchanged` Warn moved after
+   the applied terminal write, next to `step_completed`, so only the persisted key is derived
+   early.
+4. **AC 21's mutation for `TestIngestResult_LostRaceKeepsWinnerOutcome`.** Deleting the terminal
+   check alone does not fail it: §3a's snapshot handoff (item 2) independently catches the
+   `IngestResult` race, because the row moved from `in_progress` to `completed` between the two
+   reads. Deleting the terminal check *and* the handoff fails it (checked with an overlay);
+   deleting the terminal check fails `TestSubmitStepResult_NeverReroutesCompletedExecution`.
+5. **`ReleaseStep` is reordered only with the store capability.** With a conditional store the step
+   is written first and the assignment row cancelled after it applied (design check); with a blind
+   store (SMP until SMP TASK-011) the original order — row first — is kept, so the call order and
+   failure modes an embedder without the capability sees are unchanged (cross-repo rule 2).
+6. **`RecoverCompletedStep` grew beyond §3a item 3 through the codex rounds.** The design says
+   "refuses when any execution of the run was created after this one" and relies on "both compute
+   the same deterministic next execution ID". Against the real code both were wrong:
+   - *Round 1:* refusing every later execution stranded a run that crashed between
+     `advanceToNextStep`'s `CreateStepExecution` and `UpdateCurrentStep` — nothing else activates
+     the successor, and an internal publish step is never claimed, so its merge never ran (before
+     this task the re-route created a second attempt and went on). Exactly one later execution that
+     is the outcome's next step on the main path, `waiting`, under the deterministic id is now
+     resumed (cursor moved, step activated).
+   - *Round 2:* that cursor move is conditional (`engine.RunCursorTransitioner`, implemented by
+     `(*store.PostgresStore).TransitionCurrentStep`, asserted in `serve_wiring.go`; a store
+     without it re-reads first), so a cursor a live submit moved on is never rewound.
+   - *Round 5:* a divergence-branch execution is recovered on its branch's cursor (the run is at
+     `divergence:<id>`), routing again, or creating the next execution when the branch cursor moved
+     but it was never created.
+   - *Round 6:* two recoveries that both pass the checks did **not** collide on the primary key:
+     the second ran `advanceToNextStep` after the first had created the successor, so
+     `nextAttempt` gave it a second attempt. Recovery now claims the routing — the attempt is
+     pinned from the listing its checks used, the successor is created first (one recovery wins
+     the primary key, the other answers a conflict), and only the creator moves the cursor
+     (conditionally) and activates it; the branch path does the same and finishes its own claim
+     when it stopped before moving the branch cursor. A live submit racing a recovery still numbers
+     its successor from its own later listing (KNOWN-LIMITATIONS "Engine State Writes …" 7).
+7. **`ActivateStep`'s precondition persist logs a lost race** and still returns `ErrPrecondition`
+   (the §3 table says "return the conflict" for all three `ActivateStep` writes): the persist is
+   best-effort detail on a refusal that is the accurate answer; the row is not written either way.
+8. **The previous head is the run's *trusted* binding** (`trustedBinding`: well-formed and naming
+   this run, DC-9), not `spine.bound_sha` verbatim; an untrusted binding falls back to the
+   baseline, as TASK-005's merge and moved-head check do. A baseline that is not a canonical
+   object id is no comparison point (`no_previous_sha`), so nothing malformed reaches `git diff`.
+9. **`ProcessResult`** refuses anything that is not `assigned`/`in_progress` (except the idempotent
+   `completed`), which covers "every terminal status" and also a `waiting`/`blocked` row that it
+   used to complete.
+10. **`RecoverCompletedStep` calls `CompleteAssignment`** (best effort), for parity with the old
+    re-route through `SubmitStepResult`: a crash before it left the assignment row active.
+11. **Line numbers re-located:** the `init-repo` seed's `workflow_body` is at
+    `service/internal/cli/initrepo.go:518`; the event log's `ON CONFLICT (event_id) DO NOTHING` is
+    `adapters/store/postgres_delivery.go:351-357`; `runtime.event_log` has no `run_id` column (the
+    scenario deletes by payload).
+12. **The design PoC `TestTASK008_PoC_SubmitOverwritesTimedOutStep` still fails on the branch** as
+    written: its fake store has no `TransitionStepExecution`, so it exercises the blind fallback,
+    which this task leaves unchanged by design (owner question 3). The committed AC 9 test uses a
+    store with the capability. The other five PoCs pass on the branch; all six fail on `main`
+    (overlay runs, below).
+13. **The queue consumer's lost-race handling** (§1 design-check note: "maps §3a's already-terminal
+    conflict to nil"): codex rounds 3–5 refined it — only an execution that is terminal on
+    re-read counts as resolved (a live moved execution keeps the error); an ownership refusal for
+    an execution already resolved by its new owner is resolved too; and for a completed execution
+    the consumer calls `RecoverCompletedStep` first, so a redelivery after a routing failure
+    finishes the routing. All dormant: the memory queue does not redeliver and `NewConsumer` has no
+    production caller.
+14. **The snapshot handoff accepts exactly one move** (codex round 3): the step's own actor
+    acknowledging it (`assigned → in_progress`, same actor) between `IngestResult`'s read and
+    `SubmitStepResult`'s, or between `SubmitStepResult`'s read and its auto-acknowledge (whose
+    compare-and-swap then misses), is not a conflict; the submit continues from the acknowledged
+    row. §3a item 2 says any difference refuses; refusing this one turned a runner's own
+    acknowledge/submit overlap into a 409 (and dropped a consumer result).
+15. **A submit retried after its terminal write failed keeps its comparison point** (codex
+    round 3): with binding on, b911c04 writes the binding (and the evidence key) before the terminal
+    write, so a retry of the same execution found its own capture as the run's binding. The retry
+    now reuses the previous head stored in `spine.evidence.<execution_id>`; without one it is
+    `unknown`/`no_previous_sha`.
+16. **`ReleaseStep` compensates a failed assignment cancel** (codex round 2): with the step
+    capability the step is written first (design check), so a failing cancel would leave an unbound
+    execution beside an active row that blocks every later claim. The step is put back,
+    conditionally, before the error is returned (KNOWN-LIMITATIONS "Engine State Writes …" 8).
+17. **A moved head whose diff has no entry is `unchanged`, not `changed`** (review round 1,
+    finding 4, `5b7ce6d6`; recorded here in review round 2). §4 said a successful diff gives
+    `changed` with `len(diffs)`, and AC 14 lists only cases (a)–(i). Against the real code that
+    let an empty commit, or a change and its revert, move the head and be recorded `changed`,
+    `changed_paths 0`, unflagged and unwarned: the step escaped the P3-19 flag without changing
+    any content. `branchChangeAtSubmit` now judges the status on the tree. A successful diff with
+    no entry gives `unchanged`, `changed_paths 0`, `reason: head_moved_tree_unchanged`
+    (`engine.EvidenceReasonTreeUnchanged`). That evidence is flagged, persisted flagged in
+    `spine.evidence.<execution_id>` and warned after the applied write. The SHAs and the reason
+    keep the move visible. A fifth status value (say `changed_tree_unchanged`) would also close
+    the gap but is not used: the flag rule
+    (`required_outputs_unchanged = declared && status == "unchanged"`) and every consumer of the
+    four-value `status` enum would have to learn it, while the content-equality meaning of
+    `unchanged` is what the flag promises. Design §4 is amended in place (the bullet says so).
+    AC 14 gains case (j): `TestStepCompleted_FlagsRequiredOutputsWithoutBranchChange` (j) with a
+    fake `Diff` returning no entry; `output_evidence_git_test.go::TestStepOutputEvidence_EmptyCommitIsFlagged`
+    on the real `git.CLIClient` (an empty commit and a change plus its revert are flagged, a real
+    change stays `changed` with 1 path); `TestStepCompleted_WarnOnlyAfterTheSubmitApplied`.
+    Mutant r30 (the zero-entry branch dropped) fails the first two. The AC 14 wording is left to
+    the owner's AC wording pass (Handoffs). Docs: `event-schemas.md` §4.2, `api/spec.yaml`,
+    KNOWN-LIMITATIONS "Step Outputs Are Self-Attested Labels" and the CHANGELOG.
+18. **A lost claim removes its assignment row instead of cancelling it** (review round 2, codex
+    round 10). The §3 table and AC 10 say the `ClaimStep` miss cancels the row it created. Against
+    TASK-007's code a cancelled `claim-<execution>-<actor>` row is not inert, because three readers
+    take it as a binding:
+    - `runAuthor`, the separation-of-duties ledger, counts claim rows in every status. So the lost
+      claimant is refused as a reviewer of a run it never wrote (the codex finding).
+    - `releasedSince`, the prior-holder re-offer, reads a `claim-<execution>-<holder>` row in any
+      status as "held and released". So a prior holder's lost claim on its re-offered rework
+      attempt opens that attempt to every other actor. This weakens `ReofferToPriorHolder`.
+    - The id is deterministic and `assignment_id` is the primary key, so that actor could never
+      claim the execution again.
+
+    The claim never bound its actor, emitted no `step_assigned` and answered an error, so the row
+    is now removed. The new optional `engine.AssignmentRowDeleter` is type-asserted on the
+    assignment store, so `engine.AssignmentStore` gains no method.
+    `(*store.PostgresStore).DeleteAssignment` deletes only while the row names that execution and
+    actor, and is asserted in `serve_wiring.go`. No schema change. Nothing grants rights from an
+    active assignment row alone: push admission keys on `step_executions.actor_id`, and
+    `ReleaseStep`'s owner guard checks the execution. So removing the row erases no right that was
+    ever exercised. The row can only be one this call created: an earlier row with the same id
+    makes `CreateAssignment` fail before the step write, so a prior binding's row is never touched.
+    Without the port, or when the delete fails, the row is cancelled as before, so no claim is
+    blocked. The three effects then remain (KNOWN-LIMITATIONS "Engine State Writes …" 11). The
+    path is reachable only together with `engine.StepExecutionTransitioner`, so SMP (blind step
+    writes) is unaffected. The closest alternatives are not used:
+    - A distinct status needs a CHECK change (schema).
+    - Writing the step first and the row after, with the capability, would trade the unique-index
+      serialisation for a compensating un-write on a failed row insert.
+
+    Tests: `TestClaimStep_LostRaceLeavesNoLedgerRow` (four sub-tests) and `TestDeleteAssignment`
+    (in CI's TASK-008 step). The AC 10 table row now asserts the removal. AC 10's wording is left to
+    the owner's pass (Handoffs).
+
+### Gates
+
+Environment: the shared PostgreSQL 18.6 container (`localhost:55630`); only `s008_*` databases were
+created (`s008_it`, `s008_scen`, `s008_reg`, `s008_scen_main`, `s008_reg_main`, `s008_ci`,
+`s008_smp_it`, `s008_spine_runtime_it`), all dropped afterwards. No role was created or dropped.
+Containers ran from the present `golang:1.26-bookworm` image (`--pull=never --rm`), none left.
+
+Every gate below was (re-)run on the final code head `ccfe4ea4`; only these notes were committed
+after it.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `lint-boundaries: OK`; OK; "engine constructed and exercised; library surface is sound." (`CancelRun` still wraps the store error) |
+| `go vet ./...`, `-tags integration ./...`, `-tags scenario ./...` | clean |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, no failure |
+| `go test -race -p 4 -count=1 ./core/engine/... ./core/actor/ ./adapters/store/ ./adapters/scheduler/ ./service/internal/gateway/ ./service/cmd/spine/` | all ok, no race |
+| `SPINE_TEST_DATABASE_URL=…/s008_it go test -tags integration -race -p 1 -count=1 -v` on the same six packages | 2733 PASS (subtests counted), 0 SKIP; 1 FAIL: `TestRunModeDatabaseDefault` (known pre-existing, identical on `main`) |
+| `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (`s008_scen`, registry `s008_reg` migrated from `migrations/registry`) vs a `git archive main` export on `s008_scen_main` / `s008_reg_main` | 31 top-level FAIL on both trees, the **same sorted set** (the known pre-existing 30 + `TestWorkspace_ScopedServices`; e.g. the three `run_lifecycle_edge_cases_test.go` tests abort in fixture seeding — `INIT-EC1` is not a valid artifact id — before any engine code runs). Branch 200 PASS (`main` 198 + the two new scenarios), 0 `--- SKIP`. The named files: `cancel_from_partially_merged_test.go`, `publish_step_test.go`, `standard_run_test.go` all PASS; the `run_lifecycle_edge_cases_test.go` three pass on both trees with their fixture ids made numeric (`-overlay` only). Final run on `ccfe4ea4` (the earlier runs on `4ade922d` and `bd3b3c50` matched too). |
+| CI `scenario-git-http` job, its four steps scripted verbatim (`bash -eo pipefail`, own `s008_ci`) | `TestGitHTTP_*` 20 PASS (8 `TestGitHTTP_Push*`), `TestBootstrapInternalAdmin_*` 2 PASS, `TestWorkflowLifecycle_*` 4 PASS, `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS, 0 SKIP |
+| CI `git-floor` steps in `golang:1.26-bookworm` (git 2.39.5, read-only mounts, `GOPROXY=off`), plus `./core/engine/ ./adapters/scheduler/ ./adapters/store/ ./core/actor/` | all ok |
+| `golangci-lint run --new-from-rev main` (`tmp/init027-orchestration/bin/golangci-lint`) on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario ./service/scenariotest/...` | 0 issues each (5 gocritic findings on the first pass fixed in `be492156`) |
+| `--enable-only=gosec --build-tags=integration,scenario` on the touched packages | 0 issues |
+| `gofmt -l` on every changed `.go` file | empty (three touched files — `core/engine/release.go`, `adapters/scheduler/recovery.go`, `core/actor/gateway.go` — had pre-existing import-order drift that `gofmt -w` fixed) |
+| `git diff --stat main -- migrations/` | empty |
+| Mutation pass (`go test -overlay`, worktree untouched): M1–M17 on the original code, m18–m29 on the codex fixes (plus the AC 21 pair, Deviation 4) | every mutant killed (per AC above, per round below) |
+| Design PoCs (`_work/task008/overlay.json` + `designcheck/`, re-targeted at this worktree and at the `main` export) | all six fail on `main` with the design-time messages; on the branch five pass, and `…SubmitOverwritesTimedOutStep` still fails by design (Deviation 12) |
+
+### Codex review
+
+`codex review --base main`, plain — no `-c model=` or any override. Every round's review
+sub-session (`session_meta.source` = `{"subagent":"review"}`, under `~/.codex/sessions/2026/10/14/`)
+records `"model":"gpt-6.1-sol"`.
+
+| Round | Tree | Review session | Findings and disposition |
+|---|---|---|---|
+| 1 | `be492156` | `01a13bed-083d-7b53-aae9-65194430ab3f` | P1 (rated P2 here: dormant until a crash in a two-write window) — recovery refused every later execution, so a crash between creating the successor and moving the cursor stranded the run, and an internal publish successor never merged. **Fixed** `c8b56b34` (Deviation 6) with `TestRecoverCompletedStep_ResumesStrandedSuccessor`. |
+| 2 | `c8b56b34` | `01a13bf2-9945-7281-b9f0-ad29637c6165` | P2 — the resume's unconditional cursor write could rewind a cursor a live submit moved on: **fixed** `7ce1bbee` (new optional `engine.RunCursorTransitioner`, `(*store.PostgresStore).TransitionCurrentStep`, asserted in `serve_wiring.go`; `TestRecoverCompletedStep_DoesNotRewindAMovedCursor`, `TestTransitionCurrentStep`). P2 — with the step capability a failed assignment cancel left an unbound execution beside an active row: **fixed** `7ce1bbee` (conditional compensation; `TestReleaseStep_FailedCancelLeavesConsistentState`). |
+| 3 | `7ce1bbee` | `01a13bfb-6369-7cb3-b26d-83876c7b9c1e` | P2 — a same-actor acknowledgment racing the submit made it lose its compare-and-swap; the consumer dropped the result and `IngestResult` answered 409: **fixed** `38b15f36` (`acknowledgedOrSame`; the consumer treats only a terminal re-read as resolved; `TestSubmit_ConcurrentAcknowledgeIsNotAConflict`). P2 — a submit retried after its terminal write failed compared with its own binding (false `unchanged`): **fixed** `38b15f36` (the retry reuses the comparison point stored in `spine.evidence.<id>`; `TestStepCompleted_RetryKeepsTheComparisonPoint`). |
+| 4 | `38b15f36` | `01a13c02-ca48-7152-8ceb-63c75ad9b154` | P2 (dormant: the memory queue does not redeliver, `NewConsumer` has no production caller) — a redelivered assignment for a completed step whose routing failed was acknowledged without routing: **fixed** `bd3b3c50` (the consumer calls `RecoverCompletedStep`; `TestConsumer_RedeliveryFinishesIncompleteRouting`). |
+| 5 | `bd3b3c50` | `01a13c07-f1c9-7b22-a45b-8d6c152860c8` | P2 (dormant) — a completed divergence-branch execution could not be recovered (run cursor `divergence:<id>`): **fixed** `61a2b9e0` (branch-aware recovery; `TestRecoverCompletedStep_DivergenceBranch`). P2 (dormant) — a stale delivery whose execution was rebound and then resolved stayed a retryable 403: **fixed** `61a2b9e0` (`TestConsumer_StaleDeliveryAfterRebind`). |
+| 6 | `61a2b9e0` | `01a13c11-7233-7d30-a9e5-a398d71eba92` | P1 (rated P2 here: two concurrent recoveries of one execution) — the second recovery created a second successor attempt and could rewind the cursor: **fixed** `ccfe4ea4` (recovery claims the routing; `TestRecoverCompletedStep_ConcurrentRecoveriesRouteOnce` main path and branch, `…_BranchResumesItsOwnClaim`). |
+| 7 | `ccfe4ea4` | `01a13c17-0e5a-7692-b19f-0e4586c4cb74` | "No actionable regressions were identified in the changes against the supplied merge base." |
+| 8 | `f1614a9c` (+ the uncommitted CI step) | `01a13c66-6591-71b1-8381-2c6d08e8b106` | P2 (dormant: only the queue consumer reaches branch recovery) — `recoverBranchStep` wrote its branch snapshot back with a plain `UpdateBranch`, so of two recoveries finishing one stranded claim the late one could reopen a branch the successor had completed: **fixed** `5921c180` (Review round 1, codex). |
+| 9 | `5921c180` | `01a13c7a-c11a-7393-b222-10be14b404aa` | "No actionable regressions were identified." |
+| 10–12 | `7c54dc82` → `55d2a366` | see "Review round 2" | P2 (a lost claim's cancelled row read as a binding): **fixed** `1ce429b7`; rounds 11 and 12 clean. |
+
+No finding was rejected. Each fix landed with a test that fails when the fix is reverted (overlay
+mutations m18–m29; rounds 8–9: r39–r41 below). Rounds 4 and 5 were in the queue consumer, which is dormant (no redelivering
+queue, no production caller); they were fixed anyway because the fixes are local.
+
+### SMP compatibility gate (AC 19)
+
+SMP checkout `i23/s-T008/smp`, detached at SMP `main` `1ae9b0e3` (`.spine-revision` `d23b897`),
+**no SMP source change** (`git status` clean after every step), no `vendor/`, `GOFLAGS=-mod=readonly`;
+`go list -m -f '{{.Dir}}' github.com/bszymi/spine` prints this worktree. Final run on Spine
+`ccfe4ea4`; the same gate also passed on `be492156` (before the codex rounds), `7ce1bbee` and
+`38b15f36`.
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `bash dev/lint-spine-internals.sh` | OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1` on every SMP package importing a changed Spine package (`go list -test`: `internal/customer/{eventdelivery,projectionsvc,projectionwriter,runner,spinecore,spineembedded,stepevents,workspace}`) plus `./internal/engine/... ./internal/automation/` (the design's prototype set) | all ok (`projectionsvc` has no tests) |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s008_smp_it` with `vector`, `s008_spine_runtime_it`) | 116 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -v -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 25m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov`, as in CI) | 1914 passed, 0 failed, 2 allowed skips (the Linux-only `ru_maxrss` tests; macOS host), `testgate: PASS` |
+| The four files AC 19 names, from that run's `-v` output | `proxy_cancelrun_integration_test.go` 1/1, `stale_cancel_integration_test.go` 2/2, `submit_run_gate_integration_test.go` 3/3, `submitstep_embedded_test.go` 23/23 tests PASS, **0 skipped** |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -p 4 -tags integration ./internal/customer/githttp/` | 301 passed, 0 failed, 1 allowed Linux-only skip, `testgate: PASS` |
+| The three Linux-only skips, in `golang:1.26-bookworm` (git 2.39.5, read-only mounts): `TestDiffChildMemory_MillionPaths`, `TestReceiveTimeMemory_RealGitReaderFetch` (`spinecore`), `TestIntegration_ReceiveTimeMemoryBounded` (`githttp`, `-tags integration`) | all PASS |
+
+Behaviour at the bump with no SMP change, as designed: run-status writes are compare-and-swap
+through SMP's existing `TransitionRunStatus` (a cancel that loses to a merge start answers SMP's
+existing 409 mapping); step writes stay blind (SMP's store has neither optional port);
+`IngestResult`'s snapshot handoff is active (SMP's `lockExec` serialises submits in-process, so it
+does not fire there); `step_completed` carries a payload and a per-execution id, with
+`branch_change` `unknown`/`head_sha_unrecorded` (binding off) and no git call; `ReleaseStep`'s owner
+guard holds for SMP's three callers (they pass the owner). Environment note: snapshots of the
+cluster's `ws_*` databases taken around the SMP runs moved (0 → 2 transient once, 79 → 0 once)
+because sibling worktrees ran SMP suites concurrently; the five SMP packages run here contain no
+`DROP DATABASE`, and nothing of this task's was left.
+
+### Not run
+
+- Spine's GitHub CI and SMP's CI (nothing was pushed); the jobs were reproduced locally as above.
+
+### Review round 1
+
+Three reviewers (correctness + compatibility, adversarial security, completeness/tests) examined
+the branch at `5c197efd`. Every finding was verified against the code first. Fixes are on the
+branch head `5921c180`; the mutation overlays named below are under the session scratchpad
+(`r1mut/`), applied with `go test -overlay` so the worktree was never touched.
+
+**Findings**
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1, 6 | P3 — `requiredOutputsUnchanged` logged the `required outputs declared but run branch unchanged` Warn while deriving the flag, before the auto-acknowledge, the `commit_meta` write and the terminal compare-and-swap (`step.go:447`), so a refused or losing submit left an audit warning for an execution it never completed. | **Fixed** `5b7ce6d6`. The derivation is side-effect free (`requiredOutputsUnchanged(stepDef, bc)`); `warnRequiredOutputsUnchanged` runs only after `writeStepExecution` applied, next to `emitStepCompleted`. The evidence key still rides the binding write before the terminal write, as the OQ5 ruling and b911c04 require (Deviation 3 amended). `TestStepCompleted_WarnOnlyAfterTheSubmitApplied`: lost to the timeout scanner (the losing submit's flagged key is stored, no Warn), a failed `commit_meta` write (no Warn), applied (one Warn). Mutant r31 (Warn back before the write) is killed. |
+| 2 | P3 — with the step capability, `AcknowledgeStep` answered 409 when it lost its compare-and-swap to the same actor's identical transition, where the sequential retry gets 200 `in_progress`. | **Fixed** `e190b4af`. `lostAcknowledgeRace`: a re-read `(in_progress, req.ActorID)` is judged like a fresh call (`acknowledgeAnswer`: TASK-007's run check, then the idempotent result) and emits no second `step_started`. Every other move keeps the conflict, so the existing released-row case (AC 10) is unchanged. A blind store never misses, so SMP is unaffected. `TestAcknowledgeStep_LostRaceToTheSameActor` (concurrent duplicate → idempotent; a run cancelled meanwhile under `EnforceRunStatus` → TASK-007's refusal; lost to a completion → conflict). Mutants r34 (race always a conflict) and r35 (no run check on the race path) are killed. |
+| 3 | P3 — upgrade window: an execution completed by a pre-TASK-008 binary was logged under the per-step `step_completed` id, so recovering it after the upgrade re-emits under the per-execution id and is not deduplicated. | **Real; documented**, not coded (`5b7ce6d6`, `f1614a9c`): the `stepCompletedEventID` comment, `event-schemas.md` §4.2's upgrade note, KNOWN-LIMITATIONS "Engine State Writes …" 7 and the CHANGELOG. The suggested alternative (skip the re-emission when `CompletedAt` predates the deployment) is rejected: startup recovery only ever handles executions completed before the process started, so it would drop the event of every completion a crash interrupted before emission — the case the re-emission exists for. Telling a pre-upgrade execution apart needs a schema change (cross-repo rule 1). |
+| 4 | P2 — an empty commit (or a change and its revert) moved the head, the diff succeeded with 0 entries, and the step was recorded `changed`, `changed_paths 0`, unflagged and unwarned. | **Fixed** `5b7ce6d6`. A diff that succeeds with no entry is `unchanged`, `changed_paths 0`, `reason: head_moved_tree_unchanged` (`engine.EvidenceReasonTreeUnchanged`), so it is flagged, persisted flagged and warned. The status is judged on the content, as the flag's meaning ("provably unchanged") requires; the SHAs and the reason keep the move visible. AC 14 (j) (fake `Diff`, 0 entries) and `output_evidence_git_test.go::TestStepOutputEvidence_EmptyCommitIsFlagged` on the real `git.CLIClient` (empty commit; change + revert; a real change stays `changed`, 1 path, unflagged; also green on git 2.39.5). Mutant r30 (zero-entry branch dropped) fails both. Docs: `event-schemas.md` §4.2, `api/spec.yaml`, KNOWN-LIMITATIONS "Self-Attested Labels" (a moved head's `unchanged` depends on the diff, so an operator that resolves arguments by branch name may lose it), CHANGELOG. |
+| 5 | P3 — the queue consumer (dormant) could route one completion twice in-process: a redelivery refused because the execution was already completed called `RecoverCompletedStep` while the winning delivery sat between its terminal write and its routing (review-1 from recovery, review-2 from `advanceToNextStep`). | **Fixed** `e190b4af`. The consumer counts, per assignment, its deliveries inside `SubmitStepResult`; a refused delivery recovers only when none is (checked after leaving, so of several refused deliveries the last one out recovers, exactly once). Chosen over the two suggestions: never recovering from the consumer reverts codex round 4 (a redelivery after a routing failure); making the live path claim the successor changes `advanceToNextStep`, a shared seam and SMP's path, and needs a new "routed concurrently" answer for the live submit on a primary-key collision. Residual: a winner in another process, or a submit outside the consumer, is not seen (KNOWN-LIMITATIONS 7). `TestConsumer_OverlappingDeliveriesRouteOnce` (a redelivery inside the winner's window → exactly `review-1`; two refused deliveries → the last one recovers once). Mutants r36 (no in-flight check) and r37 (check before leaving, which also fails `TestConsumer_RedeliveryFinishesIncompleteRouting`) are killed. |
+| 7 | P3 — `lostSubmitRace`'s TASK-007 run-terminated branch had no test. | **Fixed** (test) `e190b4af`: `TestIngestResult_LostRaceAnswersLikeTheSequentialCall/run terminated by a cancel` (strict policy, CAS store; `CancelRun` lands after `SubmitStepResult`'s run read → TASK-007's 409, not 200 `skipped`; nothing routed or emitted). Mutant r32 is killed. |
+| 8 | P3 — `lostSubmitRace`'s ownership re-check had no test. | **Fixed** (test) `e190b4af`: `…/rebound and completed by another actor` (actor-b completes after `SubmitStepResult`'s read → actor-a gets 403 with nothing disclosed, not 200 with actor-b's outcome). Mutant r33 is killed. |
+| 9 | P3 — the AC 16 scenario's event-log deletion deleted nothing: the harness wires no event-log writer. | **Fixed** `58bcfd17`. `TestStepOutputEvidence_RecordedAndReadBack` subscribes `spine serve`'s `DeliverySubscriber` (`WriteEventLog` for every routed event), waits (bounded) for the run's three `step_completed` rows, checks their `branch_change` and flag equal run detail's, deletes them (asserting none remain) and requires run detail deep-equal before and after. The engine and gateway tests keep proving that no git call is made. |
+| 10 | P3 — `casNoGit` was documented as failing the test on any call but only counted `Diff` calls, and nothing asserted the count. | **Fixed** `58bcfd17`. It reports an unexpected `Diff` with `t.Errorf`, and both engine-backed gateway tests call `requireNoCall()`. Mutant r38 (`StepOutputEvidence` makes a `Diff` call) now fails `TestRunStatus_StepOutputEvidenceFromOrchestrator` too. |
+| codex 8 | P2 (dormant) — `recoverBranchStep` moved the branch cursor with a plain `UpdateBranch` of its own snapshot. Of two recoveries finishing one stranded claim, the late one could reopen a branch its successor had completed (`UpdateBranch` writes status and cursor together); the claim's creator had the same stale write. | **Fixed** `5921c180`: new optional `engine.BranchCursorTransitioner` (mirrors `RunCursorTransitioner`); `(*store.PostgresStore).TransitionBranchCursor` writes only `current_step_id`, only while the branch is pending/in_progress and at the expected step; asserted in `serve_wiring.go` (renaming the method breaks `go build ./service/...`). Both recovery cursor moves use `moveBranchCursorIfAt`; a miss is a conflict and nothing is activated. A store without the capability re-reads first (narrowed; KNOWN-LIMITATIONS 9). SMP's `RunStore` holds the PostgreSQL store as a named field, so nothing is promoted, and SMP never calls recovery. `TestRecoverCompletedStep_BranchCursorNeverRewound` (both paths, with and without the capability) and `TestTransitionBranchCursor` (PostgreSQL). Mutants r39 and r40 (a plain `UpdateBranch` in either path) are killed. |
+
+**Acceptance-criteria gaps**
+
+| Gap | Disposition |
+|---|---|
+| AC 11 ("without editing any existing test") — two TASK-005 tests edited | **Not a defect; AC wording to amend.** Deviation 2: `TestRecoveryResubmitAndAssertionOrdering` and `TestBindingSurvivesAFailureAfterCompletion` pinned `SubmitStepResult` re-routing a completed execution, which §3a / AC 21 remove, and they still guard the TASK-005 property. Proposed wording: "… without editing any existing test other than the TASK-005 tests that pinned the removed re-route". Review round 1 edited no pre-existing test; every test it touched is this task's own. |
+| AC 21 mutation clause ("deleting the terminal check fails both") | **Not a defect: it cannot hold by construction.** Through `IngestResult`, `SubmitStepResult` always receives the snapshot (`assigned`/`in_progress`). A row that is terminal at its read can never equal that snapshot, nor be its same-actor acknowledgment, so the handoff refuses first and the terminal guard is redundant on that path. The guard's own test is `TestSubmitStepResult_NeverReroutesCompletedExecution` (M5); deleting both the guard and the handoff fails `TestIngestResult_LostRaceKeepsWinnerOutcome` (Deviation 4). Proposed amendment: "fails the first; deleting it and the snapshot handoff fails the second". |
+| AC 21 `RecoverCompletedStep` "ErrConflict when any later execution exists" | **Not a defect; recorded change** (Deviation 6): refusing every later execution stranded a run that crashed between creating the successor and moving the cursor (codex round 1); exactly one waiting successor under the deterministic id is resumed. |
+| AC 20 (`make test-scenario` passes) | **Pre-existing, not caused by this branch.** Re-verified twice this round on fresh databases: the branch has 200 top-level PASS / 31 FAIL / 0 SKIP against a `git archive main` export's 198 / 31 / 0, an identical sorted failing set; the named files pass. The three `run_lifecycle_edge_cases_test.go` tests (submit to a cancelled run, double start, idempotent ingest) abort in fixture seeding on both trees, and pass 3/3 on the branch under an overlay that makes their fixture ids numeric. Fixing those fixtures is outside this task (the known-failure list). |
+| AC 19 (`-mod=mod`) | **Fixed.** The SMP gate was re-run twice this round with `GOFLAGS=-mod=mod` (the flag the AC names). `go list -mod=mod -m -f '{{.Dir}}' github.com/bszymi/spine` prints this worktree, there is no `vendor/`, and `git status` was clean after every step. |
+| AC 9 (the design PoC still fails; SMP's step writes stay blind until SMP TASK-011) | **Not a defect: owner ruling OQ3** (opt-in port; SMP TASK-011 opts in). Until then SMP's `lockExec` serialises submits in-process, and the snapshot handoff and terminal guard cover the read side (Deviation 12). |
+| AC 13 (only one interleaving tested; the reverse order leaves a waiting successor on a cancelled run) | **Documented residual, out of scope** (KNOWN-LIMITATIONS "Engine State Writes …" 4; design "Out of scope"). Closing it needs transactional routing. The stray `waiting` execution is inert under TASK-007's run-status entry checks. |
+| Design §4 ("after the §3 write is applied") | **Partly fixed:** the Warn and `step_completed` now follow the applied write (finding 1); the evidence key stays in the binding's write before it, per the OQ5 ruling (Deviation 3, amended). |
+| Design §3a item 2 (one accepted move) | **Recorded design change** (Deviation 14), kept. Review round 1 applies the same parity to `AcknowledgeStep` (finding 2). |
+| AC 16 design-check clause (event-log deletion) | **Fixed** (finding 9). |
+| New DB-backed tests not in CI (noted as not an AC breach) | **Fixed** `d88a6f88` (+ `5921c180`): one step at the end of `scenario-git-http`, following TASK-013/014, runs `TestTransitionStepExecution_*`, `TestTransitionRunStatusAt`, `TestTransitionCurrentStep`, `TestTransitionBranchCursor` and the two TASK-008 scenarios. It fails on any skip or a missing PASS, and was run verbatim on a fresh database (7 + 2 PASS). |
+| Checked-consistent items (OQ1–OQ5, the AC 7/10/21 greps, ownership before git, PostgreSQL CAS, SMP build) | No action. The AC 10 grep still holds (`writeStepExecution` is the only engine `UpdateStepExecution` caller); the branch cursor moves added this round go through `moveBranchCursorIfAt`. |
+
+**Gates (final code head `5921c180`; only these notes were committed after it)**
+
+Only `s008_r1_*` databases were created (`it`, `it2`, `scen`, `reg`, `scenm`, `regm`, `scen2`, `reg2`,
+`ci`, `ci2`, `cireg`, `smp_it`, `spine_rt`, `smp_it2`, `spine_rt2`), all dropped afterwards. No role
+was created or dropped. Containers ran from the present `golang:1.26-bookworm` with
+`--pull=never --rm`; none was left. Docker Desktop did not mount same-path `/Users/...` targets for
+these directories in this session, so the trees were mounted at `/w`, read-only. The tests need
+no outer `.git` (`-buildvcs=false`, temporary repositories), and git's identity was written from
+`/tmp`, because the worktree's `.git` file names a path the container does not have.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `embed-smoketest` | `lint-boundaries: OK`; OK; "engine constructed and exercised; library surface is sound." |
+| `go vet ./...` plain, `-tags integration`, `-tags scenario` | clean |
+| `go test -p 4 -count=1 ./...` | 40 packages ok |
+| `go test -race -p 4` on `core/engine/...`, `core/actor`, `adapters/store`, `adapters/scheduler`, `service/internal/gateway`, `service/cmd/spine` | all ok, no race |
+| `-tags integration -race -p 1` on the same six (`s008_r1_it`, reused) | 2757 PASS, 0 SKIP; FAIL `TestRunModeDatabaseDefault` (known, pre-existing) and `TestEventSubscription_SigningSecretEncryption` (a `duplicate key` on its fixed id `sub-enc-001`, left by this round's earlier run on the reused database; on a fresh `s008_r1_it2` `adapters/store` fails only `TestRunModeDatabaseDefault`) |
+| Full scenario suite, branch (fresh `s008_r1_scen2`/`reg2`) vs `main` export | 200 / 31 / 0 vs 198 / 31 / 0, identical failing set; `cancel_from_partially_merged` 1/1, `publish_step` 1/1, `standard_run` 2/2, the two TASK-008 scenarios PASS; edge cases 3/3 under the numeric-id overlay |
+| CI `scenario-git-http`, all six steps (incl. the new one), fresh `s008_r1_ci2` | 20 (8 `TestGitHTTP_Push*`) / 2 / 4 / 1 / 7 / 2 PASS, 0 SKIP |
+| CI `git-floor` in `golang:1.26-bookworm` (git 2.39.5) + the touched packages | all ok (includes the real-git empty-commit test) |
+| `golangci-lint run --new-from-rev main`, plain / integration / scenario | 0 issues (two gocritic findings on the first pass were fixed before commit) |
+| `--enable-only=gosec`, `--new-from-rev main` | 0 issues. A full run without `--new-from-rev` shows only `main`'s G602 in `adapters/store/postgres_integration_test.go:1563` (file untouched). |
+| `gofmt -l` on changed `.go` files; `git diff --stat main -- migrations/` | empty; empty |
+| Mutation overlays r30–r40 (and r41: the store method renamed breaks the build) | every mutant killed |
+| SMP gate (`1ae9b0e3`, no SMP change, `GOFLAGS=-mod=mod`) | build, vet (plain / integration / scenario / faultinject), `lint-spine-internals` OK; `-race` on the 8 importers of a changed Spine package + `./internal/engine/... ./internal/automation/` ok; testgate runtime 1914 passed, 0 failed, 2 allowed skips; githttp 301 passed, 1 allowed skip; the four AC 19 files 1/1, 2/2, 3/3, 23/23, 0 skipped; the three Linux-only tests PASS in the container; `ws_*` databases/roles 0 → 0 |
+| Codex | rounds 8 and 9 above, both `gpt-6.1-sol` with no override |
+
+### Review round 2
+
+A second-round reviewer examined the branch at `7c54dc82`. It reported **no findings**. It
+re-verified every round-1 disposition with its own mutants: every one was killed, and the one
+survivor, the store-capability branch of `moveBranchCursorIfAt`, is the window KNOWN-LIMITATIONS 9
+documents. It re-ran the gates on `7c54dc82` (all green; the SMP DB-backed gate was not re-run
+there). It raised one wording gap. The plain `codex review --base main` gate, run on that tree
+(round 10), raised one P2. Both are dispositioned below. The code fix is `1ce429b7` and its
+docs are `55d2a366`.
+
+**Gap (wording): the tree-judged evidence was not a numbered deviation**
+
+| Gap | Disposition |
+|---|---|
+| Review round 1 finding 4 (`5b7ce6d6`: a moved head whose diff has no entry is `unchanged` / `head_moved_tree_unchanged`) contradicted design §4 ("success → `changed` with `len(diffs)`"). AC 14 lists only (a)–(i). The change was recorded only in the Review round 1 table and the AC 14 evidence row. | **Fixed (wording).** Deviation 17 records it, with the reason, the alternative not taken, the tests (AC 14 (j), `TestStepOutputEvidence_EmptyCommitIsFlagged` on the real `git.CLIClient`, `TestStepCompleted_WarnOnlyAfterTheSubmitApplied`) and mutant r30. Design §4 is amended in place: the `Reason` list in the `BranchChange` sketch, and the diff bullet now reads "success with no entry → `unchanged`, `ChangedPaths = 0`, `reason: head_moved_tree_unchanged`", marked as amended. The AC text itself is left to the owner's wording pass. Proposed AC 14 addition: "(j) Head ≠ previous, with the fake `Diff` returning no entry, gives `status:"unchanged"`, `changed_paths:0`, `reason:"head_moved_tree_unchanged"` and `required_outputs_unchanged:true`, and the Warn is logged only after the terminal write applied; on a real repository an empty commit, and a change plus its revert, are flagged the same way." |
+| The reviewer's re-verified dispositions (8 FIXED, 3 NOT REAL, the AC 9 / 11 / 13 / 21 items) | No action. The reviewer confirmed them with its own mutants, including the `moveBranchCursorIfAt` fallback survivor that KNOWN-LIMITATIONS 9 documents. |
+
+**Codex round 10 (P2): a lost claim's cancelled row read as a binding**
+
+| Finding | Disposition |
+|---|---|
+| P2: when `ClaimStep` loses its conditional step write (this task's §3 row), it cancels the `claim-<execution>-<actor>` row it created, and `runAuthor` counts assignment rows in every status. So under separation of duties the losing claimant is refused as a reviewer of a run whose author step it never held. | **Real; fixed** `1ce429b7`, docs `55d2a366` (Deviation 18). Verifying it found two more effects of the same row. TASK-007's `releasedSince` reads a cancelled `claim-<execution>-<holder>` row as "held and released", so a prior holder's lost claim opened its re-offered rework attempt to every other actor. And `assignment_id` is the primary key, so that actor could never claim the execution again. The row is now removed through the new optional `engine.AssignmentRowDeleter` (`(*store.PostgresStore).DeleteAssignment`, guarded on execution and actor, asserted in `serve_wiring.go`, no schema change). Without the port, or on a failed delete, it is cancelled as before (KNOWN-LIMITATIONS "Engine State Writes …" 11). Push admission and `ReleaseStep`'s owner guard key on the execution, not on the row, so the removal erases no right that was ever exercised. Tests: `TestClaimStep_LostRaceLeavesNoLedgerRow` (SoD: the lost claimant claims the review while the executing actor is refused; re-offer: another actor is refused and the holder's next claim binds; no port: cancelled and still refused, the residual; failing delete: cancelled, never active) and `TestDeleteAssignment` on PostgreSQL (a wrong actor or execution deletes nothing; deleting nothing is nil; the id can be created again; a cancelled row goes too), the latter added to CI's TASK-008 step. The AC 10 table row asserts the removal. SMP is unaffected: the path needs `engine.StepExecutionTransitioner`, and SMP's step writes are blind until SMP TASK-011, whose handoff now includes the deleter. |
+
+Mutation overlays (`go test -overlay`, worktree untouched), all killed. r42 always cancels (the
+round-1 code): it fails the SoD and re-offer sub-tests and the AC 10 table row. r43 drops the
+cancel fallback: it fails the no-port and failing-delete sub-tests. r44 makes `DeleteAssignment`
+cancel instead of delete, and r45 drops its execution/actor guard: both fail
+`TestDeleteAssignment`. The design §3 `ClaimStep` row is amended in place (marked). Proposed AC 10
+wording: "the assignment row is removed on the `ClaimStep` miss (cancelled when the assignment
+store lacks `engine.AssignmentRowDeleter`)". Docs: CHANGELOG (security bullet and "Changed
+(embedders)"), KNOWN-LIMITATIONS "Engine State Writes …" 11, `engine-state-machine.md`
+"Concurrent writes", `actor-model.md` §7.3, `docs/integration-guide.md` §10.
+
+**Codex**
+
+| Round | Tree | Review session | Result |
+|---|---|---|---|
+| 10 | `7c54dc82` (+ the uncommitted design §4 / Deviation 17 wording) | `01a13c92-c808-79b3-8846-53a94cdd8309` | P2: the lost claim's row (above). **Fixed.** |
+| 11 | the fix, uncommitted, on `7c54dc82` | `01a13ca2-88e0-7c70-9b12-724f29e5cc5f` | "No actionable regressions were identified in the diff." |
+| 12 | `55d2a366` | `01a13caf-bd15-7870-85dc-2c3b22bbd399` | "No actionable regressions were identified in the changes." |
+
+Every round ran `codex review --base main` plain, with no `-c model=` or other override. Each
+review sub-session (`session_meta.source` = `{"subagent":"review"}`, under
+`~/.codex/sessions/2026/10/14/` and `…/15/`) records `"model":"gpt-6.1-sol"`.
+
+**Gates (final code head `1ce429b7`, docs `55d2a366`; only these notes were committed after them)**
+
+The gates ran on the working tree that was then committed unchanged as these two commits;
+codex round 12 reviewed the committed head. Only `s008_r2_*` databases were created (`it`,
+`it2`, `ci`, `scen`, `reg`, `clm`, `smp_it`, `spine_rt`); all were dropped afterwards. No role
+was created or dropped. Containers ran from the present `golang:1.26-bookworm` with
+`--pull=never --rm`, with the trees mounted read-only at `/w`; none was left.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `embed-smoketest` | `lint-boundaries: OK`; OK; "engine constructed and exercised; library surface is sound." |
+| `go vet ./...` plain, `-tags integration`, `-tags scenario` | clean |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, no failure |
+| `go test -race -p 4` on `core/engine/...`, `core/actor`, `adapters/store`, `adapters/scheduler`, `service/internal/gateway`, `service/cmd/spine` | all ok, no race |
+| `-tags integration -race -p 1` on the same six (fresh `s008_r2_it2`) | 2764 PASS, 0 SKIP; 1 FAIL: `TestRunModeDatabaseDefault` (known, pre-existing) |
+| CI `scenario-git-http`, all five steps scripted verbatim from `ci.yml` (fresh `s008_r2_ci`) | all exit 0: `TestGitHTTP_*` 20 PASS (8 `TestGitHTTP_Push*`); `TestBootstrapInternalAdmin_*` 2; `TestWorkflowLifecycle_*` 4; `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` 1; TASK-008 step 8 store tests (incl. `TestDeleteAssignment`) + 2 scenarios. 0 SKIP |
+| Full scenario suite (fresh `s008_r2_scen` / `s008_r2_reg`, registry migrated) | 200 PASS / 31 FAIL / 0 SKIP. The failing set is identical to round 1's (the known pre-existing 30 + `TestWorkspace_ScopedServices`). `TestClaiming_ClaimAndRelease`, the claim/release scenario that this round's change touches, is one of the 31: its fixture ids (`INIT-CLM`) fail seeding on both trees. Under an `-overlay` with numeric ids it passes all 15 steps on PostgreSQL (`s008_r2_clm`). `TestStepOutputEvidence_RecordedAndReadBack`, `TestCompletedStep_IsNotReRouted`, `cancel_from_partially_merged`, `publish_step` and `standard_run` PASS |
+| CI `git-floor` steps in `golang:1.26-bookworm` (git 2.39.5, `GOPROXY=off`), plus `./core/engine/ ./adapters/store/ ./service/cmd/spine/` | all ok |
+| `golangci-lint run --new-from-rev main` per touched package, plain and `--build-tags=integration`; `--build-tags=scenario ./service/scenariotest/...` | 0 issues each |
+| `--enable-only=gosec --build-tags=integration,scenario`, `--new-from-rev main` | 0 issues |
+| `gofmt -l` on every changed `.go` file; `git diff --stat main -- migrations/` | empty; empty |
+| AC 7 / AC 10 greps | `store.UpdateRunStatus(` prints nothing; `store.UpdateStepExecution(` prints only `state_cas.go:288`, inside `writeStepExecution` |
+| Mutation overlays r42–r45 | every mutant killed |
+| SMP gate (`1ae9b0e3`, no SMP change, `git status` clean after every step, `GOFLAGS=-mod=mod`; `go list -m` resolves Spine to this worktree) | build; vet plain / `integration` / `scenario` / `faultinject`; `lint-spine-internals` OK. `-race -p 4` on the 8 direct importers of `core/engine` or `adapters/store` (`internal/customer/{eventdelivery,projectionsvc,projectionwriter,runner,spinecore,spineembedded,stepevents,workspace}`) + `./internal/engine/... ./internal/automation/`: all ok. Platform / spine-runtime migrations 116 / 26 versions (fresh `s008_r2_smp_it` with `vector`, `s008_r2_spine_rt`). Testgate runtime suites: 1914 passed, 0 failed, 2 allowed skips (Linux-only `ru_maxrss`); githttp `-tags integration`: 301 passed, 0 failed, 1 allowed skip. The four AC 19 files: 1/1, 2/2, 3/3, 23/23, 0 skipped. The three Linux-only tests (`TestDiffChildMemory_MillionPaths`, `TestReceiveTimeMemory_RealGitReaderFetch`, `TestIntegration_ReceiveTimeMemoryBounded`) PASS in the container. `ws_*` databases and roles 0 → 0 |
+
+### Handoffs
+
+- **SMP TASK-011:** pass `SubmitRequest.ActorID` on the member and runner paths and carry the
+  claimed handle through the agent-engine seam (design §8; the adapter has no actor today); opt
+  into the step compare-and-swap with a `TransitionStepExecution` delegate to
+  `(*store.PostgresStore)` plus `var _ engine.StepExecutionTransitioner = (*RunStore)(nil)` (keep
+  `execlock.go`); with it `ReleaseStep` switches to step-first ordering with compensation. Expose
+  `engine.AssignmentRowDeleter` on the assignment store at the same time (a `DeleteAssignment`
+  delegate to `(*store.PostgresStore)` plus `var _ engine.AssignmentRowDeleter = …`). Otherwise a
+  lost claim leaves its row cancelled, and separation of duties and the prior-holder re-offer read
+  it as a binding (review round 2, Deviation 18). Map
+  `engine.ErrStepStateChanged` / `ErrRunStateChanged` (both `ErrConflict`); SMP does not call
+  `RecoverCompletedStep`, so `engine.RunCursorTransitioner` and `engine.BranchCursorTransitioner`
+  are optional for it. With the step capability, `AcknowledgeStep` answers a race lost to the same
+  actor's acknowledgment with the idempotent `in_progress` result (review round 1). Re-run this
+  gate.
+- **SMP TASK-009 → TASK-011 item 3:** evidence needs merge binding; then surface
+  `Orchestrator.StepOutputEvidence` on run detail and audit `required_outputs_unchanged`.
+- **Owner question 4 follow-up:** fail closed on an empty `SubmitRequest.ActorID` (an Orchestrator
+  option plus a system-submit marker) once SMP TASK-011 sends it everywhere.
+- **Integration:** this task's shared seams are `core/engine/step.go` (`SubmitStepResult`,
+  `RecoverCompletedStep`, `recoverBranchStep`), `result.go`, `run.go`, `merge.go`
+  (`failRunOnMergeError`), `handlers.go`, `commitmeta.go` (`headBinding.extra`),
+  `acknowledge.go`, `consumer.go`, `adapters/store/postgres_divergence.go`
+  (`TransitionBranchCursor`), `adapters/store/postgres_assignments.go` (`DeleteAssignment`),
+  `core/engine/claim.go` (one call to `discardLostClaimRow`), the end of CI's `scenario-git-http`
+  job, and the `CHANGELOG.md` top section.
+- **Owner / design:** amend the wording of AC 11 and AC 21 as proposed in "Review round 1", and
+  of AC 10 and AC 14 as proposed in "Review round 2" (Deviations 18 and 17). The three `run_lifecycle_edge_cases_test.go` fixtures (`INIT-EC*` ids) are a known pre-existing
+  failure; fixing them would restore that coverage in `make test-scenario`.
+
+### Integration (wave 4 merge) (2026-10-19)
+
+The four wave 4 branches were merged with `git merge --no-ff` onto `init/INIT-023-wave4-integration`
+(worktree `i23/s-int4/spine`, from Spine local `main` `ae513dca`), in this order: TASK-012
+(`3872f4d6`), TASK-008 (`1fef1444`), TASK-017 (`2cbfe037`), TASK-006 (`0b9a4f22`). The semantic
+conflicts between them were then fixed in coordination commits, each code fix with a test that
+fails without it: `3ea7d88f` (engine), `4dbf0486` (serve wiring test and docs), `96cf8e40` (docs),
+`044c2103` (lint, test code) and `a6acc720` (codex round 2). The final code is `a6acc720`; the
+commit that adds this note changes only the four task artifacts. Nothing was pushed. Spine
+`main`, the task branches and the SMP checkout are unchanged. The owner questions of all four
+tasks stay recorded as defaults, pending the owner; none was re-decided.
+
+**This task.** It merged second. The only conflict was in `CHANGELOG.md`.
+
+- **AC 10 holds again on the merged code.** TASK-006 had added two blind step writes: the hold
+  record (`recordGovernanceHold`) and its clearing on approval (`clearGovernanceHold`). Both now go
+  through `writeStepExecution`. `grep -n 'store.UpdateStepExecution(' core/engine/*.go`
+  (non-test) prints only the line inside `writeStepExecution` (`state_cas.go:288`).
+  `TestWave4_GovernanceStepWritesAreConditional` uses a store with the capability whose row moves
+  before the write. A stale copy is never written back, and the mutants that restore either blind
+  write are killed.
+- **AC 7 holds.** `grep -n 'store.UpdateRunStatus(' core/engine/*.go` (non-test) prints nothing.
+- **The run and step compare-and-swap covers the other tasks' routing writes.**
+  - TASK-012's exhaustion route: `handlePermanentMergeFailure` leads to `failRunOnMergeError` or
+    to `advancePublishStepIfAny`, and `recordGitConflictOnStep` is conditional too.
+  - TASK-006's reject: a conditional `TransitionRunStatus` on the no-publish route (it keeps its
+    own because it must answer 409); `advancePublishStepIfAny`, `recordGitConflictOnStep` and
+    `terminateLiveSteps` otherwise. The stale "blind until TASK-008" comment there is corrected.
+  - TASK-006's approve: `MergeCommitMetaIfStatus`.
+- **`commit_meta` writers audit.** Every engine writer of the merged code merges keys and never
+  replaces the map blindly:
+  - the binding write with this task's evidence keys (`mergeCommitMeta`, through
+    `headBinding.extra`);
+  - the convergence and recovery-ledger rebinds (`withEngineBinding`);
+  - TASK-006's `MergeCommitMeta` / `MergeCommitMetaIfStatus` (the approval, the tombstone, the
+    marker, `started_by`, `blocked_target`), with a read-modify-write fallback for stores
+    without them.
+
+  TASK-012 writes no `commit_meta`: its publication-pending carry is in the outcome's failure
+  detail. The read-modify-write paths keep their documented cross-process residual
+  (KNOWN-LIMITATIONS "Governance-Path Guard" 9).
+- **CI.** This task's CI step is present once, and passes in the CI job run below: 8 store tests
+  and 2 scenarios, 0 skips.
+- **Integration guide.** It keeps §10. TASK-017's and TASK-006's sections are now §11 and §12.
+
+**Coordination commits.**
+
+| Commit | What it fixes | Tests |
+|---|---|---|
+| `3ea7d88f` | V1 is taken back to exactly `BaseSHA`; a failed take-back of a TASK-005 or V1 refusal records the governance block (guard on); the retry budget spares held and blocked runs; the lifecycle's transient exit is a counted attempt; the governance hold and its clearing are compare-and-swap; the decision API mirrors the lifecycle | `core/engine/wave4_integration_test.go` (9 tests), `wave4_integration_git_test.go` (4 real-git cases). Every fix has a mutant killed under `go test -overlay`: M1–M7, M3b, and M8/M9 (governance check, V1 moved out of the block). The overlays and logs are in `w4/agents/int-spine/mut/` |
+| `4dbf0486` | Serve wiring composition; docs: the order of checks (`engine-state-machine.md`), the merge block (`git-integration.md` §6.6), KNOWN-LIMITATIONS, integration guide §11/§12, CHANGELOG "wave 4 integration" | `service/cmd/spine/serve_wave4_wiring_test.go`: both builders have binding, lifecycle, guard, home-branch primary client (a `MergeBaseLister`), retry budget and handler, governance-aware retry, projection guard |
+| `96cf8e40` | ADR-016 and KNOWN-LIMITATIONS: convergence is no longer a path around the guard | docs only |
+| `044c2103` | gocritic and staticcheck on the new test | test code only |
+| `a6acc720` | Codex round 2 P2: `MergeBases` resolves `HEAD` to the home branch | `adapters/git/wave4_mergebases_test.go` (mutant M10 killed) |
+
+**Gates.** The code gates ran on `a6acc720` unless the row names `96cf8e40`. The only code
+change after `96cf8e40` is `a6acc720`'s `HEAD` rewrite in `MergeBases`, which no engine or
+scenario caller reaches (they pass `main` or object ids). Logs are in
+`spine-management-platform/tmp/init027-orchestration/w4/agents/int-spine/`.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean, all three |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 0 failures |
+| `go test -race -p 4 -count=1` on the 19 packages changed since `ae513dca` (`service/scenariotest/scenarios` builds only with `-tags scenario`; the scenario rows cover it) | 19 ok, 0 data races (`adapters/{delivery,git,projection,scheduler,store}`, `core/{actor,artifact,auth,branchprotect,divergence,domain,engine,validation,workflow,worktreefs}`, `service/cmd/spine`, `service/internal/{gateway,workspace}`, `service/scenariotest/harness`) |
+| `-tags integration -p 1 -count=1 -v` on the changed packages with integration suites: `adapters/{delivery,projection,store}`, `service/cmd/spine`, `service/internal/workspace`. `SPINE_TEST_DATABASE_URL` = fresh `s4i_it`, `SPINE_REGISTRY_TEST_DATABASE_URL` = `s4i_reg`, migrated from `migrations/registry` | 584 top-level PASS (1161 with subtests), 0 SKIP, 1 FAIL. The failure is `adapters/store` `TestRunModeDatabaseDefault` (`cannot scan NULL into *string`, column `workflow_version_label`), the known pre-existing failure: a `git archive` export of `main` `ae513dca` fails it the same way. Run at `96cf8e40` and again at `a6acc720`, with the same result |
+| Full scenario suite (`-tags scenario -p 1 -count=1 -v ./service/scenariotest/...`), branch at `96cf8e40` against a `git archive` export of `main` `ae513dca`; fresh databases each, registry migrated | 31 top-level `--- FAIL` on both, and the sorted lists are identical, at every level. They are the known pre-existing set: the 30 plus `TestWorkspace_ScopedServices`, the same list as wave 3. Top-level PASS is 204 on the branch and 198 on `main`. The extra 6 are the wave's scenarios: `TestCompletedStep_IsNotReRouted`, `TestStepOutputEvidence_RecordedAndReadBack`, `TestGovernancePathGuard_HeldUntilOperatorApproves` and the three `StatusLifecycle` scenarios. 0 SKIP |
+| CI `scenario-git-http`: its 7 `run:` steps, read from `ci.yml` and run verbatim (`bash --noprofile --norc -eo pipefail`, `SPINE_TEST_DATABASE_URL` = fresh `s4i_ci`) | All 7 steps exit 0. `TestGitHTTP_*`: 20 PASS. `TestBootstrapInternalAdmin_*`: 2. `TestWorkflowLifecycle_*`: 4. Pooled workflow-service branch protection: 1. TASK-008's store compare-and-swap: 8, and its scenarios: 2. TASK-017's `StatusLifecycle` scenarios: 3, and its pooled validator: 1. TASK-006's `TestGovernancePathGuard_HeldUntilOperatorApproves`: 1, and `TestGovernanceStore_Integration`: 1. 0 SKIP and 0 FAIL in every step |
+| CI `git-floor`: its 3 `run:` steps in `golang:1.26-bookworm` (`--pull=never --rm --init`, non-root, read-only mounts, `GOPROXY=off`, no git identity); plus an extra run of `core/engine` `-run 'TestWave4_\|TestStatusLifecycle_\|TestGovernanceGuard_\|TestF9_\|TestMergeRetry_'` | git 2.39.5. All 3 steps ok: `adapters/git/...` and `core/engine` (ref-grammar filter), then `adapters/git/...`, `core/artifact` and `core/workflow`. The extra `core/engine` run is ok on git 2.39.5 too, both at `a6acc720` |
+| `golangci-lint` v2.11.4 `run --new-from-rev ae513dca` on the changed packages, plain, `--build-tags integration` and `--build-tags scenario` | 0 issues each. The two issues in the new test at `96cf8e40` were fixed in `044c2103` |
+| `golangci-lint --enable-only=gosec`: `--new-from-rev ae513dca ./...`, full `./...`, and full `--build-tags integration,scenario` | 0; 0; 1. The one is G602 at `adapters/store/postgres_integration_test.go:1563`, a file unchanged since `main` (wave 3 recorded the same finding) |
+| `gofmt -l` on the 167 `.go` files changed since `ae513dca` | only `core/divergence/convergence.go`: the import-order problem it has on `main` `ae513dca`, covered by TASK-012's AC 23 exemption |
+| `ci.yml` | one step per task: TASK-008's, TASK-017's and TASK-006's in `scenario-git-http`; none duplicated; the YAML parses |
+| `codex review --base main` (codex-cli 0.162.1, the configured default, no `-c model=`; sessions read from `~/.codex/sessions/2026/10/19/`, `source: {"subagent":"review"}`, `cwd` = this worktree, `model` = `gpt-6.1-sol`) | Round 1 at `96cf8e40`: `01a153e5-817e-7f33-9a6b-680376b6f857`, no findings. Round 2 at `044c2103`: `01a153fc-abf2-7a72-9d81-03a7e51ef284`, one P2 (the `MergeBases` `HEAD` rewrite): real, reproduced, fixed in `a6acc720`. Round 3 at `a6acc720`: `01a15409-966a-7da1-a64f-248cfbd7f2b4`, no findings |
+
+**SMP compatibility.** `i23/s-int4/smp` is SMP `main` `1ae9b0e3`, detached, with `../spine` =
+this worktree and `GOFLAGS=-mod=readonly`. The checkout was never modified, and `git status` is
+clean.
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` | all OK; `lint-spine-internals: OK`; `git status` clean |
+| `go test -race -p 4 -count=1`, no DSNs, on the 14 SMP packages importing a changed Spine package (test imports included): `cmd/customer-app`, `internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`, `internal/recovery` | 13 ok; `projectionsvc` has no tests. No failures: the wave 3 `gitread` / `projectionwriter` contract failures are gone on SMP `main` `1ae9b0e3` |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s4i_smp_it` with `vector`, `s4i_spine_runtime_it`) | 116 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 20m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov`, as in CI) | `4 packages, 1914 tests passed, 0 failed, 2 skipped (2 allowed)`; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `1 packages, 301 tests passed, 0 failed, 1 skipped (1 allowed)`; `testgate: PASS` |
+| The three Linux-only tests those allowances skip on macOS, in `golang:1.26-bookworm` (git 2.39.5): `TestDiffChildMemory_MillionPaths`, `TestReceiveTimeMemory_RealGitReaderFetch` (`spinecore`) and `TestIntegration_ReceiveTimeMemoryBounded` (`-tags integration`, `githttp`) | all 3 PASS on git 2.39.5; the containers were removed |
+
+No SMP failure, so no compatibility break.
+
+**Not run.**
+- GitHub CI: it cannot run this branch until Spine is pushed.
+- The other steps of SMP's integration job (platform-DB shared suites, fenced migrate,
+  workspace-schema, faultinject, verify-children) and the image-based gates. They are not in this
+  gate list.
+- The full scenario suite was not repeated after `a6acc720`, for the reason in the Gates
+  preamble.
+
+**Environment.**
+- PostgreSQL: the shared `i23-pg` on `localhost:55630`. Only `s4i_*` databases were created, and
+  all were dropped. There were no `ws_*` databases or roles before the SMP suites and none
+  after, and the shared roles were untouched.
+- Docker: the only containers were the `git-floor` runs, the Linux-only SMP runs and the
+  `alpine:3 df` checks, all `--rm`. Nothing was pulled or pruned.
+
+### Cross-task review (wave 4) (2026-10-19)
+
+The integrated wave 4 (`db0b727b`) was reviewed as a whole; the fixes are `0ab10a57` … `f47131f4`
+on `init/INIT-023-wave4-integration` (final code `f47131f4`, nothing pushed). TASK-006's note of the
+same name has the full disposition table and the gates. The owner questions stay recorded as
+defaults. What concerns this task:
+
+- **P3, AC 21 had no test (fixed in `757d90b8`).** Nothing pinned that `spine serve`'s startup step
+  recovery hands a completed execution to `RecoverCompletedStep`: putting the `ae513dca` form back
+  (`SubmitStepResult(…, StepResult{OutcomeID: exec.OutcomeID})`) passed all of
+  `go test ./service/cmd/spine/`. The callback is now `stepRecoveryFor`, shared by `buildScheduler`
+  and the workspace builder, over a `schedulerEngine` interface that has no `SubmitStepResult`.
+  `TestServeScheduler_StepRecoveryUsesRecoverCompletedStep` drives startup recovery through the
+  built scheduler and asserts the completed execution reaches `RecoverCompletedStep` and is not
+  retried; a `RetryStep` mutant fails it.
+- **Compare-and-swap writes.** The review's changes keep the step writes on this task's
+  compare-and-swap: `clearGovernanceHold` now clears every execution of the run that carries a
+  governance hold, each through `writeStepExecution` with the row's prior state, as the hold's own
+  write does.
+
+### Acceptance (wave 4) (2026-10-19)
+
+The final gate on `init/INIT-023-wave4-integration` (worktree `i23/s-int4/spine`). Every gate ran at
+`02d65f4c`. Its last code commit is `f47131f4`, the last fix of the cross-task review; `02d65f4c`
+and the commit that adds this note change only the four task artifacts. Nothing was pushed. Spine
+`main` (`ae513dca`), the task branches and the SMP checkout are unchanged. The owner questions of
+all four tasks stay recorded as defaults, pending the owner; none was re-decided. No gate found a
+defect, so this gate added no code commit.
+
+**This task.**
+- Its CI step, "TASK-008 store compare-and-swap and step-output evidence", passes in the
+  `scenario-git-http` run below: 8 store tests and 2 scenarios, 0 SKIP and 0 FAIL.
+- In the full scenario run, `TestCompletedStep_IsNotReRouted` and
+  `TestStepOutputEvidence_RecordedAndReadBack` pass. They are 2 of the 6 scenarios the branch adds
+  over `main`.
+- SMP `main` sets no `ActorID` on the two `SubmitRequest`s it builds
+  (`internal/customer/spineembedded/embedded_ready.go` and `proxy.go`). It builds and vets with all
+  four tag sets, and its runner, step-event and Spine runtime suites pass against this branch.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean, all three |
+| `gofmt -l` (Go 1.26.5) on the 172 `.go` files changed since `ae513dca` (88 added, 84 modified) | empty |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 0 failures (3 more packages have no tests) |
+| `go test -race -p 4 -count=1` on the 19 packages changed since `ae513dca`: `adapters/{delivery,git,projection,scheduler,store}`, `core/{actor,artifact,auth,branchprotect,divergence,domain,engine,validation,workflow,worktreefs}`, `service/cmd/spine`, `service/internal/{gateway,workspace}`, `service/scenariotest/harness`. `service/scenariotest/scenarios` builds only with `-tags scenario`; the scenario rows cover it | 19 ok, 0 data races |
+| `-tags integration -p 1 -count=1 -v` on the changed packages that have integration suites: `adapters/{delivery,projection,store}`, `service/cmd/spine`, `service/internal/workspace`. `SPINE_TEST_DATABASE_URL` = fresh `s4g_it`; `SPINE_REGISTRY_TEST_DATABASE_URL` = `s4g_reg`, migrated from `migrations/registry` | 587 top-level PASS (1164 with subtests), 0 SKIP, 1 FAIL. The failure is `adapters/store` `TestRunModeDatabaseDefault` (`postgres_integration_test.go:702: GetRun: can't scan into dest[5] (col: workflow_version_label): cannot scan NULL into *string`), the known pre-existing failure. This run checked it again: a `git archive` export of `main` `ae513dca` fails it with the same message |
+| CI `scenario-git-http`: its 7 `run:` steps, read from `ci.yml` and run verbatim (`bash --noprofile --norc -eo pipefail`, repo root as cwd, `SPINE_TEST_DATABASE_URL` = fresh `s4g_ci`) | All 7 steps exit 0. `TestGitHTTP_*`: 20 PASS. `TestBootstrapInternalAdmin_*`: 2. `TestWorkflowLifecycle_*`: 4. Pooled workflow-service branch protection: 1. TASK-008's store compare-and-swap: 8, and its scenarios: 2. TASK-017's `StatusLifecycle` scenarios: 3, and its pooled validator: 1. TASK-006's governance scenario: 1, and its store test: 1. 0 SKIP and 0 FAIL in every log |
+| Full scenario suite (what `make test-scenario` runs, with `-p 1 -count=1 -v -timeout 60m`), on this branch and on a fresh `git archive` export of `main` `ae513dca`; fresh `s4g_scen_{b,m}` each, registry `s4g_sreg_{b,m}` migrated | 31 top-level `--- FAIL` on each, and the sorted lists are identical at every level (59 lines with subtests on each). They are the known pre-existing set: the 30 plus `TestWorkspace_ScopedServices`. Top-level PASS is 204 on the branch and 198 on `main`. The extra 6 are `TestCompletedStep_IsNotReRouted`, `TestStepOutputEvidence_RecordedAndReadBack`, `TestGovernancePathGuard_HeldUntilOperatorApproves`, `TestPlanningRun_StatusCascadesToChildren_StatusLifecycle`, `TestStandardRun_StatusLifecycleArtifactsDir` and `TestStandardRun_StatusLifecycleRefusesNonOwnedStatusEdit`. 0 SKIP |
+| CI `git-floor`: its 3 `run:` steps, verbatim (`bash -e`), in `golang:1.26-bookworm` (`--pull=never --rm --init`; non-root `501:20`, where GitHub runs root; the worktree, the main repository's `.git`, the host module cache and the step scripts mounted read-only; `GOPROXY=off`, `GOTOOLCHAIN=local`) | git 2.39.5. All 3 steps ok: the version check; `adapters/git`, `adapters/git/refname` and `core/engine` with the ref-grammar filter; then `adapters/git/...`, `core/artifact` and `core/workflow`. The container was removed |
+| `golangci-lint` v2.11.4 `run --new-from-rev ae513dca` on the changed packages, plain, `--build-tags integration` and `--build-tags scenario` (with `./service/scenariotest/...`) | 0 issues each |
+| `golangci-lint --enable-only=gosec` on the changed packages (plain; `integration,scenario`) and on `./...` (plain; `integration,scenario`) | 0; 1; 0; 1. The one finding is G602 at `adapters/store/postgres_integration_test.go:1563`. It was there before: the file is unchanged since `ae513dca`, and the `main` export reports the same finding in this run |
+| `codex review --base main` (codex-cli 0.162.1, the configured default, no `-c model=`). The session was read from `~/.codex/sessions/2026/10/19/` (`source: {"subagent":"review"}`, `cwd` = this worktree, `model` = `gpt-6.1-sol`) | This round ran because `02d65f4c` (notes only) was added after the cross-task review's last clean round, which was at `f47131f4` (`01a154ce-eb74-7e82-90e2-2575bf420173`, no findings). Round at `02d65f4c`: `01a154e6-f52f-70d3-a575-8d753013f8b2`, `"findings": []`, "patch is correct". Codex's own `go test ./core/engine -timeout 90s` side run timed out inside its sandbox; `core/engine` needs about 360 s on this machine, and it passes in the gate rows above. Nothing to fix, so no second round |
+
+**SMP compatibility.** `i23/s-int4/smp` is SMP `main` `1ae9b0e3`, detached, with `../spine` =
+this worktree (`02d65f4c`) and `GOFLAGS=-mod=readonly`. The checkout was never modified, and
+`git status` is clean before and after.
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` | all OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1`, no DSNs, on the 14 SMP packages that import a changed Spine package under any of the four tag sets (test imports included): `cmd/customer-app`, `internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`, `internal/recovery` | 13 ok; `projectionsvc` has no tests. 0 failures |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s4g_smp_it` with `vector`, `s4g_spine_runtime_it`) | 116 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 20m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, and `TEST_PROVISIONING_DSN` = `smp_prov`, as in CI; CI's timeout is 10m, raised for the loaded machine) | `4 packages, 1914 tests passed, 0 failed, 2 skipped (2 allowed)`; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `1 packages, 301 tests passed, 0 failed, 1 skipped (1 allowed)`; `testgate: PASS` |
+| The three Linux-only tests those allowances skip on macOS, in `golang:1.26-bookworm` (git 2.39.5, non-root, `--init`, read-only mounts): `TestDiffChildMemory_MillionPaths` and `TestReceiveTimeMemory_RealGitReaderFetch` (`spinecore`, `-race`), and `TestIntegration_ReceiveTimeMemoryBounded` (`githttp`, `-race -tags integration`) | all 3 PASS. The containers were removed |
+
+No SMP command failed, so there is no compatibility break, and no run against `../spine` at
+`ae513dca` was needed.
+
+**Not run.**
+- GitHub CI. It cannot run this branch until Spine is pushed.
+- The other steps of SMP's integration job: the platform-DB shared suites, fenced migrate,
+  workspace-schema, faultinject and verify-children. They are not in this gate list. The image-based
+  gates were not run either.
+- `-race` on `service/scenariotest/scenarios`, which builds only with `-tags scenario`. The CI job
+  and the full scenario run cover it without `-race`.
+
+**Environment.**
+- PostgreSQL: the shared `i23-pg` on `localhost:55630`. Only `s4g_*` databases were created, and
+  all of them were dropped. There were no `ws_*` databases or roles before the SMP suites and none
+  after. The shared roles `platform`, `platform_audit_retention` and `smp_prov` were already there
+  and were untouched.
+- Docker: the only containers were the `git-floor` run, the two Linux-only SMP runs and the
+  `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
+  VM had 5.8 GB free at the lowest check.
+- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+
+### Integration follow-up (wave 4) (2026-10-19)
+
+A mutation check of the merged tree found that no test pinned this task's compare-and-swap in
+`failRunOnMergeError` (`core/engine/merge.go`, `if !applied`). The "failRunOnMergeError (permanent
+merge failure)" row of `TestRunMutators_LostRaceNeverOverwrites` cancelled the run right after
+`MergeRunBranch`'s read. Since TASK-012, the status re-check at the top of the merge block
+(`requireStillCommitting`) stops that attempt before any merge, so the CAS never ran. With
+`if !applied` dropped, treating the lost transition as applied, the test still passed on
+`07825efb`; this was checked again here.
+
+**Fix (`9a6123de`, tests only).** The independent check's probe (`m13_probe_test.go`) is adopted
+into `core/engine/state_cas_test.go`:
+- `mergeFailGit` takes a `race` hook that runs *inside* the merge call, after the block's
+  re-check and before the permanent failure returns. It covers the plain `Merge` and, new, the
+  bound `MergeBound`.
+- The row now races inside the merge.
+- A second row does the same with merge binding on (`bindCasFix`).
+- Both rows assert what the probe did: no status write, no `run_failed`, no git_conflict detail
+  on the review, and no branch cleanup. They also check that the race really ran inside exactly
+  one merge call.
+- Mutation: `if false && !applied` fails both rows (killed). The re-check itself is pinned by
+  TASK-012's follow-up, `TestMergeRunBranch_RunLeftCommittingBeforeTheMergeBlock`.
+
+Gates and codex for the follow-up as a whole are in TASK-003's "Post-merge fix (wave 4
+integration)" note.

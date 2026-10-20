@@ -144,6 +144,8 @@ Workflow Execution Operations control Run execution and task governance decision
 | `run.start_planning` | Creates a planning Run for artifact creation (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) | When a new artifact needs governed creation |
 | `run.status` | Queries Run state and step history | When monitoring execution progress |
 | `run.cancel` | Cancels an active Run | When execution should be abandoned (operator decision) |
+| `run.governance.decide` | Approves or rejects a governed merge held by the governance-path guard (`POST /runs/{run_id}/governance-decision`, operator or above; [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md)) | When a run's merge changes `.spine/`, `.spine.yaml` or a workflows directory and waits in `committing` |
+| `run.governance.status` | Reads whether a run's merge is governance-changing and held, its bound commit, paths and recorded approval (`GET /runs/{run_id}/governance`, `run.status` permission) | Before deciding a held merge |
 
 **Step execution:**
 
@@ -376,7 +378,7 @@ Authorization is role-based (per [Security Model](/architecture/security-model.m
 | `reader` | All read and query operations |
 | `contributor` | Reader + create/update artifacts, start Runs, submit step results |
 | `reviewer` | Contributor + task governance decisions (accept, reject, cancel, abandon, supersede) |
-| `operator` | Reviewer + system operations, Run cancellation, manual step assignment, registering actors with a role strictly below its own |
+| `operator` | Reviewer + system operations, Run cancellation, manual step assignment, governance decisions on held merges (`run.governance.decide`), registering actors with a role strictly below its own |
 | `admin` | Full access including admin and operator actors, the skill catalogue, actor skill grants, and token management |
 
 A non-admin actor can never change its own skills (§3.6).

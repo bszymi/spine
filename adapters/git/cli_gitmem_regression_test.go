@@ -7,10 +7,12 @@ package git_test
 // 64 MiB base passed the size probe (`cat-file -s` reports the TARGET's
 // size), and `git show` then inflated the whole base in the git child —
 // 71 MiB RSS for a 3 MB read, in the same cgroup as customer-app. A
-// gitlink named *.md that points at an in-repo commit is the other
-// probe bypass: `git show` renders that commit WITH its patch. Read
+// gitlink named *.md that points at an in-repo commit was the other
+// probe bypass: `git show` rendered that commit WITH its patch. Read
 // commands now run with GIT_ALLOC_LIMIT (4 x the per-blob limit by
-// default), and git's refusal is mapped to ErrBlobTooLarge.
+// default), and git's refusal is mapped to ErrBlobTooLarge; since the
+// wave 4 follow-up ReadFile reads blobs only and refuses a gitlink
+// unread (ErrNotBlob).
 //
 // The git child's peak RSS is measured in a re-exec of this test binary
 // (RUSAGE_CHILDREN), so the fixture's own git commands — a repack of a
@@ -56,6 +58,8 @@ type gitMemResult struct {
 	// OutputTooLargeError.GitAlloc (review round 1).
 	GitAllocLimit int64 `json:"git_alloc_limit"`
 	GitAlloc      bool  `json:"git_alloc"`
+	// NotBlob is errors.Is(err, git.ErrNotBlob) (wave 4 follow-up).
+	NotBlob bool `json:"not_blob"`
 }
 
 // recordErr fills the error fields of a child result.
@@ -66,6 +70,7 @@ func (res *gitMemResult) recordErr(err error) {
 	res.Err = err.Error()
 	res.TooLarge = errors.Is(err, git.ErrBlobTooLarge)
 	res.OutputLarge = errors.Is(err, git.ErrOutputTooLarge)
+	res.NotBlob = errors.Is(err, git.ErrNotBlob)
 	var tl *git.BlobTooLargeError
 	if errors.As(err, &tl) {
 		res.Size = tl.Size
@@ -226,7 +231,10 @@ func TestGitMem_DeltaBaseIsRefusedInGit(t *testing.T) {
 }
 
 // AC 18 (2): a gitlink *.md pointing at an in-repo commit that adds a
-// 64 MiB blob — `git show` would render the commit with its patch.
+// 64 MiB blob — `git show` would render the commit with its patch. TASK-003
+// had GIT_ALLOC_LIMIT refuse it inside git; since the wave 4 follow-up
+// ReadFile types the entry first and refuses the gitlink without reading
+// any object behind it (ErrNotBlob).
 func TestGitMem_GitlinkToCommitIsRefusedInGit(t *testing.T) {
 	dir := t.TempDir()
 	t3git(t, dir, nil, "init", "-q", "-b", "main")
@@ -240,7 +248,48 @@ func TestGitMem_GitlinkToCommitIsRefusedInGit(t *testing.T) {
 	t3git(t, dir, nil, "update-index", "--add", "--cacheinfo", "160000,"+side+",g.md")
 	t3git(t, dir, nil, "commit", "-qm", "gitlink")
 	res := runGitMemChild(t, "T003_GITMEM_REPO="+dir, "T003_GITMEM_REF=refs/heads/main", "T003_GITMEM_PATH=g.md")
-	assertGitMemRefused(t, "gitlink", res)
+	assertGitMemNotBlob(t, "gitlink", res)
+}
+
+// Wave 4 follow-up (SMP INIT-027/EPIC-004/TASK-008, measured at ae513dca):
+// a gitlink *.md pointing at an in-repo commit whose patch adds 10^6
+// paths through one shared subtree. Every object is tiny — two 1000-entry
+// trees and one blob — so the size probe passed (it sized the ~200-byte
+// commit) and no single allocation came near GIT_ALLOC_LIMIT, but `git
+// show` built the whole diff queue before the output cap could stop it:
+// 272 MiB in the git child. ReadFile now refuses the gitlink unread.
+func TestGitMem_GitlinkToWideCommitIsRefusedUnread(t *testing.T) {
+	dir := t.TempDir()
+	t3git(t, dir, nil, "init", "-q", "-b", "main")
+	blob := t3git(t, dir, []byte("x\n"), "hash-object", "-w", "--stdin")
+	var leaf, mid bytes.Buffer
+	for i := 0; i < 1000; i++ {
+		fmt.Fprintf(&leaf, "100644 blob %s\tf%04d\n", blob, i)
+	}
+	leafTree := t3git(t, dir, leaf.Bytes(), "mktree")
+	for i := 0; i < 1000; i++ {
+		fmt.Fprintf(&mid, "040000 tree %s\td%04d\n", leafTree, i)
+	}
+	midTree := t3git(t, dir, mid.Bytes(), "mktree")
+	root := t3git(t, dir, []byte("040000 tree "+midTree+"\tsub\n"), "mktree")
+	wide := t3git(t, dir, nil, "commit-tree", root, "-m", "a million paths")
+	t3git(t, dir, nil, "update-index", "--add", "--cacheinfo", "160000,"+wide+",g.md")
+	t3git(t, dir, nil, "commit", "-qm", "gitlink to the wide commit")
+	res := runGitMemChild(t, "T003_GITMEM_REPO="+dir, "T003_GITMEM_REF=refs/heads/main", "T003_GITMEM_PATH=g.md")
+	assertGitMemNotBlob(t, "gitlink to a wide commit", res)
+}
+
+// assertGitMemNotBlob checks a child's gitlink read: the not-a-file
+// refusal, nothing read, and a git child that never rendered anything.
+func assertGitMemNotBlob(t *testing.T, label string, res gitMemResult) {
+	t.Helper()
+	t.Logf("%s: len=%d err=%q git child peak RSS=%d MiB", label, res.Len, res.Err, res.RSS>>20)
+	if !res.NotBlob || !res.Permanent || res.TooLarge || res.OutputLarge || res.Len != 0 {
+		t.Errorf("%s: %+v, want the permanent ErrNotBlob refusal and no content", label, res)
+	}
+	if res.RSS >= 0 && res.RSS >= 32<<20 {
+		t.Errorf("%s: git child peak RSS %d MiB, want < 32 MiB", label, res.RSS>>20)
+	}
 }
 
 // AC 18 (3): no false refusal within the bounds.

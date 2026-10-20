@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/workflow"
 )
 
@@ -148,8 +149,14 @@ func (s *Service) StartDivergence(ctx context.Context, run *domain.Run, divDef d
 	return divCtx, nil
 }
 
-// CreateExploratoryBranch adds a new branch to an active exploratory divergence.
-func (s *Service) CreateExploratoryBranch(ctx context.Context, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error) {
+// CreateExploratoryBranch adds a new branch to an active exploratory
+// divergence. run is the divergence's run (INIT-023 TASK-012): it is
+// guarded like a convergence (convergenceTargetGuard), and the new branch
+// forks from its run branch, like the structured divergence's branches.
+func (s *Service) CreateExploratoryBranch(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error) {
+	if err := convergenceTargetGuard(run, divCtx); err != nil {
+		return nil, err
+	}
 	if divCtx.DivergenceMode != domain.DivergenceModeExploratory {
 		return nil, domain.NewError(domain.ErrConflict, "can only create branches in exploratory divergence")
 	}
@@ -169,7 +176,6 @@ func (s *Service) CreateExploratoryBranch(ctx context.Context, divCtx *domain.Di
 		return nil, err
 	}
 
-	run := &domain.Run{RunID: divCtx.RunID}
 	branch, err := s.createBranchRecord(ctx, run, divCtx, branchID, startStep)
 	if err != nil {
 		return nil, err
@@ -207,6 +213,23 @@ func (s *Service) createBranch(ctx context.Context, run *domain.Run, divCtx *dom
 	return err
 }
 
+// divergenceBase is the start point of a divergence branch (INIT-023
+// TASK-012, design-check DC-9): the run branch, so the branch work builds
+// on the run's own pre-divergence work and its convergence into the run
+// branch (CommitConvergence) does not conflict with it. Before, the base
+// was "HEAD", which in standalone's shared tree is main: once convergence
+// targets the run branch, a file both the run and the branch touched
+// conflicted at convergence and the run stalled with no route. SMP's
+// adapter already resolved "HEAD" to run.BranchName and passes any other
+// base through unchanged, so it forks from the same ref as before. A run
+// with no spine/ branch (unreachable from the engine) keeps "HEAD".
+func divergenceBase(run *domain.Run) string {
+	if run != nil && run.BranchName != "" && strings.HasPrefix(run.BranchName, "spine/") {
+		return run.BranchName
+	}
+	return "HEAD"
+}
+
 func (s *Service) createBranchRecord(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error) {
 	branch := &domain.Branch{
 		BranchID:      fmt.Sprintf("%s-%s", divCtx.DivergenceID, branchID),
@@ -224,7 +247,7 @@ func (s *Service) createBranchRecord(ctx context.Context, run *domain.Run, divCt
 	if err := s.evaluateBranchOp(ctx, gitBranchName, branchprotect.OpDirectWrite, run.RunID); err != nil {
 		return nil, err
 	}
-	if err := s.git.CreateBranch(ctx, gitBranchName, "HEAD"); err != nil {
+	if err := s.git.CreateBranch(ctx, gitBranchName, divergenceBase(run)); err != nil {
 		return nil, fmt.Errorf("create git branch %s: %w", gitBranchName, err)
 	}
 

@@ -71,6 +71,24 @@ func (s *PostgresStore) UpdateBranch(ctx context.Context, branch *domain.Branch)
 	return mustAffect(tag, "branch not found")
 }
 
+// TransitionBranchCursor moves an open (pending or in_progress) branch's
+// current_step_id from fromStepID to toStepID, and nothing else, only
+// while the branch is still open and at fromStepID (NULL matching "").
+// (true, nil) = applied; (false, nil) = the branch moved on, closed, or
+// does not exist. It implements engine.BranchCursorTransitioner (INIT-023
+// TASK-008 review round 1): crash recovery of a divergence-branch step
+// never writes back a stale branch snapshot.
+func (s *PostgresStore) TransitionBranchCursor(ctx context.Context, branchID, fromStepID, toStepID string) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.branches SET current_step_id = $1
+		WHERE branch_id = $2 AND status IN ($3, $4) AND COALESCE(current_step_id, '') = $5`,
+		nilIfEmpty(toStepID), branchID, domain.BranchStatusPending, domain.BranchStatusInProgress, fromStepID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (s *PostgresStore) GetBranch(ctx context.Context, branchID string) (*domain.Branch, error) {
 	var branch domain.Branch
 	var currentStepID *string

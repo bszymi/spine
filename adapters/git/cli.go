@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,7 +68,8 @@ import (
 //	DeleteBranch        branch -D [eoo] <n>
 //	Diff                diff --name-status -z [eoo] <from'> <to'> --
 //	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
-//	ReadFile            cat-file -s [eoo] <ref'>:<path>, then show [eoo] <ref'>:<path> --
+//	ReadFile            --literal-pathspecs ls-tree -l -z --full-tree [eoo] <ref'> <path>, then cat-file -t <oid>, cat-file blob <oid>
+//	                    (rev-parse --verify --quiet [eoo] <ref'>^{tree} only after a failed ls-tree)
 //	ListFiles           ls-tree -r --name-only -z [eoo] <ref'>
 //	TreeEntryType       --literal-pathspecs ls-tree -z --full-tree [eoo] <ref'> <path>   (no "--": after eoo it is a pathspec)
 //	RefSHA              rev-parse --verify [eoo] <ref'>   (no call at all for an existing branch)
@@ -75,7 +77,7 @@ import (
 //	Push, PushBranch    push [eoo] <remote> <oid>^{commit}:refs/heads/<n>
 //	DeleteRemoteBranch  push --delete [eoo] <remote> refs/heads/<n>
 //
-// The trailing "--" on diff, show and log stops a "rev" that is really a
+// The trailing "--" on diff and log stops a "rev" that is really a
 // path from being read as a pathspec. A push source "<oid>^{commit}" can
 // never match a ref name ("^" is illegal in refnames), so neither a
 // local refs/tags/refs/heads/<n> nor a refs/tags/<oid> can make the
@@ -97,14 +99,29 @@ import (
 //
 // No method buffers more than its limit (limits.go): ReadFile refuses a
 // blob over the per-blob limit before reading it (BlobTooLargeError,
-// ErrBlobTooLarge), every other read command fails past the per-command
-// stdout limit (OutputTooLargeError, ErrOutputTooLarge), and mutating
+// ErrBlobTooLarge) and reads blobs only, refusing a directory or a
+// gitlink unread, and a file entry that records a tag, a tree or a commit
+// (NotBlobError, ErrNotBlob; wave 4 follow-up); every
+// other read command fails past the per-command stdout limit
+// (OutputTooLargeError, ErrOutputTooLarge), and mutating
 // commands drain their stdout instead of failing on its size. git's own
 // memory on read commands is bounded per allocation (GIT_ALLOC_LIMIT)
 // and its delta-base cache is pinned, which leaves about three times the
 // alloc limit per read (a delta-chain step: base, result, cache), not
 // one. Diff and ListFiles read NUL-delimited output, so every path is
 // returned raw — never C-quoted, never whitespace-trimmed.
+//
+// # Shared working tree (INIT-023 TASK-012)
+//
+// Every stateful method (Checkout, Commit, Merge, CreateBranch,
+// DeleteBranch, WriteAndStageFile, MergeBound, ResetBranch) holds the
+// tree's process-wide lock for its duration; a multi-step sequence holds it
+// once through WithWorkingTree (WorkingTreeGuard), and an in-place
+// EnterBranch scope until its Cleanup. Merge refuses an empty Target. On a
+// tree registered with WithHomeBranch, a taken sequence first restores a
+// clean checkout of the home branch, and the read methods resolve "HEAD"
+// to refs/heads/<home>. Every git child is stopped with SIGTERM, not
+// SIGKILL, when its context ends (gitcmd.go). See treelock.go.
 type CLIClient struct {
 	repoPath         string
 	credentialHelper string   // path to external credential helper script
@@ -119,10 +136,17 @@ type CLIClient struct {
 	maxBlobBytes     int64 // one ReadFile (WithMaxBlobBytes)
 	maxOutputBytes   int64 // stdout of every other command (WithMaxOutputBytes)
 	maxGitAllocBytes int64 // GIT_ALLOC_LIMIT on read commands (WithMaxGitAllocBytes)
-	// blobSize is ReadFile's size probe; nil means catFileSize. It is a
+	// blobSize, when set, replaces the size ReadFile's entry probe
+	// reported for a blob (it is given the blob's object id). It is a
 	// field only so a test can make the probe lie and exercise the read's
 	// own cap (the second line of defence).
-	blobSize func(ctx context.Context, spec string) (int64, error)
+	blobSize func(ctx context.Context, oid string) (int64, error)
+
+	// Shared working tree (INIT-023 TASK-012, treelock.go): the
+	// WithHomeBranch value (validated and registered for the tree by
+	// NewCLIClient), and the refusal when it was not a valid branch name.
+	homeBranch string
+	homeErr    error
 }
 
 // CLIOption configures a CLIClient.
@@ -290,6 +314,7 @@ func NewCLIClient(repoPath string, opts ...CLIOption) *CLIClient {
 	// Derived after every option, so WithMaxBlobBytes moves the default
 	// alloc limit with it and a too-small explicit value is raised.
 	c.maxGitAllocBytes = deriveGitAllocLimit(c.maxGitAllocBytes, c.blobLimit())
+	c.setupHomeBranch()
 	// When a push token is configured (and no credential helper takes priority),
 	// create a GIT_ASKPASS script that reads credentials from environment variables.
 	// This keeps the token out of argv and off disk in the script itself.
@@ -522,7 +547,7 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 	// Branch arguments never resolve through tags anyway (exact lookup);
 	// this keeps upstream-controlled names out of rev resolution too.
 	args = append(args, "clone", "--no-tags", "--", url, path)
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := newGitCmd(ctx, args...)
 	// Build the clone environment when the client carries any auth
 	// state — askpass token, credential-helper env (e.g.
 	// SMP_WORKSPACE_ID for per-workspace helpers), or both. Skipping
@@ -573,12 +598,21 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 // remote-tracking ref. switch only ever attaches to an existing local
 // branch ("a branch is expected, got tag ..."), carries staged changes
 // like checkout, and refuses to run during an in-progress merge.
+//
+// It takes the client's working tree for its duration (INIT-023 TASK-012,
+// treelock.go): re-entrant inside WithWorkingTree, it never restores the
+// tree — a sequence owns HEAD.
 func (c *CLIClient) Checkout(ctx context.Context, branch string) error {
 	short, _, err := checkBranch("checkout", "branch", branch)
 	if err != nil {
 		return err
 	}
-	return c.switchTo(ctx, short)
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	return c.switchTo(h.ctx, short)
 }
 
 // switchTo runs the Checkout argv for an already-validated short name.
@@ -589,7 +623,15 @@ func (c *CLIClient) switchTo(ctx context.Context, short string) error {
 
 // Commit creates a new commit with the staged changes.
 // Commit messages include structured trailers per Git Integration §5.1.
+// It takes the working tree like Checkout; the commit's own `rev-parse
+// HEAD` reads the real HEAD (the commit just made), never the home branch.
 func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, error) {
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	defer h.release()
+	ctx = h.ctx
 	msg := buildCommitMessage(opts)
 
 	args := []string{"commit", "-m", msg}
@@ -612,16 +654,26 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 	return CommitResult{SHA: strings.TrimSpace(sha)}, nil
 }
 
-// Merge merges a source branch into the current branch (or target branch).
+// Merge merges a source branch into opts.Target.
 //
 // Strategy "abort" or Source "--abort" is the in-band abort sentinel the
 // engine (and SMP's operator) rely on: it runs exactly `git merge
-// --abort` — no checkout, no grammar check, no other argv.
+// --abort` — no checkout, no grammar check, no other argv. An abort that
+// also names a Target, or a Strategy "abort" whose Source is neither empty
+// nor "--abort", is refused before git runs (INIT-023 TASK-012).
 //
-// Otherwise Source is Commit class (a full object id or a branch) and a
-// non-empty Target is Branch class; both are checked before any git
-// process. A branch source is looked up exactly and merged BY OBJECT ID,
-// so a same-named tag or ref, or a refs/tags/refs/heads/<n> planted for a
+// Every other call needs a non-empty Target (INIT-023 TASK-012, audit F8):
+// an empty Target used to mean "merge into whatever is checked out", and
+// in standalone's shared tree that is main between sequences, so
+// convergence (which sent no Target) merged unreviewed divergence-branch
+// content straight into main before the run's review. It is refused with a
+// permanent *GitError ("merge target required") before any git process
+// starts, after Source's grammar check.
+//
+// Otherwise Source is Commit class (a full object id or a branch) and
+// Target is Branch class; both are checked before any git process. A
+// branch source is looked up exactly and merged BY OBJECT ID, so a
+// same-named tag or ref, or a refs/tags/refs/heads/<n> planted for a
 // deleted branch, can never be merged in its place: a missing source
 // branch is ErrKindNotFound and no `git merge` runs. The lookup happens
 // before the switch to Target, so a missing source changes nothing.
@@ -629,16 +681,33 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 // A non-empty SourceSHA (INIT-023 TASK-005) replaces Source: the commit
 // is verified (VerifyCommit's check) before any switch, exactly that
 // object id is merged, Source is never resolved, and BaseSHA reports the
-// target tip the merge was computed on. With an empty SourceSHA the argv
-// is unchanged.
+// target tip the merge was computed on.
+//
+// The whole call (lookup, switch, merge) holds the working tree.
 func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, error) {
 	if opts.Strategy == "abort" || opts.Source == "--abort" {
-		if _, err := c.run(ctx, "merge", "merge", "--abort"); err != nil {
+		if opts.Target != "" {
+			return MergeResult{}, &GitError{Kind: ErrKindPermanent, Op: "merge",
+				Message: "merge abort takes no target"}
+		}
+		if opts.Strategy == "abort" && opts.Source != "" && opts.Source != "--abort" {
+			return MergeResult{}, &GitError{Kind: ErrKindPermanent, Op: "merge",
+				Message: "merge abort takes no source"}
+		}
+		h, err := c.lockTree(ctx)
+		if err != nil {
+			return MergeResult{}, err
+		}
+		defer h.release()
+		if _, err := c.run(h.ctx, "merge", "merge", "--abort"); err != nil {
 			return MergeResult{}, err
 		}
 		return MergeResult{}, nil
 	}
 	if opts.SourceSHA != "" {
+		if opts.Target == "" {
+			return MergeResult{}, errMergeTargetRequired()
+		}
 		return c.mergeSHA(ctx, opts)
 	}
 
@@ -646,26 +715,34 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 	if err := checkCommit("merge", "source", opts.Source, false); err != nil {
 		return MergeResult{}, err
 	}
-	var target string
-	if opts.Target != "" {
-		short, _, err := checkBranch("merge", "target", opts.Target)
-		if err != nil {
-			return MergeResult{}, err
-		}
-		target = short
+	if opts.Target == "" {
+		return MergeResult{}, errMergeTargetRequired()
+	}
+	target, _, err := checkBranch("merge", "target", opts.Target)
+	if err != nil {
+		return MergeResult{}, err
 	}
 
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return MergeResult{}, err
+	}
+	defer h.release()
+	ctx = h.ctx
 	// Phase 2: resolve the source to an object id, then switch.
 	source, err := c.resolveCommit(ctx, "merge", "source", opts.Source)
 	if err != nil {
 		return MergeResult{}, err
 	}
-	if target != "" {
-		if err := c.switchTo(ctx, target); err != nil {
-			return MergeResult{}, err
-		}
+	if err := c.switchTo(ctx, target); err != nil {
+		return MergeResult{}, err
 	}
 	return c.runMerge(ctx, opts, source)
+}
+
+// errMergeTargetRequired is Merge's refusal of an implicit target.
+func errMergeTargetRequired() *GitError {
+	return &GitError{Kind: ErrKindPermanent, Op: "merge", Message: "merge target required"}
 }
 
 // runMerge runs `git merge` of the already-resolved source object id
@@ -730,6 +807,13 @@ func (c *CLIClient) runMerge(ctx context.Context, opts MergeOpts, source string)
 // it: autoSetupMerge's default tracks remote-tracking bases only). An
 // unborn HEAD still fails with "not a valid object name", Permanent, as
 // before.
+//
+// It holds the working tree (INIT-023 TASK-012). When base is "HEAD" and
+// this call TAKES a tree that has a home branch, the tree is restored
+// first, so a run or divergence branch is never cut from a foreign run
+// branch a poisoned tree was left on; a failed restore is the
+// *TreeRestoreError and no branch is created. Inside a sequence (re-entry)
+// nothing is restored: the sequence's entry restore already did.
 func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
 	short, _, err := checkBranch("branch", "name", name)
 	if err != nil {
@@ -737,6 +821,19 @@ func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
 	}
 	if err := checkCommit("branch", "base", base, true); err != nil {
 		return err
+	}
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	ctx = h.ctx
+	if h.fresh && base == "HEAD" {
+		if home := c.treeHome(); home != "" {
+			if _, err := c.restoreHeld(ctx, home); err != nil {
+				return err
+			}
+		}
 	}
 	from, err := c.resolveCommit(ctx, "branch", "base", base)
 	if err != nil {
@@ -747,12 +844,18 @@ func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
 }
 
 // DeleteBranch deletes a local branch (Branch class).
+// It holds the working tree like Checkout.
 func (c *CLIClient) DeleteBranch(ctx context.Context, name string) error {
 	short, _, err := checkBranch("branch", "name", name)
 	if err != nil {
 		return err
 	}
-	_, err = c.run(ctx, "branch", "branch", "-D", "--end-of-options", short)
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	_, err = c.run(h.ctx, "branch", "branch", "-D", "--end-of-options", short)
 	return err
 }
 
@@ -782,11 +885,11 @@ func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, erro
 	if err := checkRev("diff", "to", to); err != nil {
 		return nil, err
 	}
-	fromRev, err := c.resolveRev(ctx, "diff", "from", from)
+	fromRev, err := c.resolveRev(ctx, "diff", "from", c.homeRev(from))
 	if err != nil {
 		return nil, err
 	}
-	toRev, err := c.resolveRev(ctx, "diff", "to", to)
+	toRev, err := c.resolveRev(ctx, "diff", "to", c.homeRev(to))
 	if err != nil {
 		return nil, err
 	}
@@ -897,6 +1000,12 @@ func validDiffStatus(s string) bool {
 
 // Log returns commit history. A non-empty Since is Rev class; Path
 // always follows the `--`.
+//
+// The history ends at HEAD — on a tree with a home branch (INIT-023
+// TASK-012 §2.9) at refs/heads/<home>, looked up exactly: both the
+// implicit default revision and the `<since>..HEAD` range name the home
+// branch's object id, so a history query issued while a sequence has a
+// run branch checked out still reads the home branch.
 func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error) {
 	if opts.Since != "" {
 		if err := checkRev("log", "since", opts.Since); err != nil {
@@ -909,12 +1018,22 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 		args = append(args, fmt.Sprintf("-n%d", opts.Limit))
 	}
 	args = append(args, "--end-of-options")
-	if opts.Since != "" {
-		since, err := c.resolveRev(ctx, "log", "since", opts.Since)
+	tip := "HEAD"
+	if home := c.treeHome(); home != "" {
+		oid, err := c.resolveBranchOID(ctx, "log", "HEAD", headsPrefix+home, home)
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, fmt.Sprintf("%s..HEAD", since))
+		tip = oid
+	}
+	if opts.Since != "" {
+		since, err := c.resolveRev(ctx, "log", "since", c.homeRev(opts.Since))
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, fmt.Sprintf("%s..%s", since, tip))
+	} else if tip != "HEAD" {
+		args = append(args, tip)
 	}
 	args = append(args, "--")
 	if opts.Path != "" {
@@ -933,67 +1052,130 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 // is refused: `git show :<path>` would read the index, which no caller
 // means.
 //
-// The read is bounded (INIT-023 TASK-003, audit F4):
+// It reads blobs only (INIT-023 wave 4 follow-up). Before it, the
+// content came from `git show [eoo] <rev>:<path> --`, which renders
+// whatever the revision parser makes of the spec: a directory as a
+// listing; a gitlink whose commit is in the repository as that commit
+// with its whole patch — SMP measured 272 MiB in the git child at
+// ae513dca, which neither the output cap nor GIT_ALLOC_LIMIT stops (a
+// diff queue is millions of small allocations); and a path holding ".."
+// or "^" as a range or a revision with its parents, so a missing
+// "d..main" read as `git log` of `<rev>:d..main`, and even an existing
+// file of that name was rendered as the range. The path never reaches a
+// revision expression now:
 //
-//  1. `git cat-file -s [eoo] <rev>:<path>` probes the size. It reads only
-//     the object header (a delta's header for a deltified object), so
-//     git never inflates an oversized blob. A size over the per-blob
-//     limit is refused before any content is read: a *GitError
-//     {Permanent, "read_file", "blob exceeds read limit"} wrapping a
+//  1. `git --literal-pathspecs ls-tree -l -z --full-tree [eoo] <rev> <path>`
+//     types the entry at exactly that path (the record whose path is
+//     byte-equal to it; git normalises the pathspec) and reports its
+//     object id and, for a file entry, the recorded object's size.
+//     ls-tree reads only tree objects and the object's header, so a
+//     gitlink whose commit is absent is still typed and an oversized
+//     blob is never inflated. The type comes from the entry's MODE, so a
+//     gitlink recording the id of a blob in this repository is still a
+//     gitlink.
+//  2. No entry: a miss (below). A directory or a gitlink: a
+//     *GitError{Permanent, "read_file", NotBlobMessage} wrapping a
+//     *NotBlobError, matching ErrNotBlob — refused before any object is
+//     read.
+//  3. A file entry (a blob mode) records an id, and nothing makes that
+//     id a blob's: `git cat-file -t <oid>` reads the object's own type
+//     from its header (adversarial review of the wave 4 follow-up). A
+//     tag, a tree or a commit is the same not-a-file refusal, its
+//     NotBlobError carrying that type and FileEntry. Without this check
+//     the read below peeled a tag to its target blob — content no diff
+//     shows, since git diff shows the tag object's own text — and failed
+//     on a tree or a commit with a plain Permanent "bad file" that a
+//     caller could not tell from a git failure.
+//  4. A blob over the per-blob limit: a *GitError{Permanent,
+//     "read_file", "blob exceeds read limit"} wrapping a
 //     *BlobTooLargeError with the probed size, matching ErrBlobTooLarge.
-//  2. `git show [eoo] <rev>:<path> --` (unchanged argv, so blobs are
-//     byte-identical: no textconv or filter runs without --textconv, and
-//     a tree path keeps its listing) reads into one buffer pre-sized to
-//     the probed size and capped at the limit — no doubling, no string
-//     round trip. Overrunning the cap is the same refusal with Size -1:
-//     the object behind a named ref moved after the probe, or `git show`
-//     rendered more than the probed object (a gitlink to a commit in the
-//     repository prints that commit with its patch).
+//  5. `git cat-file blob <oid>` reads the probed object — by id, so a
+//     ref that moves after the probe cannot change what is read (an
+//     object id names one object, so the type step 3 read is the type
+//     of what is read here) — into one buffer pre-sized to the probed
+//     size and capped at the limit. It is byte-identical to `git show`
+//     of a blob (no textconv or filter runs). Overrunning the cap is the
+//     size refusal with Size -1.
 //
-// Both commands run with GIT_ALLOC_LIMIT, so a small blob stored as a
-// delta on a huge base, or the patch of a gitlink, is refused by git
-// before it allocates the large object; that is also Size -1, with
-// GitAllocLimit set so the message names the real cause (the file itself
-// may be small).
+// Every command runs with GIT_ALLOC_LIMIT, so a small blob stored as a
+// delta on a huge base is refused by git before it allocates the large
+// object; that is also Size -1, with GitAllocLimit set so the message
+// names the real cause (the file itself may be small).
 //
-// Errors are those of the unbounded read (I2). When the probe fails for
-// any reason other than a size bound, the `git show` runs anyway and its
-// result is returned: cat-file words some misses differently ("invalid
-// object name" where `git show … --` says "bad revision"), and every miss
-// must keep the kind and text it has today (ErrKindNotFound since
-// INIT-023 TASK-002). That costs one extra git process on a miss; the
-// show is bounded exactly like a probed one.
+// The path is the one `git show` looked up (entryLookupPath): a "./" or
+// "../" prefix is relative to the repository root ("./task.md" reads
+// task.md, "./" is the root tree; climbing out of the repository is git's
+// Permanent "outside repository" error), and a trailing "/" names only a
+// directory.
+//
+// A miss keeps the error it has had since INIT-023 TASK-002 — git's
+// "bad revision '<rev>:<path>'", ErrKindNotFound, Op "read_file" — now
+// built here instead of read from a `git show` that would first try the
+// spec as a range. It is the answer when the revision's tree has no
+// entry at exactly that path; when the path can name no tree entry at
+// all ("", a leading "/", an empty, "." or ".." component inside it, a
+// NUL byte — git took those literally and found nothing); and when the
+// revision names no tree, which `git rev-parse --verify --quiet
+// <rev>^{tree}` proves by its exit status (1) after ls-tree failed —
+// never git's stderr. Any other ls-tree or cat-file failure is classified
+// from git's stderr as before (a missing blob in a corrupt repository is
+// an error, not a miss; its stderr names only the object id).
 //
 // A 0-byte blob returns a non-nil, empty slice.
 func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, error) {
 	if err := checkRev("read_file", "ref", ref); err != nil {
 		return nil, err
 	}
-	rev, err := c.resolveRev(ctx, "read_file", "ref", ref)
+	rev, err := c.resolveRev(ctx, "read_file", "ref", c.homeRev(ref))
 	if err != nil {
 		return nil, err
 	}
-	spec := rev + ":" + path
 	limit := c.blobLimit()
 
-	probe := c.blobSize
-	if probe == nil {
-		probe = c.catFileSize
+	ent, err := c.readEntry(ctx, rev, path)
+	if err != nil {
+		if errors.Is(err, ErrOutputTooLarge) {
+			return nil, readOverrun(ref, path, limit, err)
+		}
+		return nil, err
+	}
+	switch ent.typ {
+	case "":
+		return nil, readMiss(rev + ":" + path)
+	case TreeEntryTree, TreeEntryCommit:
+		return nil, &GitError{Kind: ErrKindPermanent, Op: "read_file", Message: NotBlobMessage,
+			Err: &NotBlobError{Ref: ref, Path: path, Type: ent.typ}}
+	}
+
+	// A file entry: its mode says blob, which does not make the object it
+	// records one (step 3).
+	objType, err := c.objectType(ctx, ent.oid)
+	if err != nil {
+		if errors.Is(err, ErrOutputTooLarge) {
+			return nil, readOverrun(ref, path, limit, err)
+		}
+		return nil, err
+	}
+	if objType != TreeEntryBlob {
+		return nil, &GitError{Kind: ErrKindPermanent, Op: "read_file", Message: NotBlobMessage,
+			Err: &NotBlobError{Ref: ref, Path: path, Type: objType, FileEntry: true}}
+	}
+
+	size := ent.size
+	if c.blobSize != nil {
+		if size, err = c.blobSize(ctx, ent.oid); err != nil {
+			return nil, err
+		}
 	}
 	var sizeHint int64
-	size, err := probe(ctx, spec)
 	switch {
-	case errors.Is(err, ErrOutputTooLarge):
-		return nil, readOverrun(ref, path, limit, err)
-	case err != nil:
-		// Not a size refusal: let `git show` produce today's error.
 	case size > limit:
 		return nil, blobTooLarge(ref, path, size, limit)
-	default:
+	case size > 0:
 		sizeHint = size
 	}
 
-	out, err := c.runBounded(ctx, "read_file", limit, sizeHint, "show", "--end-of-options", spec, "--")
+	out, err := c.runBounded(ctx, "read_file", limit, sizeHint, "cat-file", "blob", ent.oid)
 	if err != nil {
 		if errors.Is(err, ErrOutputTooLarge) {
 			return nil, readOverrun(ref, path, limit, err)
@@ -1006,21 +1188,187 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 	return out, nil
 }
 
-// catFileSize is ReadFile's default size probe: `git cat-file -s
-// [eoo] <spec>` (no trailing "--": cat-file takes exactly one object name,
-// which it never reads as a pathspec). It runs as a read command, so its
-// stdout is capped and it gets GIT_ALLOC_LIMIT.
-func (c *CLIClient) catFileSize(ctx context.Context, spec string) (int64, error) {
-	out, err := c.runBounded(ctx, "read_file", maxProbeBytes, 0, "cat-file", "-s", "--end-of-options", spec)
+// maxObjectTypeBytes bounds `git cat-file -t` output: one type word.
+const maxObjectTypeBytes = 64
+
+// objectType is ReadFile's step 3: the type of the object oid names, as
+// `git cat-file -t <oid>` prints it — read from the object's header, never
+// its content, and never dereferenced (a tag is "tag", not its target's
+// type). oid is a full object name from ls-tree, so it cannot be an option
+// or a revision expression. Anything but one of the four object types is
+// an error.
+func (c *CLIClient) objectType(ctx context.Context, oid string) (string, error) {
+	out, err := c.runBounded(ctx, "read_file", maxObjectTypeBytes, 0, "cat-file", "-t", oid)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	size, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if perr != nil || size < 0 {
-		return 0, &GitError{Kind: ErrKindPermanent, Op: "read_file",
-			Message: "unexpected git cat-file -s output", Err: perr}
+	switch typ := strings.TrimSuffix(string(out), "\n"); typ {
+	case TreeEntryBlob, TreeEntryTree, TreeEntryCommit, ObjectTag:
+		return typ, nil
+	default:
+		return "", &GitError{Kind: ErrKindPermanent, Op: "read_file",
+			Message: fmt.Sprintf("unexpected object type %q", truncateRecord(typ))}
 	}
-	return size, nil
+}
+
+// blobEntry is ReadFile's probe result: the tree entry at exactly the
+// requested path.
+type blobEntry struct {
+	typ  string // TreeEntryBlob, TreeEntryTree, TreeEntryCommit, or "" for no entry
+	oid  string // the entry's object id
+	size int64  // the blob's size; -1 when ls-tree reported none
+}
+
+// readEntry types the entry path names in rev's tree (ReadFile step 1).
+// The path is first resolved the way `git show <rev>:<path>` resolved it
+// (entryLookupPath): a "./" or "../" prefix is relative to the
+// repository root, and a trailing "/" names only a directory. A path no
+// tree entry can have, and a revision that names no tree, are "no entry"
+// (typ ""). The ls-tree output is one record for any path readEntryPath
+// accepts; its cap leaves room for a second and fails the read past it
+// (errors.Is ErrOutputTooLarge — a tree carrying duplicate entries is
+// refused, not guessed at).
+func (c *CLIClient) readEntry(ctx context.Context, rev, path string) (blobEntry, error) {
+	lookup, dirOnly, root, err := c.entryLookupPath(path)
+	if err != nil {
+		return blobEntry{}, err
+	}
+	if root { // "./": the revision's root tree
+		ok, err := c.revNamesTree(ctx, rev)
+		if err != nil || !ok {
+			return blobEntry{}, err
+		}
+		return blobEntry{typ: TreeEntryTree}, nil
+	}
+	if !readEntryPath(lookup) {
+		return blobEntry{}, nil
+	}
+	limit := 2 * (int64(len(lookup)) + readEntryRecordBytes)
+	out, err := c.runBounded(ctx, "read_file", limit, 0,
+		"--literal-pathspecs", "ls-tree", "-l", "-z", "--full-tree", "--end-of-options", rev, lookup)
+	if err != nil {
+		if !errors.Is(err, ErrOutputTooLarge) && ctx.Err() == nil {
+			if ok, rerr := c.revNamesTree(ctx, rev); rerr == nil && !ok {
+				return blobEntry{}, nil
+			}
+		}
+		return blobEntry{}, err
+	}
+	ent, err := parseBlobEntry(string(out), lookup)
+	if err != nil || (dirOnly && ent.typ != TreeEntryTree) {
+		return blobEntry{}, err
+	}
+	return ent, nil
+}
+
+// entryLookupPath is the tree path `git show <rev>:<path>` looked up for
+// path, and whether only a directory matches it (a trailing "/": git
+// listed "d/" as the directory d and found no "d/x.md/").
+//
+// A path that starts with "./" or "../" is relative to git's working
+// directory, the repository root (git's resolve_relative_path): "."
+// components and repeated slashes are dropped and ".." pops a component,
+// so "./task.md" still reads task.md (codex review, wave 4 follow-up); a
+// path that climbs out of the repository is git's own refusal, a
+// Permanent "outside repository" error, as before. "./" alone is the root
+// tree (lookup ""). Any other path was taken literally, so it is returned
+// unchanged apart from its trailing slashes; readEntryPath then refuses
+// the shapes no entry can have ("" and "/" among them).
+func (c *CLIClient) entryLookupPath(path string) (lookup string, dirOnly, root bool, err error) {
+	dirOnly = len(path) > 1 && strings.HasSuffix(path, "/")
+	if !strings.HasPrefix(path, "./") && !strings.HasPrefix(path, "../") {
+		return strings.TrimRight(path, "/"), dirOnly, false, nil
+	}
+	clean := pathpkg.Clean(path)
+	switch {
+	case clean == ".." || strings.HasPrefix(clean, "../"):
+		return "", false, false, &GitError{Kind: ErrKindPermanent, Op: "read_file",
+			Message: fmt.Sprintf("fatal: '%s' is outside repository at '%s'", path, c.repoPath)}
+	case clean == ".":
+		return "", true, true, nil
+	}
+	return clean, dirOnly, false, nil
+}
+
+// readEntryRecordBytes bounds an `ls-tree -l -z` record apart from its
+// path: mode, type, a SHA-256 object id, the padded size and separators.
+const readEntryRecordBytes = 128
+
+// readEntryPath reports whether path can name a tree entry: non-empty, no
+// NUL, and every "/"-separated component non-empty and neither "." nor
+// "..". A tree entry's name can be none of those, and git took such a
+// path literally (`<rev>:d/./x.md` and `<rev>:d//x.md` were misses), so
+// it names no file.
+func readEntryPath(path string) bool {
+	if path == "" || strings.IndexByte(path, 0) >= 0 {
+		return false
+	}
+	for _, comp := range strings.Split(path, "/") {
+		if comp == "" || comp == "." || comp == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// revNamesTree reports whether rev names a tree-ish:
+// `git rev-parse --verify --quiet [eoo] <rev>^{tree}` exits 0 (yes) or 1,
+// its "not a valid object name" answer (no; a name that resolves to a blob
+// also prints why on stderr — the status decides, never the text). rev
+// passed checkRev, so it holds no "^" or ":" of its own. Any other outcome
+// — git died (128), could not run or was signalled — is an error.
+func (c *CLIClient) revNamesTree(ctx context.Context, rev string) (bool, error) {
+	_, err := c.runBounded(ctx, "read_file", maxProbeBytes+64, 0,
+		"rev-parse", "--verify", "--quiet", "--end-of-options", rev+"^{tree}")
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
+}
+
+// parseBlobEntry reads `ls-tree -l -z` records ("<mode> SP <type> SP
+// <object> SP+ <size> TAB <path> NUL") and returns the entry whose path
+// equals want, or a zero blobEntry when there is none. A record that does
+// not have the documented shape is an error, never "no entry".
+func parseBlobEntry(output, want string) (blobEntry, error) {
+	for _, rec := range strings.Split(output, "\x00") {
+		if rec == "" {
+			continue
+		}
+		meta, p, ok := strings.Cut(rec, "\t")
+		fields := strings.Fields(meta)
+		if !ok || len(fields) != 4 || !IsFullObjectName(fields[2]) {
+			return blobEntry{}, &GitError{Kind: ErrKindPermanent, Op: "read_file",
+				Message: fmt.Sprintf("unexpected ls-tree record %q", truncateRecord(rec))}
+		}
+		switch fields[1] {
+		case TreeEntryBlob, TreeEntryTree, TreeEntryCommit:
+		default:
+			return blobEntry{}, &GitError{Kind: ErrKindPermanent, Op: "read_file",
+				Message: fmt.Sprintf("unexpected tree entry type %q", truncateRecord(fields[1]))}
+		}
+		if p != want {
+			continue
+		}
+		size := int64(-1)
+		if n, err := strconv.ParseInt(fields[3], 10, 64); err == nil && n >= 0 {
+			size = n
+		}
+		return blobEntry{typ: fields[1], oid: fields[2], size: size}, nil
+	}
+	return blobEntry{}, nil
+}
+
+// readMiss is ReadFile's answer for a miss: the *GitError the
+// `git show [eoo] <spec> --` read returned for every miss since INIT-023
+// TASK-002 — git's own text, classified ErrKindNotFound — built without
+// running a command that would parse spec as a revision expression.
+func readMiss(spec string) *GitError {
+	return &GitError{Kind: ErrKindNotFound, Op: "read_file", Message: "fatal: bad revision '" + spec + "'"}
 }
 
 // blobTooLarge builds ReadFile's size refusal.
@@ -1062,11 +1410,20 @@ func readOverrun(ref, path string, limit int64, cause error) *GitError {
 // followed out of the repository. Refusals unwrap to worktreefs.ErrUnsafePath.
 // An existing file is replaced by rename (its mode is kept); a new one is
 // created O_EXCL with mode 0644.
+//
+// The write and the stage hold the working tree (INIT-023 TASK-012), taken
+// before the confined write.
 func (c *CLIClient) WriteAndStageFile(ctx context.Context, path, content string) error {
 	rel, err := worktreefs.Clean(path)
 	if err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	ctx = h.ctx
 	tree, err := worktreefs.Open(c.repoPath)
 	if err != nil {
 		return fmt.Errorf("open worktree: %w", err)
@@ -1096,7 +1453,7 @@ func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]strin
 	if err := checkRev("list_files", "ref", ref); err != nil {
 		return nil, err
 	}
-	rev, err := c.resolveRev(ctx, "list_files", "ref", ref)
+	rev, err := c.resolveRev(ctx, "list_files", "ref", c.homeRev(ref))
 	if err != nil {
 		return nil, err
 	}
@@ -1127,8 +1484,14 @@ func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]strin
 	return files, nil
 }
 
-// Head returns the current HEAD commit SHA.
+// Head returns the current HEAD commit SHA. On a tree with a home branch
+// (INIT-023 TASK-012 §2.9) it is the object id of refs/heads/<home>,
+// looked up exactly (a missing home branch is ErrKindNotFound), whatever a
+// sequence has checked out at the moment.
 func (c *CLIClient) Head(ctx context.Context) (string, error) {
+	if home := c.treeHome(); home != "" {
+		return c.resolveBranchOID(ctx, "head", "HEAD", headsPrefix+home, home)
+	}
 	output, err := c.run(ctx, "head", "rev-parse", "HEAD")
 	if err != nil {
 		return "", err
@@ -1146,7 +1509,7 @@ func (c *CLIClient) RefSHA(ctx context.Context, ref string) (string, error) {
 	if err := checkRev("ref-sha", "ref", ref); err != nil {
 		return "", err
 	}
-	rev, err := c.resolveRev(ctx, "ref-sha", "ref", ref)
+	rev, err := c.resolveRev(ctx, "ref-sha", "ref", c.homeRev(ref))
 	if err != nil {
 		return "", err
 	}
@@ -1176,11 +1539,11 @@ func (c *CLIClient) MergeBase(ctx context.Context, a, b string) (string, error) 
 	if err := checkRev("merge-base", "b", b); err != nil {
 		return "", err
 	}
-	revA, err := c.resolveRev(ctx, "merge-base", "a", a)
+	revA, err := c.resolveRev(ctx, "merge-base", "a", c.homeRev(a))
 	if err != nil {
 		return "", err
 	}
-	revB, err := c.resolveRev(ctx, "merge-base", "b", b)
+	revB, err := c.resolveRev(ctx, "merge-base", "b", c.homeRev(b))
 	if err != nil {
 		return "", err
 	}
@@ -1385,7 +1748,7 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 		// Clone).
 		args = append(append([]string{}, noAmbientAuthArgs...), args...)
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := newGitCmd(ctx, args...)
 	cmd.Dir = c.repoPath
 
 	// For push operations, inject extra environment variables for credential

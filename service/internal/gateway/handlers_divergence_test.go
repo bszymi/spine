@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/service/internal/gateway"
@@ -16,10 +17,15 @@ type fakeBranchCreator struct {
 	branch *domain.Branch
 	err    error
 	calls  int
+	// The run and divergence the handler passed (INIT-023 TASK-012 DC-9:
+	// the branch forks from that run's branch).
+	run    *domain.Run
+	divCtx *domain.DivergenceContext
 }
 
-func (f *fakeBranchCreator) CreateExploratoryBranch(_ context.Context, _ *domain.DivergenceContext, branchID, _ string) (*domain.Branch, error) {
+func (f *fakeBranchCreator) CreateExploratoryBranch(_ context.Context, run *domain.Run, divCtx *domain.DivergenceContext, branchID, _ string) (*domain.Branch, error) {
 	f.calls++
+	f.run, f.divCtx = run, divCtx
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -35,6 +41,13 @@ func (f *fakeBranchCreator) CloseWindow(_ context.Context, _ *domain.DivergenceC
 
 // newDivergenceFullServer creates a server with both a fakeStore and fakeBranchCreator.
 func newDivergenceFullServer(t *testing.T, bc gateway.BranchCreator) (*httptest.Server, string, string) {
+	t.Helper()
+	return newDivergenceServerWith(t, bc, func(fs *fakeStore) store.Store { return fs })
+}
+
+// newDivergenceServerWith is newDivergenceFullServer whose store setup
+// can add divergence contexts or wrap the fake store.
+func newDivergenceServerWith(t *testing.T, bc gateway.BranchCreator, setup func(*fakeStore) store.Store) (*httptest.Server, string, string) {
 	t.Helper()
 	fs := newFakeStore()
 	fs.actors["contrib-1"] = &domain.Actor{
@@ -53,11 +66,61 @@ func newDivergenceFullServer(t *testing.T, bc gateway.BranchCreator) (*httptest.
 	contribToken, _, _ := authSvc.CreateToken(context.Background(), "contrib-1", "test", nil)
 	opToken, _, _ := authSvc.CreateToken(context.Background(), "op-1", "test", nil)
 	srv := gateway.NewServer(":0", gateway.ServerConfig{
-		Store:         fs,
+		Store:         setup(fs),
 		Auth:          authSvc,
 		BranchCreator: bc,
 	})
 	return httptest.NewServer(srv.Handler()), contribToken, opToken
+}
+
+// getRunFailStore fails every GetRun.
+type getRunFailStore struct{ *fakeStore }
+
+func (getRunFailStore) GetRun(context.Context, string) (*domain.Run, error) {
+	return nil, domain.NewError(domain.ErrNotFound, "run not found")
+}
+
+// INIT-023 TASK-012 DC-9 (review round 1): the handler hands the creator
+// the divergence's own run — looked up by the divergence context's run
+// ID, not the URL's — so the branch forks from that run's branch; a run
+// that cannot be loaded is an error and nothing is created.
+func TestHandleCreateBranch_PassesTheDivergencesRun(t *testing.T) {
+	post := func(t *testing.T, ts *httptest.Server, token string) int {
+		t.Helper()
+		body := `{"branch_id":"b-1","start_step":"step-1"}`
+		req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-1/divergences/div-9/branches", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	withDiv9 := func(fs *fakeStore) {
+		fs.divContexts["div-9"] = &domain.DivergenceContext{DivergenceID: "div-9", RunID: "run-9"}
+	}
+
+	bc := &fakeBranchCreator{}
+	ts, _, opToken := newDivergenceServerWith(t, bc, func(fs *fakeStore) store.Store { withDiv9(fs); return fs })
+	defer ts.Close()
+	if code := post(t, ts, opToken); code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", code)
+	}
+	if bc.run == nil || bc.run.RunID != "run-9" || bc.run.BranchName == "" || bc.divCtx == nil || bc.divCtx.RunID != "run-9" {
+		t.Fatalf("creator got run %+v for divergence %+v; want the divergence's run run-9 with its branch", bc.run, bc.divCtx)
+	}
+
+	bc = &fakeBranchCreator{}
+	ts2, _, opToken2 := newDivergenceServerWith(t, bc, func(fs *fakeStore) store.Store { withDiv9(fs); return getRunFailStore{fs} })
+	defer ts2.Close()
+	if code := post(t, ts2, opToken2); code != http.StatusNotFound {
+		t.Fatalf("a run that cannot be loaded: expected 404, got %d", code)
+	}
+	if bc.calls != 0 {
+		t.Fatal("the creator was called although the run could not be loaded")
+	}
 }
 
 func newDivergenceServer() (*httptest.Server, string, string) {

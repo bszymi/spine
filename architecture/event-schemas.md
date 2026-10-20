@@ -227,6 +227,13 @@ Emitted when a step execution completes successfully.
 
 **Source:** Workflow Engine
 
+**Event ID:** `evt-<trace_id[:12]>-<execution_id>-completed` — one per step
+*execution* (INIT-023 TASK-008), so every rework attempt is recorded (the per-step
+ID used before made the event log's `ON CONFLICT (event_id) DO NOTHING` drop
+attempt 2 onwards). A crash-recovery re-emission of the same execution
+(`Orchestrator.RecoverCompletedStep`) carries the same ID, so the log keeps the
+original. The envelope's `actor_id` is the execution's actor.
+
 ```yaml
 payload:
   step_id: <string>
@@ -234,10 +241,62 @@ payload:
   outcome: <string>              # Workflow-defined outcome value
   next_step: <string>            # Next step to execute (or "end")
   attempt: <integer>
-  duration_ms: <integer>         # Step execution duration
+  duration_ms: <integer>         # Step execution duration (absent when the step never started)
   has_commit: <boolean>          # Whether this outcome produced a Git commit
   branch_id: <string|null>
+  execution_id: <string>         # INIT-023 TASK-008
+  actor_id: <string>             # the execution's actor (absent when none)
+  # Step-output evidence (INIT-023 TASK-008, audit P3-19). Absent on the
+  # engine-owned publish step (type: internal, handler: merge), which carries
+  # the fields above only.
+  required_outputs: [<string>]   # the step's declared required_outputs (absent when none)
+  artifacts_produced: [<string>] # the submitter's attested list: at most 32 entries,
+                                 # each cut to at most 512 bytes (client-supplied)
+  artifacts_produced_count: <integer>  # exact length of the attested list
+  branch_change:
+    repository_id: spine         # primary repository only (v1)
+    status: unchanged | changed | unknown | not_applicable
+    head_sha: <string>           # the run-branch head recorded for this submit (TASK-005's capture)
+    previous_sha: <string>       # the run's previous trusted binding, else the branch baseline
+    previous_source: <string>    # that binding's spine.bound_by verbatim
+                                 # ("step:<step_id>:<execution_id>", "convergence:…",
+                                 # "merge_recovery:…") or "baseline"
+    changed_paths: <integer>     # 0 when unchanged, the diff's entry count when changed;
+                                 # absent otherwise
+    reason: <string>             # unknown / not_applicable: head_sha_unrecorded,
+                                 # no_previous_sha, diff_failed:<kind>, divergence_branch,
+                                 # no_run_branch, recovered; unchanged:
+                                 # head_moved_tree_unchanged when the head moved but the
+                                 # diff found no changed path (absent when head == previous)
+  required_outputs_unchanged: <boolean>  # the step declared required_outputs and the
+                                         # branch content is provably unchanged
 ```
+
+`branch_change` is evidence, not enforcement: `required_outputs` are logical
+labels the submitter attests (KNOWN-LIMITATIONS "Step Outputs Are Self-Attested
+Labels"). `unchanged` needs no git call when the recorded head equals the
+previous one; otherwise the engine diffs the two under a 3 s timeout. A diff with
+entries is `changed`; a diff with none is `unchanged` too, with `reason:
+head_moved_tree_unchanged` — the commits in between (an empty commit, a change and
+its revert) left the tree as it was, so the step is flagged: the flag is judged on
+the content, not the SHA. A failure or a timeout gives `unknown` with
+`diff_failed:<kind>` (`kind` is a git error kind, `timeout`, `canceled` or
+`error`; the git message is logged, never put in the event). With merge binding
+off and no `expected_head_sha` nothing is captured: `status: unknown`, `reason:
+head_sha_unrecorded`, no git call. A crash-recovery re-emission carries
+`unknown`/`recovered`. When the step declared outputs and the branch is unchanged,
+the engine also logs `WARN required outputs declared but run branch unchanged`,
+once the submission's terminal write has applied (never for a submission that was
+refused or lost its race). The same `branch_change` and
+`required_outputs_unchanged` are persisted for run detail (`GET /runs/{run_id}` →
+`step_output_evidence`) as the reserved `runs.commit_meta` key
+`spine.evidence.<execution_id>`, with merge binding on only.
+
+Upgrade note: an execution completed by a binary before INIT-023 TASK-008 was
+logged under the per-step id `evt-<trace>-<step_id>-completed`. If a crash
+interrupted its routing and the process restarts on a newer binary, recovery
+re-emits it under the per-execution id, so that execution's `step_completed` is
+logged and delivered twice (once per id). This is a one-off, standalone only.
 
 ### 4.3 `step_failed`
 
@@ -427,8 +486,8 @@ payload:
   deleted: <integer>             # Artifacts deleted
   errors: <integer>              # Counted sync errors (state stays at from_commit when > 0)
   workflows_rejected: <integer>  # Workflow files refused for their content (never counted in errors)
-  read_skipped: <integer>        # Changed artifact files git could not read because the commit's tree holds no file at the path (a gitlink to an object not in the repository, a directory); skipped, logged at Warn
-  refused: <integer>             # Changed files not projected because they are oversized or at an unsafe path (one projection_file_skipped each; never counted in errors)
+  read_skipped: <integer>        # Changed artifact files whose read failed when the commit's tree proves there is no file at that exact path; skipped, logged at Warn (a gitlink is a refused not_a_file since the INIT-023 wave 4 follow-up, counted in refused)
+  refused: <integer>             # Changed files not projected because they are oversized, at an unsafe path, or not a file (a gitlink, or a file entry recording a tag, a tree or a commit; one projection_file_skipped each; never counted in errors)
 ```
 
 ### 4.14 `projection_workflow_rejected`
@@ -451,7 +510,7 @@ payload:
 - `parse`: strict `workflow.Parse` refused the file (unknown, duplicate or case-variant keys, `path` / `commit_sha`, bounds).
 - `round_trip`: `Parse` accepted the file but its stored JSON would decode differently (for example an unquoted `version: 2026-10-06`), or the row could not be stored: U+0000 anywhere, or a workflow path, `id` or `status` over 1024 bytes (an indexed column).
 - `read_bounds`: the blob is refused by a content-size bound on read.
-- `not_a_file`: the commit's tree holds no file (blob) at the path — a gitlink or a directory — so there is no content to project. The entry is typed before the file is read, so a gitlink is refused even when the id it records names a blob in the repository (which `git show` would print, though diffs show only a submodule pointer).
+- `not_a_file`: the commit's tree holds no file (blob) at the path — a gitlink or a directory — so there is no content to project. The entry is typed before the file is read, so a gitlink is refused even when the id it records names a blob in the repository (which `git show` would print, though diffs show only a submodule pointer). A file entry whose recorded object is an annotated tag, a tree or a commit is `not_a_file` too (the git client's object-type check, INIT-023 wave 4 follow-up review; the error names the tree entry `non_blob_object`): a tag whose target is a blob is never read as that blob, which diffs do not show (they show the tag object's text).
 - `validate`: `workflow.Validate` failed and strict projection validation is enabled (off by default).
 - `scope` / `absent_at_head`: the sweep found a stored row outside the workflow definition locations, or whose file no longer exists at head and did not exist at the last synced commit either (a file deleted after the last synced commit is removed like the pending diff would remove it, without a rejection).
 - `unsafe_path`: a stored row at a path INIT-023 TASK-003 refuses to project (a control, bidi or line-separator character in the file name). Such a row can only come from a projection built before TASK-003 by a git configured with `core.quotePath=false`, which listed those names raw. It is reported by the sweep when the file is still at head, and by an incremental sync that adds or modifies the file; the file itself is also reported as `projection_file_skipped` (`unsafe_path`) by the sync. A row whose file is deleted or renamed away is deleted without a rejection, as for any other path (INIT-023 wave 3 integration).
@@ -461,26 +520,87 @@ payload:
 
 ### 4.15 `projection_file_skipped`
 
-Emitted once per file the projection declined to project (INIT-023 TASK-003): a file over the git client's per-blob read limit (default 4 MiB, `git.WithMaxBlobBytes`), or a candidate at a path Spine refuses to store. A skip is never a sync error: `FullRebuild` and `IncrementalSync` advance past it. Each one is also logged at Warn (`projection skipped file`) and counted in `spine_projection_files_skipped_total`. It is reported as soon as discovery has decided it, before any later step can hold the sync: a sync held in `error` for another reason (an unreadable changed file, a failed store write or wipe) still reports it, and every retry reports it again under the same event id (the delivery queue de-duplicates; the counter counts each report). `artifact_path` on the envelope is the reported `path` (repository-relative, never stripped of `artifacts_dir`, since a skipped file has no projection key).
+Emitted once per file the projection declined to project (INIT-023 TASK-003): a file over the git client's per-blob read limit (default 4 MiB, `git.WithMaxBlobBytes`), a candidate at a path Spine refuses to store, or (wave 4 follow-up) an artifact candidate that is a gitlink, not a file. A skip is never a sync error: `FullRebuild` and `IncrementalSync` advance past it. Each one is also logged at Warn (`projection skipped file`) and counted in `spine_projection_files_skipped_total`. It is reported as soon as discovery has decided it, before any later step can hold the sync: a sync held in `error` for another reason (an unreadable changed file, a failed store write or wipe) still reports it, and every retry reports it again under the same event id (the delivery queue de-duplicates; the counter counts each report). `artifact_path` on the envelope is the reported `path` (repository-relative, never stripped of `artifacts_dir`, since a skipped file has no projection key).
 
 **Source:** Projection Service (`FullRebuild` and `IncrementalSync`)
 
 **When it fires:**
 
-- `oversized`: an artifact candidate (`*.md`) whose blob is over the read limit, or that git cannot produce within its allocation limit (`git_alloc_limit_bytes` set: a small file stored as a delta on a large base, or a gitlink rendered with its patch) — added, modified, renamed to, or present at the rebuild head. Its content is never read, so it is reported whether or not it is a governed artifact. A projected artifact modified past the limit also loses its row (as for a parse failure). An oversized *workflow* file is a `projection_workflow_rejected` with check `read_bounds` instead (§4.14); an oversized `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
+- `oversized`: an artifact candidate (`*.md`) whose blob is over the read limit, or that git cannot produce within its allocation limit (`git_alloc_limit_bytes` set: a small file stored as a delta on a large base) — added, modified, renamed to, or present at the rebuild head. Its content is never read, so it is reported whether or not it is a governed artifact. A projected artifact modified past the limit also loses its row (as for a parse failure). An oversized *workflow* file is a `projection_workflow_rejected` with check `read_bounds` instead (§4.14); an oversized `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
+- `not_a_file` (INIT-023 wave 4 follow-up): an artifact candidate (`*.md`) the commit's tree records as a gitlink (mode 160000), not a file, or as a file entry whose recorded object is an annotated tag, a tree or a commit (review of the follow-up) — added, modified, renamed to, or present at the rebuild head. The git client refuses it without reading the content of any object behind it (`git.ErrNotBlob`), so a gitlink whose recorded id names a blob in the repository is never projected as that blob, nor a file entry recording a tag as the tag's target. A projected artifact replaced by a gitlink loses its row. `size_bytes`, `limit_bytes` and `git_alloc_limit_bytes` are null. Either at a workflow path is a `projection_workflow_rejected` with check `not_a_file` instead (§4.14).
 - `unsafe_path`: an artifact or workflow-definition candidate whose path is not valid UTF-8 or holds a control character (C0, DEL, C1), U+2028/U+2029, or a bidi embedding, override or isolate control (U+202A–U+202E, U+2066–U+2069). The file is never read, and no store call carries its path. A deleted or renamed-away unsafe path is ignored (no such row can exist).
 
 ```yaml
 payload:
   path: <string>          # Repository-relative path; for unsafe_path, Go-quoted (strconv.Quote: one line, valid UTF-8, every control and bidi character escaped)
-  reason: <string>        # oversized | unsafe_path
-  size_bytes: <integer>   # oversized: the blob's size, or -1 when the read overran the limit (git refused an allocation — see git_alloc_limit_bytes — or `git show` rendered more than the probed object); null for unsafe_path
-  limit_bytes: <integer>  # oversized: the limit it exceeded (-1 if the git client did not report it); null for unsafe_path
-  git_alloc_limit_bytes: <integer>  # oversized, when git itself refused an allocation over this GIT_ALLOC_LIMIT while producing the content (size_bytes is then -1): the file may be under limit_bytes, and what is too large is a delta base it is stored on or a gitlink's patch; null otherwise
+  reason: <string>        # oversized | not_a_file | unsafe_path
+  size_bytes: <integer>   # oversized: the blob's size, or -1 when the read overran the limit (git refused an allocation — see git_alloc_limit_bytes — or the probe under-reported); null for not_a_file and unsafe_path
+  limit_bytes: <integer>  # oversized: the limit it exceeded (-1 if the git client did not report it); null for not_a_file and unsafe_path
+  git_alloc_limit_bytes: <integer>  # oversized, when git itself refused an allocation over this GIT_ALLOC_LIMIT while producing the content (size_bytes is then -1): the file may be under limit_bytes, and what is too large is a delta base it is stored on; null otherwise
   commit: <string>        # The sync head the file was found at (full SHA)
 ```
 
 **Idempotency:** the event id is deterministic — `projskip-` + the first 12 characters of `commit` + `-` + the first 12 hex characters of SHA-256 over `reason`, a NUL byte and the raw path — so a rebuild or a retried sync at the same commit re-emits the same id, which the delivery queue de-duplicates. Existing subscriptions that receive every event type receive this one too.
+
+### 4.16 `governance.merge_held`
+
+Emitted by the governance-path guard (ADR-016; INIT-023 TASK-006) when a governed merge changes governance paths (`.spine/`, `.spine.yaml`, `workflows/`, `<artifacts_dir>/workflows/`) and no operator approval of its bound commit is recorded: the run stays `committing`, nothing is merged, and the hold is recorded on the publish step (or the last completed step of a workflow with no publish step) as `error_detail.classification = governance_approval_required`. Also emitted, with `post_merge: true`, when the post-merge assertion refuses a merge that changed governed paths the evaluation did not cover (a permanent refusal: nothing pushed, the run takes `merge_failed` or fails).
+
+**Source:** Orchestrator (`MergeRunBranch` → `governanceGate`; the post-merge assertion: `checkGovernedMerge` inside the primary merge block, then `settleGovernedRefusal`)
+
+```yaml
+payload:
+  run_id: <string>
+  task_path: <string>
+  bound_sha: <string>             # The commit the merge is bound to (the approval binds to it)
+  paths: [<string>]               # Governed paths the merge changes (capped, MaxReportedPaths, default 100)
+  path_count: <integer>
+  exempt_paths: [<string>]        # Changed paths excused by the lifecycle exemption or the own-run evidence carve-out
+  stale_approval_sha: <string>    # Present when an approval of another commit is recorded
+  post_merge: <boolean>
+  extra_paths: [<string>]         # post_merge only: governed paths the merge changed that were not evaluated
+  extra_path_count: <integer>     # post_merge only
+```
+
+**Idempotency:** the id is `evt-<trace12>-governance-held-<bound_sha12>-<episode>`, where the episode is the hold target's execution id (a new publish execution, or a new review, after a reject and resubmit), so re-evaluation on every scheduler tick emits one id per episode. A post-merge refusal's id ends in `-post-merge`.
+
+### 4.17 `governance.merge_decided`
+
+Emitted when an operator approves or rejects a held merge (`POST /runs/{run_id}/governance-decision`, engine `DecideGovernanceMerge`). An approval is announced as soon as it is recorded, before its merge runs; an approve that finds the run no longer `committing` records nothing and emits nothing. A reject that loses to a merge that completed (or reached the local `main`) meanwhile returns `409` and emits nothing.
+
+**Source:** Orchestrator (`DecideGovernanceMerge`)
+
+```yaml
+payload:
+  run_id: <string>
+  bound_sha: <string>
+  decision: <string>      # approved | rejected
+  actor_id: <string>
+  actor_role: <string>    # operator | admin
+  reason: <string>        # Required for rejected (at most 2000 bytes)
+  paths: [<string>]       # capped
+  path_count: <integer>
+```
+
+**Idempotency:** `evt-<trace12>-governance-<approve|reject>-<bound_sha12>-<unixmilli>-<rand12>`, where `<rand12>` is 12 random hex characters: every decision is its own event, and two decisions on the same commit within the same millisecond (concurrent operators, a manual retry) do not collapse into one in the de-duplicating event log. Consumers must not parse the id; correlate on `run_id`, `bound_sha` and `decision`.
+
+### 4.18 `branch_protection.removal_refused`
+
+Emitted by the projection's protection-removal guard (ADR-016 §6; INIT-023 TASK-006) when a branch-protection config at the sync head removes a protection kind the installed rules apply to the authoritative branch and no database record of an operator act that changed the config matches it (an honoured `branch_protection.override` push, or an approved governed merge's consumption marker). The previous rules stay installed; the sync is **not** marked `error` (it advances), and the refusal is re-evaluated on the next change to the file and on every full rebuild.
+
+**Source:** Projection Service (`FullRebuild`, `IncrementalSync`)
+
+```yaml
+payload:
+  branch: <string>                  # The authoritative branch
+  installed_kinds: [<string>]       # Kinds the installed rules apply to it
+  candidate_kinds: [<string>]       # Kinds the refused config would apply
+  head_commit: <string>
+  installed_source_commit: <string> # The installed rows' source commit ("bootstrap" for the seed rows)
+  records_checked: <integer>
+```
+
+**Idempotency:** `bp-removal-refused-<head12>`: once per head.
 
 ---
 
@@ -640,7 +760,7 @@ All event types are emitted from the following code paths:
 | `run_resumed` | `Orchestrator.ResumeRun` | engine/run.go |
 | `step_assigned` | `Orchestrator.ActivateStep` | engine/step.go |
 | `step_started` | `Orchestrator.SubmitStepResult` (auto-acknowledge) | engine/step.go |
-| `step_completed` | `Orchestrator.SubmitStepResult` | engine/step.go |
+| `step_completed` | `Orchestrator.SubmitStepResult` (also `RecoverCompletedStep`, and `advancePublishStepIfAny` for the publish step) | engine/step.go, engine/handlers.go |
 | `step_failed` | `Orchestrator.RetryStep` (non-retryable only) | engine/retry.go |
 | `step_timeout` | `Scheduler.handleStepTimeout` | scheduler/timeout.go |
 | `retry_attempted` | `Orchestrator.RetryStep` | engine/retry.go |
@@ -656,6 +776,9 @@ All event types are emitted from the following code paths:
 | `projection_synced` | `projection.Service.IncrementalSync` | projection/service.go |
 | `projection_workflow_rejected` | `projection.Service` | projection/service.go |
 | `projection_file_skipped` | `projection.Service.FullRebuild`, `IncrementalSync` | projection/refused.go |
+| `branch_protection.removal_refused` | `projection.Service.FullRebuild`, `IncrementalSync` | projection/protection_guard.go |
+| `governance.merge_held` | `Orchestrator.MergeRunBranch` (governance gate, post-merge assertion) | engine/governance_guard.go |
+| `governance.merge_decided` | `Orchestrator.DecideGovernanceMerge` | engine/governance_decision.go |
 | `validation_passed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
 | `validation_failed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
 | `step_assignment_failed` | `Orchestrator.ActivateStep` | engine/step.go |

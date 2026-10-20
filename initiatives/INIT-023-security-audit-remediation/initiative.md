@@ -5,7 +5,7 @@ title: Security Audit Remediation
 status: Pending
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-10-14
+last_updated: 2026-10-20
 links:
   - type: related_to
     target: /initiatives/INIT-018-branch-protection/initiative.md
@@ -661,6 +661,42 @@ questions stay in that task.
   "never" (a deviation from its default); whether the commit binder should
   get `GIT_ALLOC_LIMIT` (KNOWN-LIMITATIONS "Git Read Bounds"). Tasks stay In
   Progress until GitHub CI runs after a push. Not pushed.
+- 2026-10-20 — **Wave 4:** TASK-012 (one process-wide lock per working tree,
+  home-branch restore with quarantine, SIGTERM on cancel for every git child,
+  convergence targets the run branch, bounded governed-merge retries), TASK-008
+  (submitter identity, run-status and step compare-and-swap, cancel losing to a
+  merge start answers 409), TASK-017 (the artifact status lifecycle at the
+  governed merge, the V1 merge-result check) and TASK-006 (the governance-path
+  guard: governed merges that change `.spine/`, `.spine.yaml` or `workflows/`
+  wait for an operator's approval of the exact bound commit; the projection
+  keeps protection rules a merge removed without authority) merged to local
+  `main` through `init/INIT-023-wave4-integration`. Each task was reviewed alone
+  (three lenses, two rounds, codex on gpt-6.1-sol). The integration put every
+  take-back through TASK-012's armed `ResetBranch` under the tree lock and fixed
+  the check order (binding, lifecycle, governance hold, merge, V1 and the subset
+  check, push); codex found one P2 (`MergeBases` on a home-branch tree), fixed.
+  The cross-task review (two skeptics per P1/P2) confirmed two P2s, both fixed
+  with tests: V1 and the governance check could be skipped for good after a late
+  `MergeBound` error or a crash inside the merge block (now a
+  `spine.merge.unverified` record taken back at the next attempt), and a failed
+  read could put a governance hold on the wrong step. A follow-up fixed two
+  TASK-003 residuals SMP found: `ReadFile` reads blobs only (a gitlink took the
+  git child to 272 MiB; a tag, tree or commit recorded at a file entry is
+  refused; range syntax in a path never reaches the revision parser), and pinned
+  two guards no test covered. An independent check mutated 45 fixes out of the
+  merged trees. Gates: Spine CI, vet with every tag, race on the changed
+  packages, integration and the `scenario-git-http` job on PostgreSQL 18, the
+  `git-floor` job on git 2.39.5, golangci (no new issues), codex on gpt-6.1-sol
+  clean on the final code. SMP `main` builds against it and passes its
+  Spine-runtime and gateway suites; SMP's wave 4 (`.spine-revision` ae513dca)
+  also passes against it. Expected at SMP's next bump: two SMP gitread contract
+  tests that pin the old gitlink reading fail, and SMP's own `gitread` read
+  still peels a tag at a file entry (SMP TASK-010 closes it). Known pre-existing
+  failures, identical on `main`: 31 scenario tests with a migrated registry,
+  `TestRunModeDatabaseDefault`. Open for the owner: ADR-016 (TASK-006 OQ1) is
+  Proposed until signed off; TASK-006 AC 11/18, TASK-008 AC 10/11/21 and TASK-012
+  AC 15 wording amendments; whether an approved governance merge restarts its
+  retry count. Tasks stay In Progress until GitHub CI runs. Not pushed.
 
 ---
 

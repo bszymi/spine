@@ -22,6 +22,16 @@ const (
 	// RefusedUnsafePath: the path is not one the projection stores
 	// (UnsafePath). The file is never read.
 	RefusedUnsafePath RefusalReason = "unsafe_path"
+	// RefusedNotAFile: the commit's tree records a gitlink (or a
+	// directory) at the path, not a file, or a file entry whose recorded
+	// object is a tag, a tree or a commit — the git client refused the
+	// read as not a blob (git.ErrNotBlob; INIT-023 wave 4 follow-up and
+	// its review). Like an oversized blob it can never become readable at
+	// that commit, so discovery skips it, records it and moves on; no
+	// object's content behind the entry is read, so a gitlink recording
+	// the id of a blob in the repository is never projected as that blob,
+	// nor a file entry recording a tag as the tag's target.
+	RefusedNotAFile RefusalReason = "not_a_file"
 )
 
 // RefusedFile is a file discovery declined to project. Refusals are not
@@ -38,7 +48,7 @@ type RefusedFile struct {
 	// Size and Limit are set for RefusedOversized: the blob's size (-1
 	// when the read overran the limit rather than being refused by the
 	// size probe) and the limit it exceeded (-1 when the client did not
-	// report it). Both are 0 for RefusedUnsafePath.
+	// report it). Both are 0 for RefusedUnsafePath and RefusedNotAFile.
 	Size  int64
 	Limit int64
 	// GitAllocLimit is set for RefusedOversized when git itself refused
@@ -73,11 +83,17 @@ func StoredUnsafePath(p string) bool { return UnsafePath(p) && utf8.ValidString(
 // readForDiscovery reads one candidate. It returns exactly one of: the
 // content; a RefusedOversized record when the git client refused the
 // blob for its size (git.ErrBlobTooLarge — any GitClient whose refusal
-// matches the sentinel, not only *git.CLIClient); or the read error.
+// matches the sentinel, not only *git.CLIClient); a RefusedNotAFile record
+// when it refused the path as not naming a file (git.ErrNotBlob: a
+// gitlink, a directory, or a file entry recording a tag, a tree or a
+// commit); or the read error.
 func readForDiscovery(ctx context.Context, gitClient git.GitClient, ref, path string) ([]byte, *RefusedFile, error) {
 	content, err := gitClient.ReadFile(ctx, ref, path)
 	if err == nil {
 		return content, nil, nil
+	}
+	if errors.Is(err, git.ErrNotBlob) {
+		return nil, &RefusedFile{Path: path, Reason: RefusedNotAFile}, nil
 	}
 	if errors.Is(err, git.ErrBlobTooLarge) {
 		rf := &RefusedFile{Path: path, Reason: RefusedOversized, Size: -1, Limit: -1}
@@ -113,4 +129,17 @@ func ReadLimitPhrase(err error) string {
 		return fmt.Sprintf("exceeds the %d-byte read limit", tl.Limit)
 	}
 	return "exceeds the read limit"
+}
+
+// NotAFilePhrase renders the git client's not-a-file refusal
+// (git.ErrNotBlob) for an API message: "the path names a gitlink (commit),
+// not a file", the directory form, or "the path's file entry records a tag
+// object, not file content". It never repeats the path, which the caller
+// already names.
+func NotAFilePhrase(err error) string {
+	var nb *git.NotBlobError
+	if errors.As(err, &nb) {
+		return nb.Error()
+	}
+	return "the path does not name a file"
 }

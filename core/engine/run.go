@@ -90,7 +90,10 @@ func (o *Orchestrator) startRunCommon(ctx context.Context, p startRunParams) (*S
 	}
 	recordStepRoutingDecision(ctx, run.RunID, wfDef.EntryStep, findStepDef(wfDef, wfDef.EntryStep), entryRepoID)
 
-	// Activate: pending → active.
+	// Activate: pending → active. Compare-and-swap (INIT-023 TASK-008): a
+	// run that left pending meanwhile (scheduler recovery activated it, an
+	// operator cancelled it) is not written over, and no run_started is
+	// emitted for it.
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 		Trigger: workflow.TriggerActivate,
 	})
@@ -98,8 +101,13 @@ func (o *Orchestrator) startRunCommon(ctx context.Context, p startRunParams) (*S
 		return nil, fmt.Errorf("activate run: %w", err)
 	}
 
-	if err := o.store.UpdateRunStatus(ctx, run.RunID, result.ToStatus); err != nil {
+	applied, err := o.store.TransitionRunStatus(ctx, run.RunID, run.Status, result.ToStatus)
+	if err != nil {
 		return nil, fmt.Errorf("update run status: %w", err)
+	}
+	if !applied {
+		return nil, domain.NewErrorWithCause(domain.ErrConflict,
+			fmt.Sprintf("run %s left %s before it could be activated", run.RunID, run.Status), ErrRunStateChanged)
 	}
 	run.Status = result.ToStatus
 	startedAt := now
@@ -376,6 +384,14 @@ func (o *Orchestrator) startWorkflowPlanningRun(ctx context.Context, workflowID,
 		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
 			"workflow validation failed", vResult.Errors)
 	}
+	// Declared commit.status (INIT-023 TASK-017), with the orchestrator's
+	// lifecycle: refused here, before any branch or run record exists, the
+	// way workflow.Service refuses it inside the write (which would leave
+	// a pending run behind). nil lifecycle = no check.
+	if errs := workflow.ValidateCommitStatuses(parsed, o.lifecycle); len(errs) > 0 {
+		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
+			"workflow validation failed", errs)
+	}
 
 	// Existence pre-checks, before ResolveWorkflowForMode and therefore
 	// before any branch or run record exists. Before TASK-014 a create of
@@ -449,6 +465,9 @@ func (o *Orchestrator) startWorkflowPlanningRun(ctx context.Context, workflowID,
 				o.failOrphanWorkflowRun(ctx, runID)
 				return fmt.Errorf("%s workflow on branch: %w", verb, err)
 			}
+			// The caller wrote the body: the lifecycle exemption's
+			// separation of duties needs them (INIT-023 TASK-006).
+			o.recordLifecycleStarter(ctx, runID)
 			return nil
 		},
 	})
@@ -508,23 +527,20 @@ func (o *Orchestrator) failOrphanWorkflowRun(ctx context.Context, runID string) 
 // hasCommit is true) when the terminal step has been reached.
 // When hasCommit is true, the run enters the committing state for Git
 // persistence before completing. Uses the run state machine to validate.
+//
+// The write is a compare-and-swap with re-evaluation (transitionRun,
+// INIT-023 TASK-008): a run another writer moved meanwhile — a cancel that
+// committed inside this read is the case that matters — is judged again
+// from the state that won, so a cancelled run is never resurrected,
+// merged or announced completed; the state machine's conflict is returned.
 func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit bool) error {
-	run, err := o.store.GetRun(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("get run: %w", err)
-	}
-
-	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
+	run, _, result, err := o.transitionRun(ctx, runID, workflow.TransitionRequest{
 		Trigger:    workflow.TriggerStepCompleted,
 		NextStepID: "end",
 		HasCommit:  hasCommit,
 	})
 	if err != nil {
 		return err
-	}
-
-	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
-		return fmt.Errorf("update run status: %w", err)
 	}
 
 	log := observe.Logger(ctx)
@@ -577,21 +593,15 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit 
 }
 
 // FailRun transitions an active run to failed due to a permanent failure.
+// The write is a compare-and-swap with re-evaluation (transitionRun); the
+// executions are closed, the event emitted and the branch cleaned up only
+// after it applied.
 func (o *Orchestrator) FailRun(ctx context.Context, runID, reason string) error {
-	run, err := o.store.GetRun(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("get run: %w", err)
-	}
-
-	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
+	run, _, _, err := o.transitionRun(ctx, runID, workflow.TransitionRequest{
 		Trigger: workflow.TriggerStepFailedPermanently,
 	})
 	if err != nil {
 		return err
-	}
-
-	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
-		return fmt.Errorf("update run status: %w", err)
 	}
 	// TerminateStepsOnCancel (INIT-023 TASK-007): close the run's live
 	// executions now that the run row says failed.
@@ -614,21 +624,20 @@ func (o *Orchestrator) FailRun(ctx context.Context, runID, reason string) error 
 }
 
 // CancelRun cancels an active or paused run.
+//
+// The write is a compare-and-swap with re-evaluation (transitionRun,
+// INIT-023 TASK-008): a cancel that raced a pause re-evaluates from paused
+// and still cancels; one that raced a merge start re-evaluates from
+// committing, where run.cancel is invalid, and returns the state machine's
+// ErrConflict (409) instead of cancelling a run whose merge is landing
+// (owner question 2). Executions are closed, the event emitted and the
+// branch cleaned up only after an applied write.
 func (o *Orchestrator) CancelRun(ctx context.Context, runID string) error {
-	run, err := o.store.GetRun(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("get run: %w", err)
-	}
-
-	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
+	run, _, _, err := o.transitionRun(ctx, runID, workflow.TransitionRequest{
 		Trigger: workflow.TriggerCancel,
 	})
 	if err != nil {
 		return err
-	}
-
-	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
-		return fmt.Errorf("update run status: %w", err)
 	}
 	// TerminateStepsOnCancel (INIT-023 TASK-007): engine-state-machine.md
 	// §2.2 "terminate in-progress steps" on run.cancel — every live
@@ -651,22 +660,14 @@ func (o *Orchestrator) CancelRun(ctx context.Context, runID string) error {
 }
 
 // PauseRun transitions an active run to paused.
+// The write is a compare-and-swap with re-evaluation (transitionRun).
 func (o *Orchestrator) PauseRun(ctx context.Context, runID, reason string) error {
-	run, err := o.store.GetRun(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("get run: %w", err)
-	}
-
-	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
+	run, _, _, err := o.transitionRun(ctx, runID, workflow.TransitionRequest{
 		Trigger:     workflow.TriggerStepBlocked,
 		PauseReason: reason,
 	})
 	if err != nil {
 		return err
-	}
-
-	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
-		return fmt.Errorf("update run status: %w", err)
 	}
 
 	o.emitEvent(ctx, domain.EventRunPaused, runID, run.TraceID,
@@ -677,21 +678,13 @@ func (o *Orchestrator) PauseRun(ctx context.Context, runID, reason string) error
 }
 
 // ResumeRun transitions a paused run back to active.
+// The write is a compare-and-swap with re-evaluation (transitionRun).
 func (o *Orchestrator) ResumeRun(ctx context.Context, runID string) error {
-	run, err := o.store.GetRun(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("get run: %w", err)
-	}
-
-	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
+	run, _, _, err := o.transitionRun(ctx, runID, workflow.TransitionRequest{
 		Trigger: workflow.TriggerResume,
 	})
 	if err != nil {
 		return err
-	}
-
-	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
-		return fmt.Errorf("update run status: %w", err)
 	}
 
 	o.emitEvent(ctx, domain.EventRunResumed, runID, run.TraceID,

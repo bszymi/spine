@@ -6,6 +6,703 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation: wave 4 follow-up
+
+Fixes found after the wave 4 integration (a TASK-003 residual SMP INIT-027/EPIC-004/TASK-008 measured
+at ae513dca, and two guards no test pinned). No runtime schema change.
+
+### Security
+
+- **`CLIClient.ReadFile` reads blobs only.** It read content with `git show <rev>:<path> --`,
+  which renders whatever git's revision parser makes of the spec: a gitlink whose commit is in the
+  repository came back as that commit with its whole patch (SMP measured 272 MiB in the git child
+  for a gitlink to a commit adding 10^6 paths through one shared subtree — every object tiny, so
+  neither the size probe, the output cap nor `GIT_ALLOC_LIMIT` stopped the diff queue), a gitlink
+  recording the id of a blob in the repository came back as that blob (content no diff shows), a
+  directory as its listing, and a path holding `..` or a `^` suffix as a range or a revision with
+  its parents — a missing `d..main` read as `git log`, `<gitlink>^!` as a commit, `<gitlink>^@` as
+  an empty file, and even an existing file named `d..main` was rendered as the range. ReadFile now
+  types the entry first (`git --literal-pathspecs ls-tree -l -z --full-tree`, which reads tree
+  objects and the blob header only and takes the type from the entry's mode) and reads the probed
+  blob by object id (`git cat-file blob <oid>`, byte-identical to `show` for a blob). The path
+  never reaches a revision expression.
+- **A file entry that records a tag, a tree or a commit is not read as a file** (adversarial review
+  of the follow-up above). A regular-file entry's mode does not make its recorded id a blob's:
+  `update-index --cacheinfo`, `mktree` or any tree writer records whatever id it is given, and a
+  push with the default receive config checks only that the object exists. `git cat-file blob
+  <oid>` dereferences, so an entry recording an annotated tag whose target is a blob read as that
+  blob — content no diff shows (git diff shows the tag object's own text): a reviewed workflow
+  replaced by a review-less one projected Active, `.spine/branch-protection.yaml` relaxed to
+  `rules: []`, and discovery and branch validation saw the hidden front matter. An entry recording
+  a tree or a commit made `cat-file` fail with a plain "bad file", which the projection classified
+  as infrastructure (the tree, which records only the mode, said "blob"): the sync was held in
+  `error` at every tick until someone rewrote the file — a wedge any push could plant, and branch
+  validation skipped the file (ReadErrors are ignored, TASK-011 AC 28) so a planning branch could
+  carry it onto `main`. (At 07825efb `git show` printed the tag header or the object, a
+  deterministic parse rejection.) ReadFile now reads the recorded object's own type (`git cat-file
+  -t <oid>`, from its header, never dereferenced) before it sizes or reads anything, and refuses
+  every type but blob as the not-a-file refusal.
+
+### Changed (embedders)
+
+- `CLIClient.ReadFile` of a **gitlink or a directory** returns
+  `*git.GitError{Kind: ErrKindPermanent, Op: "read_file", Message: git.NotBlobMessage}` wrapping a
+  new `*git.NotBlobError{Ref, Path, Type}` (`Type` is `git.TreeEntryCommit` or
+  `git.TreeEntryTree`; `Error()` never prints the path), matching the new `git.ErrNotBlob`. It used
+  to return the rendered listing or commit (a 0-byte success for some `^` forms), the blob a
+  gitlink records, or — for a gitlink whose commit is absent — `fatal: bad object …` with the same
+  Kind. Size refusals (`ErrBlobTooLarge`, `BlobTooLargeError`) and misses are unchanged: a miss is
+  still `ErrKindNotFound` with git's `fatal: bad revision '<rev>:<path>'` text, now built by the
+  client (Err is nil instead of the exit status). The path is the one `git show` looked up: a
+  `./` or `../` prefix is relative to the repository root (`./task.md` still reads `task.md`;
+  climbing out is still git's Permanent "outside repository" error) and a trailing `/` names only
+  a directory (`dir/` is the not-a-file refusal instead of the listing). A path no tree entry can
+  have — `""`, a leading `/`, an empty, `.` or `..` component inside it, a NUL — is a miss
+  without a lookup, as git's literal lookup was. A revision that names no tree is a miss only when
+  `git rev-parse --verify --quiet <rev>^{tree}` proves it by exit status; any other ls-tree
+  failure keeps git's classified error. Every ordinary file read costs three git processes (plus
+  the branch lookup): the entry probe (`ls-tree -l`), the object-type check (`cat-file -t <oid>`)
+  and the read (`cat-file blob <oid>`) — one more than the two (`cat-file -s`, `show`) before.
+- `CLIClient.ReadFile` of a **file entry recording an object that is not a blob** (an annotated
+  tag, a tree or a commit, at a 100644, 100755 or 120000 entry) is the same refusal, its
+  `NotBlobError` carrying the new field `FileEntry: true` and `Type` set to the object's own type
+  (`git.ObjectTag` — a new constant, `"tag"` —, `git.TreeEntryTree` or `git.TreeEntryCommit`);
+  `Error()` says "the path's file entry records a <type> object, not file content". A tag whose
+  target is a blob used to return that blob's bytes; a tree, a commit or a tag of one used to
+  return a Permanent `*GitError` with git's `bad file` text. `TreeEntryType` is unchanged: it reads
+  only trees, so it still answers `TreeEntryBlob` for such an entry. The projection describes the
+  refusal as the tree entry `non_blob_object` (in the `not_a_file` rejection's cause and the
+  branch-protection sync error), discovery records it as `RefusedNotAFile`, branch validation
+  fails it ("not validated: the path holds no file content (a gitlink, a directory, or an entry
+  recording a tag, a tree or a commit)"), and the artifact and workflow reads answer it 404 — the
+  callers below need no change of their own.
+- Callers treat the refusal like TASK-003's size refusal: discovery records it as
+  `artifact.RefusedNotAFile` (`"not_a_file"`, a new `RefusalReason`; `projection_file_skipped`
+  with `reason: not_a_file`, sizes null) and removes a governed row a gitlink replaces — a gitlink
+  `.md` was a `ChangeSet.ReadErrors` entry (`read_skipped`) when its commit was absent and was read
+  as rendered content otherwise; branch validation fails such a file (the message above) instead
+  of skipping it; the projection's
+  `isContentReadError` includes it, and a not-a-file refusal is a `not_a_file` workflow rejection
+  (never `read_bounds`) even through a `GitClient` decorator that does not forward
+  `TreeEntryTyper`; `artifact.Service.Read` and `workflow.Service.Read` answer it `ErrNotFound`
+  (404, was a 500); `artifact.IsIDCollision` counts it as a collision. Every other caller already
+  failed closed on a non-NotFound error.
+- **SMP:** INIT-027/EPIC-004/TASK-008's tripwire `TestClient_SpineReadFileRendersTheGitlinksPatch`
+  fails on the next `.spine-revision` bump that includes this change — expected: Spine's ReadFile no
+  longer runs `show` on a gitlink, so SMP TASK-010 can delegate `gitread.Client.ReadFile` to it
+  (`git.NotBlobError` / `git.ErrNotBlob` / `git.NotBlobMessage` mirror SMP's `gitread` names and
+  envelope, so `gitread` can alias them). So do the "dangling gitlink" rows of SMP's tests that
+  compare `gitread`'s errors with `CLIClient.ReadFile`'s (`TestBounded_ErrorContractEqualsCLIClient`
+  on SMP `main`, its `gitread.Client` successor on the wave 4 line): the Kind is still Permanent,
+  but the Message is now `NotBlobMessage`, not git's `bad object` text.
+- **SMP (not changed here; SMP owns it):** SMP's own `gitread.ReadFile` / `ReadBlob` at SMP `main`
+  1ae9b0e3 read with `cat-file blob --end-of-options <rev>:<path>`, which peels a tag the same way,
+  and SMP's `gitread.Wrap` puts that read in front of every `CLIClient` it hands to the projection,
+  artifact and workflow services — so the tag-to-blob read is SMP's to close by the same
+  object-type check, before or at the bump that delegates to this ReadFile. (A file entry recording
+  a tree or a commit is already SMP's `gitread.NotBlobError`: `readSizedBlob` types the object with
+  `cat-file -t` after the failed read.) SMP tests that pin Spine's ReadFile argv or count its git
+  processes see the extra `cat-file -t <oid>`.
+
+---
+
+## INIT-023 — Security Audit Remediation: wave 4 cross-task review
+
+Fixes for the review of the four wave 4 tasks together. No runtime schema change; everything below
+is inside an option the embedded zero value leaves off (the status lifecycle, the governance guard,
+the retry budget's exhaustion handler).
+
+### Security
+
+- **A merge whose post-merge checks never ran is no longer published as a replay.** With the
+  status lifecycle or the governance guard on, a `MergeBound` error after git had moved the local
+  `main`, or a process death inside the merge block, left the merge on `main`; the next attempt
+  found `main` up to date, skipped V1 and the governance post-merge assertion, and pushed it (a
+  review-less workflow carried into `workflows/` by a rename on `main`; a criss-cross resolution
+  that reopened a Completed task). Each attempt that can move `main` now records the reserved
+  `spine.merge.unverified` key first and clears it in the write that records the accepted merge,
+  before the push; a late `MergeBound` error is taken back at once (and when the local `main`
+  cannot be checked after it, the run stays `committing`, even on a permanent error); and a run
+  that still carries the record has the merge taken back at the start of its next attempt, which
+  merges and checks again (KNOWN-LIMITATIONS "Governance-Path Guard" 16).
+
+### Changed (standalone)
+
+- **A failed read no longer decides a governance hold.** The hold, its clearing and the retry
+  budget's held test used to fall back to the run's last completed step when the workflow (or the
+  step list) could not be read, so one transient `git show` could abandon a held, undecided run or
+  leave an approved run's hold in place, retried forever. A failed read is now an error: the hold is
+  not recorded this time, the abandonment skips the tick, and an approval clears the hold from every
+  step that carries it.
+- **The retry budget decides its route before writing**, so a failed workflow read during an
+  abandonment no longer fails a publish-workflow run outright.
+- **A stale hold or blocked target no longer stops the retry budget**: an attempt the gate allows
+  clears a hold left on the run, and a recorded block whose merge is no longer in the local `main`'s
+  history is cleared.
+- **A decision is a merge attempt in flight for the retry budget**: an abandonment can no longer
+  route an approved run back between the approval and its merge (the decision answers `503`,
+  nothing recorded, while an abandonment runs).
+- **`GET /runs/{run_id}/governance` reports `blocked`** (and `blocked_merge_sha`) while a refused
+  merge of the run that could not be taken back is still on the local `main`; a reject is then a
+  truthful `409` instead of "the approved merge already reached the local main", and an approve
+  whose merge ended blocked reports it in `merge_error`.
+
+### Changed (embedders)
+
+- With `WithStatusLifecycle` or `WithGovernanceGuard` on, `MergeRunBranch` writes one more
+  reserved `commit_meta` key per merge attempt (`engine.CommitMetaMergeUnverified`) and refuses an
+  attempt as `ErrUnavailable` while an unverified merge of the run is buried in the local `main`'s
+  history (until an operator resets it); a local `main` that cannot be read before the merge is a
+  transient merge failure (counted). The guard's consumption marker is written in the same
+  `commit_meta` write.
+- `AbandonExhaustedMerge` returns an error, and writes nothing, when a read it needs fails (the
+  hold, a recorded block against the local `main`, the route); it never abandons a run carrying
+  `CommitMetaMergeUnverified`.
+- `DecideGovernanceMerge` answers `ErrUnavailable` while `AbandonExhaustedMerge` is abandoning the
+  run, and `ErrConflict` for a reject while the run's refused merge is still blocked on the local
+  `main`. `GovernanceMergeStatus` gains `Blocked` and `BlockedMergeSHA`.
+
+---
+
+## INIT-023 — Security Audit Remediation: wave 4 integration (TASK-012, TASK-008, TASK-017, TASK-006)
+
+The four wave 4 tasks merged onto one branch, plus the coordination their combination needs. No
+runtime schema change; every new behaviour below is inside an option the embedded zero value
+leaves off (the status lifecycle, the governance guard, the retry budget's exhaustion handler) or
+in a step write whose result is the same for every input SMP produces.
+
+### Changed (standalone)
+
+- **One order of checks in a governed merge**: binding → status lifecycle → governance gate (hold)
+  → code repositories → the merge block on the shared working tree (re-check, `MergeBound`,
+  structural check, merge-result check V1, governance post-merge assertion and consumption marker,
+  push). A merge that violates the lifecycle and touches governance paths is refused, never held
+  (`architecture/engine-state-machine.md`, "Order of the checks in a governed merge").
+- **The governance guard's post-merge assertion and consumption marker run inside the merge
+  block, before the push**, and its refusal is taken back before the shared tree is released. The
+  marker is the one store write a merge block makes.
+- **A failed take-back blocks every governed merge whichever check refused the merge**: with the
+  guard on, a refusal of TASK-005's structural check or of V1 whose take-back failed records the
+  same governance block (`spine.governance.blocked_target` on the refusing run) as the guard's own
+  refusals, on top of the shared tree's pending take-back (KNOWN-LIMITATIONS "Governance-Path
+  Guard" 6).
+- **The retry budget never abandons a run held for an operator governance decision, or one whose
+  refused merge is still blocked on the local `main`.** A transient failure before the gate on a
+  held run's tick still counts.
+- **A retryable failure judging the bound commit under the status lifecycle is a counted merge
+  attempt** (a failed, transient primary outcome), so the retry budget bounds it.
+
+### Changed (embedders)
+
+- `Orchestrator.MergeRunBranch` with `WithStatusLifecycle`: a retryable failure judging the bound
+  commit now records a failed primary merge outcome with a transient class (after re-reading the
+  run) and still returns the error; it records nothing while the run is no longer `committing`.
+- The status lifecycle's merge-result refusal (V1) takes the local target back to exactly the
+  merge's `BaseSHA`, never to the merged commit's first parent.
+- With `WithGovernanceGuard` on: `Orchestrator.AbandonExhaustedMerge` returns `false` for a run
+  whose merge is held for a decision or whose refused merge is still blocked; a structural or V1
+  refusal whose take-back failed writes `spine.governance.blocked_target` on the run and blocks
+  governed merges like the guard's own; the hold record on a step and its clearing on approval go
+  through the optional `engine.StepExecutionTransitioner` when the store has it (a stale copy of
+  a step that moved is no longer written back); and with the status lifecycle on too,
+  `DecideGovernanceMerge` and `GovernanceMergeStatus` compute the merge's governance facts from
+  the lifecycle's merge source, as the gate does — a merge the lifecycle refuses is
+  `ErrPrecondition` ("nothing to decide") for a decision and an `EvaluationError` for the status.
+- `git.CLIClient.MergeBases` (TASK-006) resolves a `HEAD` argument to the home branch on a
+  home-branch tree, as `MergeBase` and every other read method do (TASK-012); a client with no
+  home branch is unchanged.
+- `docs/integration-guide.md`: the three wave 4 embedding sections are numbered §10 (TASK-008),
+  §11 (TASK-017) and §12 (TASK-006).
+
+---
+
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-006: governance-path guard)
+
+Audit F3 (P2, both surfaces), "run-branch slippage": a run branch could carry governance files
+into `main` through a governed merge, and the projection installed them as live policy. ADR-016
+supersedes ADR-009's v1 decision not to guard governed merges by path. Owner questions take their
+defaults, pending the owner (authorization model (a): operator approval of the bound commit; the
+ADR is `Proposed` until the owner signs it off). No migration.
+
+### Security
+
+- **A governed merge that changes governance paths waits for an operator.** With the guard on
+  (`spine serve` default), a merge that changes `.spine/`, `.spine.yaml`, `workflows/` or
+  `<artifacts_dir>/workflows/` is held: the run stays `committing`, nothing is merged (no code
+  repository either), the publish step (or the last completed step of a workflow with no publish
+  step) carries `error_detail.classification = governance_approval_required`, and
+  `governance.merge_held` is emitted once per bound commit and hold episode. An `operator`/`admin`
+  approves or rejects exactly the bound commit (`POST /api/v1/runs/{run_id}/governance-decision`);
+  approve merges at once, reject revokes the approval and takes `merge_failed` (or fails a
+  no-publish run, branch kept). Decisions are serialised with the run's merge attempts in process:
+  a reject during an approved merge in flight waits and is answered `409` if the merge won, and an
+  approval is recorded only while the run is still `committing`, so a late approve can never
+  outlive a reject. The approval lives in reserved `runs.commit_meta` keys
+  (`spine.governance_approval.*`) that workflow outcomes cannot write. Closes the self-reviewed
+  `rules: []` / review-less `task-default` PoC.
+- **Every merge base, and a post-merge check.** The changed paths are the union of the diffs from
+  every merge base of `main` and the merged commit (`git merge-base --all`): with one merge base a
+  criss-cross history let a run revert another run's tightened `.spine/branch-protection.yaml` or
+  workflow unseen. After the merge, before the push, a merge that changed a governed path the
+  evaluation did not cover (rename following under git's default configuration, or non-default
+  merge configuration) is refused permanently, taken back to the base and never pushed; the
+  refusal tells the author to update the run branch from `main`, after which the change is held
+  for an operator decision. A merge that can never be evaluated (no merge base, a diff over the
+  git output limit) is refused permanently the same way instead of staying `committing`. If that take-back fails, the run stays `committing` and every
+  governed merge is refused as unavailable until the local `main` no longer contains the refused
+  merge (each attempt retries the take-back).
+- **The projection refuses an unprovenanced protection removal.** A branch-protection config that
+  removes a protection kind from the authoritative branch is installed only when a database record
+  of an operator act that **changed** the config matches it byte for byte, is reachable from the
+  sync head and is newer than the installed rules: an honoured override push
+  (`runtime.event_log`), or an approved governed merge's consumption marker
+  (`spine.governance_approval.merge_sha`/`base_sha`, written before the push) that accounts for
+  every kind being removed: its own diff removed it (its base config applied it), or its base
+  config is, byte for byte, the result of an earlier valid record its base descends from, judged
+  the same way — so two authorised relaxations landing before one projection tick both count, and
+  an unauthorised write between them breaks the chain. Otherwise the rules
+  stay, `branch_protection.removal_refused` is emitted and a Warn logged — except while an approved
+  merge is in flight (its run still `committing`, its approved commit on the head, no reachable
+  marker yet): the sync then holds and retries instead of refusing. Commit trailers are
+  never trusted. Inactive while `no-direct-write` is already off on the authoritative branch. A
+  provenance read failure, or a retryable git failure while checking a record, holds the sync
+  (retried) instead of refusing; with the guard on, a full rebuild whose branch-protection step
+  failed that way keeps the previous `last_synced_commit` (the guard's newness anchor) instead of
+  the head.
+
+### Changed (standalone)
+
+- **`spine serve` turns both guards on.** `SPINE_GOVERNANCE_GUARD=off` (`false`, `0`, `no`)
+  restores v1; any unrecognised value keeps them on with a startup Warn. The lifecycle exemption
+  (a workflow-lifecycle planning run may merge its own `workflows/<id>.yaml` — never the governing
+  workflow, never a file that declares `applies_to: [Workflow]` now, at a merge base, on `main` or
+  in the merged result, and only when the
+  reviewer neither started the run — the starter is recorded at start; a run without one gets no
+  exemption — nor is a run author: bound to any author step of it or holding an assignment of one)
+  and the own-run evidence carve-out
+  (`.spine/runs/<run id>/evidence/`) are on.
+- **Runs whose agents edit `workflows/**` or `.spine/**` now wait for an operator** (for example
+  step profiles or agent definitions). Operators decide through the new routes
+  (`POST /runs/{run_id}/governance-decision`, permission `run.governance.decide`; read the state
+  with `GET /runs/{run_id}/governance`); statuses 400/403/404/409/412/503 as in `api/spec.yaml`.
+- **The commit-retry sweep no longer logs a held merge at Error** each tick (Debug instead).
+- **A refused relaxation is not a sync error.** The sync advances (`idle`), so the diff window
+  does not grow and nothing downstream stalls; the rules shown by `branch_protection_rules` keep
+  their old `source_commit`. Recovery: an operator override push that **edits** the file
+  (`docs/git-push-guide.md`). A database rebuilt from git refuses a relaxed config until then.
+- **Honoured override pushes are written to `runtime.event_log` synchronously.** With the guards
+  on, the git push path records each `branch_protection.override` event in the event log before
+  git moves the ref, whatever `SPINE_EVENT_DELIVERY` says (the delivery subscriber's later write
+  of the same id is a no-op). The projection guard accepts an override as provenance only through
+  that row; the asynchronous router alone could let a sync run before it and refuse the
+  authorised relaxation for good. A failed write is logged and the push proceeds.
+- New events (operational, in `allEventTypes()`): `governance.merge_held`,
+  `governance.merge_decided`, `branch_protection.removal_refused` (`architecture/event-schemas.md`
+  §4.16–§4.18). New step failure classification `governance_approval_required`.
+
+### Changed (embedders)
+
+All opt-in; the zero value is today's behaviour, and no interface an embedder implements grew.
+
+- `engine.(*Orchestrator).WithGovernanceGuard(engine.GovernanceGuard{...})` — call after
+  `EnableMergeBinding`; it errors (guard left off) without merge binding or without a
+  `GitOperator` that implements the new optional `engine.MergeBaseLister`
+  (`MergeBases(ctx, a, b) ([]string, error)`; `*git.CLIClient` has it). Fields: `Paths` (replaces
+  the defaults), `WorkflowDirs` (pass `projection.WorkflowDirs(artifactsDir)` or the projection
+  service's `WorkflowDirs()`), `ExemptWorkflowLifecycleTaskPath`, `ExemptOwnRunEvidence`,
+  `MaxReportedPaths`. `GovernanceGuardEnabled()`, `GovernanceGuardConfig()`.
+- `MergeRunBranch` returns a `precondition_failed` error wrapping
+  `engine.ErrGovernanceApprovalRequired` for a held merge (the run stays `committing`). Retry
+  loops should treat it as waiting, not failed, and not count it against a retry budget.
+- `DecideGovernanceMerge(ctx, engine.GovernanceDecisionRequest)` and
+  `GovernanceMergeStatus(ctx, runID)` are the decision and read APIs (the engine checks the
+  operator role itself). With the guard on, `MergeRunBranch` and `DecideGovernanceMerge` take a
+  per-run in-process stripe (re-entrant through the context; nothing with the guard off);
+  embedders running replicas must serialise the two across processes themselves. Optional store
+  capabilities `MergeCommitMeta(ctx, runID, patch)` (atomic `commit_meta || patch`) and
+  `MergeCommitMetaIfStatus(ctx, runID, status, patch) (bool, error)` (the same, only in `status`;
+  used for the approval) — `*store.PostgresStore` has both; without them the engine falls back to
+  read-modify-write and a re-read. A reject after the approved merge reached the local `main` is
+  `ErrConflict`; a merge that can never be evaluated is `ErrPrecondition` for a decision and a
+  permanent refusal for `MergeRunBranch`.
+- `engine.MergeBaseLister` contract: unrelated histories are an empty list with a nil error
+  (`(*git.CLIClient).MergeBases` maps `git merge-base`'s exit 1 to that); an error means "retry".
+- Reserved key `engine.CommitMetaGovernanceStartedBy` (`spine.governance.started_by`): the
+  workflow-lifecycle run's starter, written by `StartWorkflowPlanningRun` /
+  `StartWorkflowUpdatePlanningRun` from the context's actor only while the guard and the lifecycle
+  exemption are on.
+- `projection.(*Service).WithProtectionRemovalGuard(projection.ProtectionRemovalGuard{...})`
+  with a `projection.GovernanceProvenanceReader` (`*store.PostgresStore.ListGovernanceAuthorizations`);
+  a nil reader refuses every removal. `projection.ErrProtectionRemovalUnauthorized`.
+- `branchprotect.Request.Governance` (`*branchprotect.GovernanceCheck`), consulted only for
+  `OpGovernedMerge`; `EvaluateGovernance`, `GovernancePaths`, three reason codes
+  (`governance_approved`, `governance_approval_required`, `governance_unevaluable`). A nil
+  `Governance` keeps the v1 decision. A custom `Policy` that denies governed merges with the hold
+  reason code gets a plain refusal, never a hold — only the engine's own decision holds.
+- Reserved key constants `domain.CommitMetaGovernanceApproval*`, `domain.FailureGovernanceApprovalRequired`,
+  the three event types in `core/domain`.
+---
+
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-017: declared artifact-status lifecycle)
+
+Audit P3-21, Spine half: artifact status transitions were not a state machine, the
+status-conflict rules only warned, and the merge-time cascade stamped the outcome's status onto
+whatever the branch added. Owner questions answered by their defaults, pending the owner.
+
+### Security
+
+- **A governed merge no longer publishes status edits the run does not govern.** With the declared
+  lifecycle on (`spine serve`), the merge judges the bound commit's diff: a run may change only the
+  status of artifacts it owns — its TaskPath, plus the artifacts a planning run adds — along a
+  declared transition from the merge-base status, and only when the workflow declares the effect.
+  Reopening a `Completed` task, completing a sibling task or an initiative, retiring an ADR,
+  retyping, deleting, renaming out of scope or breaking the front matter of an artifact the run
+  does not own is refused (`status_lifecycle_violation`), and nothing is merged. A run's own change
+  that is not a declared transition (for example `Completed → Pending`) is refused too.
+- **The cascade stamps only run-owned artifacts.** A standard run's additions keep their authored
+  status, which must be an initial status of their type (an execution run can no longer mint
+  `Completed` work, or an ADR "Completed"). Every rewrite is re-parsed: an owned artifact whose
+  status line the byte-preserving writer cannot rewrite (a quoted key, a continuation line, …) is
+  refused instead of landing the author's own value.
+- **What the merge result changes is judged against `main` before any push**
+  (`architecture/engine-state-machine.md` §5A.3): only the run's own artifacts may change status,
+  to the planned status and from the judged one; every other artifact keeps its type, status and
+  existence, and an added one carries an initial status. Anything else is refused
+  (`merge_result_mismatch`) and taken back off the local `main` — a `*.md merge=union` attribute
+  that keeps two status lines, a criss-cross history `git merge` resolves against a base the
+  judgement never saw, or a concurrent merge of commits the bound commit builds on (when `main`
+  gained such commits between the judgement and the merge, the attempt is retried and judged
+  again). A rename `main` made after the fork merges as it did before the lifecycle.
+- **`workflow.Service` refuses an impossible `commit.status`** at create and update, and
+  `POST /api/v1/workflows/{id}/validate` reports it (`rule_id: commit_status`): every outcome's
+  `commit.status` must be a declared status of every `applies_to` type
+  (`architecture/workflow-validation.md` §5.5 rule 1). A workflow planning run with such a body is
+  refused before its branch exists.
+- **A Completed epic with open tasks (SC-002) or initiative with open epics (SC-003) blocks**: an
+  owned transition to `Completed` that trips one is refused `status_conflict`. The check is made
+  under the name `main` gives the artifact (a rename `main` made after the fork is followed), and a
+  status `main` already holds is not re-asked (a resumed run whose merge already landed completes).
+
+### Changed (standalone)
+
+- `spine serve` turns the lifecycle on for the process and every pooled workspace, with no switch
+  (owner question 5; it requires the merge binding `serve` already enables). The rollback is the
+  previous build.
+- **Severity change:** with SC-002 and SC-003 blocking, `POST /api/v1/system/validate` and
+  `spine validate` report them as errors (status `failed`) where they reported warnings. No shipped
+  workflow declares a `cross_artifact_valid` precondition, so step activation is unaffected.
+- **`commit.status` is now applied under `artifacts_dir`** (`spine init-repo` defaults it to
+  `spine`): the cascade used to read the TaskPath without the directory, fail silently and merge
+  with the status unchanged.
+- A refused merge records the primary merge outcome as failed with class `precondition` and a
+  detail starting `status_lifecycle_violation:`, classifies the last completed step
+  `status_lifecycle_violation`, and routes like every refusal: `task-default` goes back to
+  `execute`; workflows without a publish step (`epic-lifecycle`, `artifact-creation`, `adr*`,
+  `document-creation`, `task-spike`) fail the run. A transient git error keeps the run in
+  `committing`. See KNOWN-LIMITATIONS "Artifact Status Lifecycle".
+
+### Changed (embedders)
+
+All opt-in; the zero value is today's behaviour, byte for byte. No method was added to any
+interface an embedder implements, and there is no schema change.
+
+- `domain.StatusLifecycle` / `DefaultStatusLifecycle()` (the declared table; `Types`, `States`,
+  `Initial`, `IsState`, `IsInitial`, `Allows`, `Transitions`, `WithoutTransition`) and
+  `domain.FailureStatusLifecycle` (`"status_lifecycle_violation"`, not retryable).
+- `Orchestrator.WithStatusLifecycle` / `StatusLifecycle()`, and `Orchestrator.WithArtifactsDir` /
+  `ArtifactsDir()` (where `run.TaskPath` lives; the root by default, only read by the lifecycle).
+  With the lifecycle on and merge binding off, `MergeRunBranch` refuses with `ErrUnavailable`.
+  New: `engine.StatusLifecycleError` / `StatusLifecycleViolation`, `ErrStatusLifecycleViolation`,
+  the `Lifecycle*` reason constants, and the optional `engine.StatusChangeValidator` interface
+  (found by type assertion on the validator; `*validation.Engine` implements it).
+- `workflow.Service.WithStatusLifecycle` and `workflow.ValidateCommitStatuses` (never called from
+  `workflow.Validate`, the projection or the loaders); `workflow.CommitStatusRuleID`.
+- `validation.WithBlockingStatusConflicts`, `DefaultBlockingStatusConflicts` (`SC-002`, `SC-003`),
+  `Engine.BlockingStatusConflicts()` and `Engine.ValidateStatusChange`.
+- `artifact.LifecycleFields`, `artifact.EqualExceptStatus`, `artifact.PathScope` (the projection's
+  artifact-path predicate, moved from `adapters/projection`, which now delegates to it — no
+  behaviour change) and `artifact.Service.ArtifactsDir()`.
+- Scenario harness: `harness.WithStatusLifecycle()` / `WithDeclaredStatusLifecycle()`; the harness
+  default is unchanged.
+---
+
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-008: submit ownership, step-output evidence, compare-and-swap state writes)
+
+Audit P3-17 (Spine half), P3-19 and P3-24. Owner questions take their defaults, pending the owner:
+`required_outputs` unchanged is flagged, not refused (1); a cancel that loses the race to a merge
+start answers 409 (2); SMP opts into the step compare-and-swap in SMP TASK-011 (3); failing closed
+on an empty submitter is a follow-up after SMP TASK-011 (4); run detail carries the evidence
+through reserved `commit_meta` keys (5).
+
+### Security
+
+- **A cancelled run is no longer resurrected and merged (P3-24).** Every run-status mutator read
+  the run, judged the trigger and wrote unconditionally, so a cancel that committed inside
+  `CompleteRun`'s read was overwritten (`cancelled → committing`) and the run merged to `main`.
+  Run writes are now compare-and-swap on the status that was read, re-judged against the state
+  that won (at most three attempts): a completion after a cancel answers 409 and nothing is merged,
+  emitted or cleaned up; a cancel that raced a pause still cancels; a cancel that raced a merge
+  start answers 409 instead of cancelling a run whose merge then lands. Covers `CompleteRun`,
+  `FailRun`, `CancelRun`, `PauseRun`, `ResumeRun`, run start, the permanent-merge-failure path,
+  the scheduler's run-timeout cancel and startup recovery, and the gateway's no-orchestrator
+  cancel.
+- **Step writes cannot overwrite a writer that won (P3-24).** With the PostgreSQL store (`spine
+  serve`) every engine step write is conditional on the (status, actor) it read. A submit that
+  races the timeout scanner no longer overwrites the failed step and routes its outcome; two merge
+  attempts no longer both advance the publish step; a lost activation delivers no assignment and
+  runs no handler; a lost claim removes its own assignment row (it never bound its actor, so
+  neither the separation-of-duties author ledger nor the prior-holder re-offer may read it as a
+  binding; without the optional `engine.AssignmentRowDeleter` it is cancelled); a lost failure
+  creates no retry.
+  The timeout scanner, startup recovery and the gateway's fallback assigner are conditional too.
+- **A completed step is never routed twice (P3-24, design check).** `step.submit` on `completed`
+  is an accepted no-op transition, so a second submit that re-read the row after the first one
+  completed it flipped a `rejected` review to `approved` and merged it (two racing submits, a
+  submit racing the timeout's outcome, or a recovery re-route racing a live replica). The submit
+  path now refuses an execution that is terminal when read, or that moved since the submission was
+  validated, and the scheduler's crash recovery re-routes only through
+  `Orchestrator.RecoverCompletedStep` (active run, the current step, no later execution).
+- **The engine checks who submits (P3-17).** The authenticated actor reaches `IngestResult`, which
+  refuses a submission for an execution bound to another actor (`403`) before anything else — also
+  on a completed execution, and before the required-outputs check, so a non-owner can no longer
+  fail the owner's step by omitting an output. `spine serve` sends it even where the gateway's own
+  pre-check is skipped (no store wired). A release by a stale claim of an execution since bound to
+  someone else is `403` too.
+- **Step outputs are recorded as evidence (P3-19).** `required_outputs` are labels the submitter
+  attests (KNOWN-LIMITATIONS "Step Outputs Are Self-Attested Labels"). `step_completed` now records
+  whether the run branch changed since the previous recorded head (`branch_change`) and flags a
+  step that declared outputs but changed nothing (`required_outputs_unchanged`, plus a Warn log).
+  Review stays the control; nothing is refused.
+
+### Changed (standalone)
+
+- **`step_completed` has a payload and a per-execution event id.** The documented base fields
+  (`step_id`, `step_name`, `outcome`, `next_step`, `attempt`, `duration_ms`, `has_commit`,
+  `branch_id`) plus `execution_id`, `actor_id` (also on the envelope), `required_outputs`,
+  `artifacts_produced` (at most 32 entries of 512 bytes; `artifacts_produced_count` exact),
+  `branch_change` and `required_outputs_unchanged` (architecture/event-schemas.md §4.2). The id is
+  `evt-<trace>-<execution_id>-completed`, so every rework attempt is recorded and delivered (the
+  per-step id made the event log and the delivery queue drop attempt 2 onwards). A moved head
+  costs one `git diff` of at most 3 s at submit; an unmoved one none. `branch_change` is judged on
+  the content: a head moved by commits that change no path (an empty commit, a change and its
+  revert) is `unchanged` with `reason: head_moved_tree_unchanged`, and flagged.
+  **Upgrade note:** an execution completed by an earlier binary was logged under the per-step id;
+  if a crash interrupted its routing and the restart runs this version, crash recovery re-emits it
+  under the per-execution id, so that one execution's `step_completed` is logged and delivered
+  twice (KNOWN-LIMITATIONS "Engine State Writes …" 7).
+- **`GET /runs/{run_id}` adds `step_output_evidence`** (one entry per completed step that recorded
+  it), read from the reserved `runs.commit_meta` keys `spine.evidence.<execution_id>` — no git call
+  beyond the workflow load, and it survives event-log retention.
+- **`POST /runs/{run_id}/cancel` answers 409** when the cancel lost a race (to a merge start, or to
+  another writer on the no-orchestrator fallback). `POST /runs/{run_id}/steps/{step_id}/assign` on
+  the engine-less fallback answers 409 when the step was bound meanwhile.
+- **A lost submit race answers 200 with the winner's persisted state** — what a sequential
+  duplicate submit already got — or 409 when the execution is still live but moved (rebound,
+  released). The step's own actor acknowledging it concurrently is not a conflict. Likewise
+  `POST /steps/{execution_id}/acknowledge` that loses to the same actor's identical transition (a
+  concurrent retry, or its own submit auto-acknowledging) answers the idempotent `in_progress`
+  result a sequential retry gets, not 409; any other lost race stays 409.
+- **A submit that loses to the timeout scanner** leaves the step failed (no `step_timeout` is
+  emitted, and `spine_timeouts_detected_total` is not incremented, when the submit won instead).
+  A run that moved to `committing` between the run-timeout re-read and its cancel is not cancelled.
+- Crash recovery of a completed step that did not advance re-routes the stored outcome and
+  re-emits its `step_completed` (same id; `branch_change` `unknown`/`recovered`). When routing had
+  already created the successor but not moved the run's cursor, recovery moves the cursor and
+  activates that successor instead of creating a second attempt of it.
+
+### Changed (embedders)
+
+- **New, opt-in:** `engine.SubmitRequest.ActorID` and `engine.StepResult.ActorID` (empty keeps
+  caller-enforced ownership); the optional `engine.StepExecutionTransitioner` store port, found by
+  type assertion (no interface an embedder implements gained a method; without it every step write
+  is the blind `UpdateStepExecution`, unchanged); `(*store.PostgresStore).TransitionStepExecution`
+  and `TransitionRunStatusAt`; the optional `engine.RunCursorTransitioner` with
+  `(*store.PostgresStore).TransitionCurrentStep` (crash recovery's conditional cursor move) and
+  `engine.BranchCursorTransitioner` with `(*store.PostgresStore).TransitionBranchCursor` (the same
+  for a divergence branch's cursor: cursor only, while the branch is open);
+  `engine.AssignmentRowDeleter` with `(*store.PostgresStore).DeleteAssignment` (type-asserted on
+  the assignment store: a claim whose conditional step write lost removes the row it created,
+  only while the row names that execution and actor);
+  `Orchestrator.RecoverCompletedStep` and
+  `Orchestrator.StepOutputEvidence`; the types `engine.BranchChange` and
+  `engine.StepOutputEvidence` with their `BranchChange*` / `EvidenceReason*` constants (an
+  `unchanged` entry whose head moved carries `EvidenceReasonTreeUnchanged`),
+  `engine.CommitMetaEvidencePrefix`, `engine.ErrRunStateChanged`, `engine.ErrStepStateChanged`.
+- **Shared behaviour at the next bump (not opt-in):**
+  - Run-status writes go through `TransitionRunStatus` (every `RunStore` has it). A `CancelRun`
+    that loses the race to a merge start returns the state machine's `ErrConflict` (a sequential
+    cancel of a `committing` run already did); a `CompleteRun` after a concurrent cancel returns
+    `ErrConflict` instead of resurrecting the run; a lost `failRunOnMergeError` returns nil and
+    records no `git_conflict` detail (the detail is now written after the applied run write). A
+    `TransitionRunStatus` error is returned at once, wrapped (`errors.Is` holds); a `GetRun` error
+    stays wrapped as before.
+  - `SubmitStepResult` on an execution that is terminal when read returns `ErrConflict` wrapping
+    `ErrStepStateChanged` instead of re-routing it, and one whose (status, actor) moved since
+    `IngestResult` validated it does the same; `IngestResult` answers both with its unchanged
+    idempotent response when the row is terminal, else 409.
+  - `step_completed` has a payload and the per-execution id: a subscription that includes it
+    receives one delivery per rework attempt. With binding off its `branch_change` is
+    `unknown`/`head_sha_unrecorded` and no git call is made; nothing is persisted.
+  - With merge binding on, a step capture's single `commit_meta` write also carries
+    `spine.evidence.<execution_id>` (inside the reserved `spine.` prefix; `stripReserved` keeps
+    workflows from writing it), and evidence costs at most one 3 s diff on the submit path.
+  - `AcknowledgeStep` with the step capability: losing its compare-and-swap to the same actor's
+    identical transition returns the idempotent `in_progress` result (a store without the
+    capability never misses, so nothing changes there).
+  - `ReleaseStep` refuses (`ErrForbidden`) an execution bound to an actor other than the releasing
+    one. With the step capability it writes the step before cancelling the assignment row, and
+    puts the step back (conditionally) when that cancel fails.
+  - `core/actor.Gateway.ProcessResult` (no production caller) refuses a failed or skipped
+    execution and a foreign actor.
+---
+
+## INIT-023 — Security Audit Remediation (EPIC-004 TASK-012: standalone git-state safety — convergence target, serialized working tree, bounded merge retries)
+
+Audit F8 (P2), F9 (P2) and P3-27, all in standalone `spine serve`. Owner questions take their
+defaults, pending the owner: 3 automatic merge retries; a poisoned tree is quarantined and the
+operation continues; `MultiScheduler` is bounded but not wired; retries counted per run lifetime (no
+migration); a stale `.git/index.lock` is reported, never deleted; a taken working-tree sequence is
+bounded at 5 minutes (a constant).
+
+### Security
+
+- **Convergence merges into the run branch, never into `main` (F8).** The selected divergence
+  branches used to be merged with no target, which the git client read as "into whatever is checked
+  out" — `main` in standalone's shared tree — so divergence-branch content reached the governed
+  branch while the run was still active and its review step waiting. Convergence now names the run
+  branch as the target, refuses a run that is not the divergence's own or has no `spine/` run branch
+  before anything changes, and consults branch protection about the branch that moves. Divergence
+  branches fork from the run branch (also for exploratory branches). `git.CLIClient.Merge` refuses
+  an empty `Target`.
+- **The shared working tree is serialized and self-healing (F9).** Every stateful git call holds a
+  process-wide lock on the tree, and the engine's multi-step sequences (status cascade, governed
+  merge with its push, run start, recovery ledger, convergence, code-repository merge) and in-place
+  artifact/workflow writes each hold it once, as git-only blocks: no event is emitted and no step is
+  routed while it is held. Concurrent approvals no longer fail each other, a status commit can no
+  longer land on `main` outside the governed merge, and a run branch is never cut from another run's
+  branch. The tree's home branch (`main`) is restored by whoever takes it: a merge in progress is
+  aborted, tracked changes are quarantined into an unreferenced commit (logged with its SHA), `HEAD`
+  goes back to `main`; untracked and ignored files are never touched (one in the way fails the
+  restore before anything changes) and a stale `.git/index.lock` is reported.
+  A tree left dirty or off `main` therefore no longer fails every later governed merge in the
+  workspace. A tracked difference no hard reset removes (a `text eol=lf` attribute over a file
+  committed with CRLF, case-only path collisions on a case-insensitive filesystem) is left in place
+  instead of failing every later restore — content, including a divergence branch's, could
+  otherwise wedge the workspace (review round 1). Such a difference is identified without reading
+  through it: a symbolic link is never followed and a FIFO never opened (a file/link case collision
+  used to make every restore hash the link's target outside the tree, or block on a FIFO for 30 s),
+  and a type change is remembered like a modification, so it is quarantined once, not at every
+  take (review round 2).
+- **A client disconnect can no longer poison the tree (F9 via request cancellation).** Git children
+  are stopped with `SIGTERM` (git removes its lock files) instead of `SIGKILL`, and a sequence that
+  has taken the tree runs to completion detached from the request (bounded at 5 minutes); only the
+  wait for the tree is cancelled, and that is not recorded as a merge failure.
+- **The same run entered twice (HTTP submit plus the scheduler's retry)** no longer flips a
+  completed run to failed: the merge blocks re-read the run and stand down unless it is still
+  `committing`.
+- **A refused bound merge is taken back before the tree is released**, so an in-place write's
+  auto-push or the next run start never builds on or publishes it. When the take-back itself fails
+  (a ref lock), it stays pending: the block's exit restore and every later take of the tree retry
+  it first and refuse the tree while `main` still holds the refused merge. A take-back is remembered
+  from its first fallible step (a failure in its commit checks, or a sequence whose deadline was
+  spent, used to be forgotten and the tree released with the refused merge on `main`), runs on its
+  own 30 s bound detached from the caller, and on the shared tree a refused merge whose content no
+  checkout makes clean is quarantined and reset instead of keeping the whole tree refused (review
+  round 2).
+- **Task acceptance and the follow-up link read the task under the tree's lock** and commit only
+  over the bytes they read: an accept issued while a sequence had a run branch checked out used to
+  commit that branch's unreviewed file to `main`; a change that lands between the read and the
+  write is now a conflict (409).
+- **`HEAD` reads mean `main` on the shared tree:** a run started while another run's cascade had its
+  branch checked out bound the workflow an unreviewed branch's task type chose.
+- **Governed-merge retries are bounded (P3-27).** A merge that keeps failing transiently is
+  retried at most 3 times by the scheduler (the value `spine serve` already configured, now
+  enforced), then routed like a permanent failure: a publish-step workflow loops back through
+  `merge_failed`, a legacy terminal-commit workflow fails the run (branch kept); an exhausted code
+  repository is a terminal failure of that repository instead (the primary merges and the run waits
+  in `partially-merged` for operator recovery, codex round 8). The step carries the
+  new classification `merge_retries_exhausted`. A transient failure verifying the bound commit
+  (merge binding) is now a recorded, counted attempt too (recorded only while the run is still
+  `committing`). A push that fails after the merge landed on the local `main` is not abandoned —
+  the run is not reported failed while its merge sits on the branch for the next push to publish;
+  it stays `committing` and the push is retried until it lands, also when a later attempt fails
+  before reaching its push, and a run whose merge was recorded but whose completion failed is
+  never abandoned either (review round 1, codex rounds 6–7). That exemption holds within one
+  committing episode: after a permanent push rejection sends the run back to `execute`, the
+  reworked run's next episode is bounded like any other (review round 2).
+
+### Changed
+
+- One governed merge, run start, convergence or in-place write at a time per workspace tree; an
+  HTTP submit that triggers a merge may wait for another merge's push.
+- New log and audit records: `shared working tree restored` and `shared working tree: tracked
+  changes quarantined` (Warn), `working_tree_restored` and `working_tree_restore_failed` (audit,
+  with `quarantine_sha`), `merge_retries_exhausted` (audit) with an Error log,
+  `run is no longer committing; this merge attempt stands down` (Info), the scheduler's
+  `merge retries exhausted; …` and `workspace scan budget spent; …` (Warn) records.
+- New values: step `error_detail.classification` `merge_retries_exhausted`; the
+  `retries exhausted (attempts=N, max_retries=M): ` prefix in
+  `repository_merge_outcomes.failure_detail`. No migration, table, column or event type.
+- Divergence branches fork from the run branch instead of `HEAD`.
+
+### Changed (embedders)
+
+- **API changes (Spine library):** `divergence.Service.EvaluateAndCommit`, `CommitConvergence`
+  and `CreateExploratoryBranch`, `engine.ConvergenceHandler.EvaluateAndCommit`,
+  `engine.DivergenceHandler.CreateExploratoryBranch` and the gateway's `BranchCreator` take the
+  run (`*domain.Run`). `git.CLIClient.Merge` refuses an empty `Target` (`"merge target
+  required"`), and an abort (`Strategy: "abort"` or `Source: "--abort"`) that names a `Target`.
+  SMP passes `*divergence.Service` to `WithDivergence`/`WithConvergence`, implements none of these
+  interfaces and never calls `CLIClient.Merge`, so it compiles unchanged; its divergence adapter
+  receives an explicit `Target` (the run branch it resolved itself before) and `run.BranchName` as
+  the divergence base (passed through unchanged).
+- **Additive:** `git.WorkingTreeGuard`, `(*CLIClient).WithWorkingTree`, `git.WithHomeBranch`,
+  `(*CLIClient).RestoreWorkingTree`, `(*CLIClient).HomeBranch`, `git.TreeRestoreReport`,
+  `git.TreeRestoreError`, `git.TreeWaitError`, `(*git.WriteScope).Context`,
+  `engine.Orchestrator.AbandonExhaustedMerge`, `engine.MergeRetriesExhaustedError`,
+  `domain.RepositoryMergeOutcome.RetriesExhausted`, `domain.RepositoryMergeOutcome.MergedLocally`,
+  `domain.PushFailureDetail`, `domain.PendingPublicationDetail`,
+  `domain.RepositoryMergeOutcome.LocalMergeSHA` / `.KeepPendingPublication` /
+  `.KeepsPendingPublicationOf`, `worktreefs.Tree.LstatEntry`,
+  `domain.FirstExhaustedOutcome`, `git.TreeRestoreReport.TookBack` /
+  `.Phantoms`,
+  `domain.FailureMergeRetriesExhausted`, `scheduler.WithCommitExhausted`,
+  `scheduler.CommitExhaustedFunc`, `(*scheduler.Scheduler).CommitRetryBudget`, the
+  `MultiSchedulerConfig` fields `CommitMaxRetries` / `WorkspaceBudget` /
+  `MaxConcurrentWorkspaces` and `ServiceSet.CommitExhaustedFn`.
+- **Behaviour every embedder sees (Rule 4):** every git child the git client starts is stopped
+  with `SIGTERM` when its context ends (`Kill` 10 s later, or at once where the signal is
+  unsupported) — a cancelled git now exits through its own handler instead of being killed; and
+  the engine's cascade and primary-merge steps re-read the run first (one extra `GetRun` each) and
+  skip a run that is no longer `committing` instead of merging against a deleted branch. Neither
+  changes a successful result.
+- **Lock scope for embedders:** every `CLIClient` stateful call, and an in-place
+  `git.EnterBranch(ctx, dir, "")` scope until its `Cleanup`, takes an uncontended lock on its tree's
+  path; the registry entry is removed when the last holder leaves. A tree with no registered home
+  branch (`WithHomeBranch` is never set by SMP) is never restored or detached and keeps the real
+  `HEAD`. Use `scope.Context(ctx)` for git calls made inside an in-place scope; a locked call made
+  with a context that does not carry the scope's ticket waits for the scope itself.
+- **`artifact.Service` acceptance/rejection** (`AcceptTask`, `RejectTask`, the follow-up link)
+  reads the task file inside an uncontended in-place scope on an embedder's worktree (the same
+  bytes as before) and commits only if the file is unchanged when it writes — always true on an
+  embedder's per-request worktree, where nothing else writes.
+- **`git.CLIClient.ResetBranch`** remembers a take-back it could not complete — from the first
+  call that can fail, the lock wait included; only proof that `expected` names no commit arms
+  nothing — and the next `WithWorkingTree`, in-place `EnterBranch` scope or restore on that tree
+  retries it first (and fails while the branch still holds the refused merge). Its git now runs on
+  its own context, detached from the caller's cancellation and bounded at 30 s (review round 2: a
+  take-back is a compensating action). On a tree with a home branch a refused two-tree switch is
+  quarantined (`git stash create`) and reset (`read-tree --reset -u`) after the untracked-file
+  check; on any other tree it is refused as before. Embedders that never call `ResetBranch` on a
+  `CLIClient` (SMP) never have one and see none of this.
+- **`domain.RepositoryMergeOutcome.KeepPendingPublication`** no longer carries a permanent-class
+  prior, and the engine applies it only to a prior attempted in the run's current committing
+  episode (one `ListStepExecutionsByRun` read, only when a carry would apply; a failed read records
+  nothing and the run stays `committing`). This narrows a failure-detail prefix this task added;
+  successful merges are unchanged.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-004 TASK-015: SSE field safety, shared-mode scoping, git-endpoint auth, gitpool credential scoping)
 
 Standalone `spine serve` hardening (audit P3-28, P3-29, P3-30) plus the latent gitpool

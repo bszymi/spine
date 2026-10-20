@@ -58,6 +58,12 @@ func syncedPayload(t *testing.T, router *recordingRouter) map[string]any {
 // "timeout", "Could not resolve") is still deterministic. Before the fix
 // every tick returned "read changed artifact: … repository locked" and
 // the sync stayed error@c1 — a wedge any member could plant.
+//
+// Since the INIT-023 wave 4 follow-up the git client never reads a
+// gitlink (it types the entry and refuses it as git.ErrNotBlob), so
+// discovery records each one as a not_a_file refusal — one Warn, one
+// projection_file_skipped, counted in "refused" — instead of a read
+// error that the classifier then proved deterministic (read_skipped).
 func TestIncrementalSync_GitlinkWithTransientLookingNameIsSkipped(t *testing.T) {
 	logs := captureLogs(t)
 	repo := newScratchRepo(t)
@@ -92,21 +98,24 @@ func TestIncrementalSync_GitlinkWithTransientLookingNameIsSkipped(t *testing.T) 
 		t.Fatalf("the real change in the same window must be projected: %+v", a)
 	}
 	for _, p := range gitlinks {
-		if n := len(logs.lines("level=WARN", "skipped unreadable changed file", "entry=gitlink", filepath.Base(p))); n != 1 {
+		if n := len(logs.lines("level=WARN", "projection skipped file", "reason=not_a_file", filepath.Base(p))); n != 1 {
 			t.Errorf("expected one Warn for %s, got %d", p, n)
 		}
 	}
-	if p := syncedPayload(t, router); p["read_skipped"] != float64(len(gitlinks)) {
-		t.Fatalf("read_skipped = %v, want %d", p["read_skipped"], len(gitlinks))
+	if p := syncedPayload(t, router); p["refused"] != float64(len(gitlinks)) || p["read_skipped"] != float64(0) {
+		t.Fatalf("projection_synced payload = %+v, want refused %d and read_skipped 0", p, len(gitlinks))
 	}
 }
 
 // killingGit puts a `git` wrapper first on PATH that, while the flag
-// file exists, makes every git command with a `<ref>:<path>` argument
-// for the given path (the blob read: `show`, or `cat-file`) fail the way
-// an OOM kill or a silent git failure does — no stderr — and otherwise
-// runs the real git (`ls-tree … -- <path>` has no such argument). It
-// returns the flag file path.
+// file exists, makes the blob read of the given path fail the way an OOM
+// kill or a silent git failure does — no stderr — and otherwise runs the
+// real git. The blob read is `git cat-file blob <oid>` (ReadFile reads by
+// object id since the INIT-023 wave 4 follow-up; before it, a `show` or
+// `cat-file` of `<ref>:<path>`): the wrapper fails it when <oid> is the
+// blob at <path> in any commit of the repository, so the entry probes
+// (`ls-tree … <path>`) and TreeEntryType still run, and still prove a
+// blob is there. It returns the flag file path.
 func killingGit(t *testing.T, path, how string) string {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
@@ -120,10 +129,8 @@ func killingGit(t *testing.T, path, how string) string {
 		action = "exit 1"
 	}
 	script := "#!/bin/sh\n" +
-		"if [ -e '" + flag + "' ]; then\n" +
-		"  for a in \"$@\"; do\n" +
-		"    case \"$a\" in *:" + path + ") " + action + " ;; esac\n" +
-		"  done\n" +
+		"if [ -e '" + flag + "' ] && [ \"$1\" = cat-file ] && [ \"$2\" = blob ]; then\n" +
+		"  if '" + realGit + "' rev-list --all --objects 2>/dev/null | grep -qxF \"$3 " + path + "\"; then " + action + "; fi\n" +
 		"fi\n" +
 		"exec '" + realGit + "' \"$@\"\n"
 	//nolint:gosec // G306: the wrapper must be executable; it lives under t.TempDir().

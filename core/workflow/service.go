@@ -68,6 +68,10 @@ type Service struct {
 	repo       string
 	policy     branchprotect.Policy // nil = no evaluation, no bypass role check (pre-TASK-014)
 	defaultRef string               // branch reported to the policy when no WriteContext branch is set
+	// lifecycle, when set, refuses a body whose commit.status is not a
+	// declared status of its applies_to types (INIT-023 TASK-017). nil =
+	// no check (the pre-TASK-017 behaviour).
+	lifecycle *domain.StatusLifecycle
 }
 
 // NewService constructs a workflow Service with no branch-protection policy
@@ -91,6 +95,18 @@ func (s *Service) WithDefaultRef(ref string) {
 	if ref != "" {
 		s.defaultRef = ref
 	}
+}
+
+// WithStatusLifecycle installs the declared artifact-status lifecycle
+// (INIT-023 TASK-017, audit P3-21): Create and Update then refuse, before
+// anything is written, a body whose commit.status is not a declared status
+// of every applies_to type (ValidateCommitStatuses), and ValidateBody
+// reports the same errors. nil (the default) turns the check off. The
+// check is deliberately not part of Validate, the projection or the
+// loaders (see ValidateCommitStatuses). Like the other With* setters it is
+// a setup-time call.
+func (s *Service) WithStatusLifecycle(l *domain.StatusLifecycle) {
+	s.lifecycle = l
 }
 
 // enterBranch prepares an isolated working directory when a WriteContext
@@ -182,6 +198,13 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
 			"workflow validation failed", result.Errors)
 	}
+	// Declared commit.status (INIT-023 TASK-017): refused before the
+	// branch-protection check and enterBranch, so nothing is written or
+	// committed.
+	if errs := ValidateCommitStatuses(wf, s.lifecycle); len(errs) > 0 {
+		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
+			"workflow validation failed", errs)
+	}
 
 	// workflows/<id>.yaml is already constrained by idPattern; Clean adds
 	// the length caps and the git-dir rule, before any worktree exists.
@@ -202,6 +225,9 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 		return nil, err
 	}
 	defer scope.Cleanup()
+	// Every git call inside the scope uses sctx (INIT-023 TASK-012; see
+	// artifact.Service.writeAndCommit). workflow.Service emits no events.
+	sctx := scope.Context(ctx)
 
 	// All file I/O below goes through worktreefs (INIT-023 TASK-004, audit
 	// F5). On 61994fe this joined scope.RepoDir + path and called os.* with
@@ -259,7 +285,7 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 		defer undo.Release()
 	}
 
-	commit, err := git.StageAndCommit(ctx, scope, rel, git.CommitOpts{
+	commit, err := git.StageAndCommit(sctx, scope, rel, git.CommitOpts{
 		Message:  op.messageFn(wf, prior),
 		Trailers: workflowTrailers(ctx, op.operation),
 		Author:   workflowAuthor(ctx),
@@ -274,7 +300,7 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 		if op.requireExists {
 			_ = tree.WriteFile(rel, originalBody, originalMode)
 		} else {
-			_ = undo.RollbackClaiming(claimUntracked(ctx, scope.RepoDir, rel))
+			_ = undo.RollbackClaiming(claimUntracked(sctx, scope.RepoDir, rel))
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
@@ -326,6 +352,15 @@ func (s *Service) Read(ctx context.Context, id, ref string) (*ReadResult, error)
 			// stored as a delta on a large base.
 			return nil, domain.NewErrorWithCause(domain.ErrPayloadTooLarge,
 				fmt.Sprintf("workflow %s at ref %s is refused by the read limits: %v", path, ref, err), err)
+		}
+		// A gitlink, a directory or a file entry recording a tag, a tree
+		// or a commit at the path (INIT-023 wave 4 follow-up and its
+		// review: the git client refuses it unread) holds no workflow
+		// definition: 404, as for a missing file.
+		var notBlob *git.NotBlobError
+		if errors.As(err, &notBlob) {
+			return nil, domain.NewErrorWithCause(domain.ErrNotFound,
+				fmt.Sprintf("workflow not found: %s at ref %s: %s", path, ref, notBlob.Error()), err)
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
@@ -411,7 +446,14 @@ func (s *Service) ValidateBody(ctx context.Context, id, body string) domain.Vali
 			}},
 		}
 	}
-	return Validate(wf)
+	result := Validate(wf)
+	// The same commit.status errors Create/Update refuse with (INIT-023
+	// TASK-017), so the validate preview matches create.
+	if errs := ValidateCommitStatuses(wf, s.lifecycle); len(errs) > 0 {
+		result.Errors = append(result.Errors, errs...)
+		result.Status = "failed"
+	}
+	return result
 }
 
 // ProjectionRoundTripRuleID is the validation rule id ValidateBody reports

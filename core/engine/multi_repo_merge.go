@@ -121,7 +121,14 @@ func (o *Orchestrator) mergeAffectedCodeRepositories(ctx context.Context, run *d
 		if lookupErr != nil && !isNotFoundError(lookupErr) {
 			return fmt.Errorf("lookup existing outcome for %q: %w", repoID, lookupErr)
 		}
-		if existing != nil && existing.IsTerminal() {
+		// A failure whose retries were abandoned (AbandonExhaustedMerge,
+		// INIT-023 TASK-012 codex review round 8) is terminal here like a
+		// permanent one: the primary merges and the run waits in
+		// partially-merged for an operator.
+		// The outcome a failure of this attempt carries a landed merge from
+		// (keepPendingPublication).
+		carryFrom := existing
+		if existing != nil && (existing.IsTerminal() || retriesAbandoned(*existing)) {
 			// Merge binding (INIT-023 TASK-005 §8, P3-37): a `merged`
 			// repository is skipped only while its bound commit is on its
 			// default branch. After a merge_failed loop-back the run binds
@@ -147,8 +154,22 @@ func (o *Orchestrator) mergeAffectedCodeRepositories(ctx context.Context, run *d
 				"run_id", run.RunID,
 				"repository_id", repoID,
 				"bound_sha", run.CommitMeta[RepoBoundSHAKey(repoID)])
+			// The earlier merge's bound commit is not on the default
+			// branch, so nothing of it is pending publication there: a
+			// failure of the re-merge is bounded like any other (review
+			// round 2 of INIT-023 TASK-012, finding 4).
+			carryFrom = nil
 		}
 		outcome, err := o.attemptCodeRepositoryMerge(ctx, run, repoID)
+		if err == nil {
+			// A merge that landed earlier in this committing episode stays
+			// publication pending across this attempt's failure. A failed
+			// read of the run's steps records nothing; the run stays in
+			// committing.
+			if carryErr := o.keepPendingPublication(ctx, run, &outcome, carryFrom); carryErr != nil {
+				return fmt.Errorf("decide whether the earlier merge of %q is pending publication: %w", repoID, carryErr)
+			}
+		}
 		if err != nil {
 			// Non-recoverable per-repo error (e.g. registry no longer
 			// knows the repo). Bubble up so the run stays in committing
@@ -187,8 +208,6 @@ func (o *Orchestrator) mergeAffectedCodeRepositories(ctx context.Context, run *d
 // errors translate into a failed outcome and a nil error so the
 // caller can persist the row and move on.
 func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *domain.Run, repoID string) (domain.RepositoryMergeOutcome, error) {
-	log := observe.Logger(ctx)
-
 	repo, err := o.repositories.Lookup(ctx, repoID)
 	if err != nil {
 		return domain.RepositoryMergeOutcome{}, err
@@ -232,9 +251,33 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 		"Run-ID":   run.RunID,
 		"Trace-ID": run.TraceID,
 	}
-	if o.bindingOn {
-		return o.attemptCodeRepositoryMergeBound(ctx, run, repoID, repo, client, outcome, trailers), nil
+	// The merge, its abort (or the bound check and take-back) and the push
+	// are one sequence on the repository's working tree (INIT-023
+	// TASK-012, design-check note 4): under its lock when the client is a
+	// git.WorkingTreeGuard. Code-repository clients register no home
+	// branch, so nothing is restored. A lock wait cut short by ctx is
+	// returned as an error: no outcome is recorded and the run stays in
+	// committing. Dormant until a code-repository catalog is wired (P3-37).
+	var result domain.RepositoryMergeOutcome
+	err = withClientTree(ctx, client, func(ctx context.Context) error {
+		if o.bindingOn {
+			result = o.attemptCodeRepositoryMergeBound(ctx, run, repoID, repo, client, outcome, trailers)
+		} else {
+			result = o.attemptCodeRepositoryMergeUnbound(ctx, repoID, repo, client, outcome, run, trailers)
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.RepositoryMergeOutcome{}, err
 	}
+	return result, nil
+}
+
+// attemptCodeRepositoryMergeUnbound is the binding-off code-repository
+// merge: merge the run branch into the default branch, abort on failure,
+// push. Git only; it runs inside attemptCodeRepositoryMerge's sequence.
+func (o *Orchestrator) attemptCodeRepositoryMergeUnbound(ctx context.Context, repoID string, repo *repository.Repository, client git.GitClient, outcome domain.RepositoryMergeOutcome, run *domain.Run, trailers map[string]string) domain.RepositoryMergeOutcome {
+	log := observe.Logger(ctx)
 	mergeResult, mergeErr := client.Merge(ctx, git.MergeOpts{
 		Source:   run.BranchName,
 		Target:   repo.DefaultBranch,
@@ -258,7 +301,7 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 		outcome.FailureClass = class
 		outcome.FailureDetail = detail
 		log.Warn("code repo merge failed", "repository_id", repoID, "error", mergeErr)
-		return outcome, nil
+		return outcome
 	}
 
 	// Push the merged ref to origin so the remote sees what we just
@@ -272,13 +315,12 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 			class, detail := classifyMergeFailure(pushErr)
 			outcome.Status = domain.RepositoryMergeStatusFailed
 			outcome.FailureClass = class
-			outcome.FailureDetail = fmt.Sprintf("local merge succeeded (sha=%s) but push failed: %s",
-				mergeResult.SHA, detail)
+			outcome.FailureDetail = domain.PushFailureDetail(mergeResult.SHA, detail)
 			log.Warn("code repo push after merge failed",
 				"repository_id", repoID,
 				"merge_sha", mergeResult.SHA,
 				"error", pushErr)
-			return outcome, nil
+			return outcome
 		}
 	}
 
@@ -286,7 +328,7 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 	outcome.Status = domain.RepositoryMergeStatusMerged
 	outcome.MergeCommitSHA = mergeResult.SHA
 	outcome.MergedAt = &mergedAt
-	return outcome, nil
+	return outcome
 }
 
 // nextAttemptNumber returns 1 for a brand new (run, repo) pair or one
@@ -327,6 +369,14 @@ func isNotFoundError(err error) bool {
 func classifyMergeFailure(err error) (domain.MergeFailureClass, string) {
 	if err == nil {
 		return domain.MergeFailureUnknown, ""
+	}
+
+	// A status-lifecycle refusal (INIT-023 TASK-017) reuses the
+	// precondition class — a new class would need migration 022's CHECK
+	// changed — with a detail that starts "status_lifecycle_violation:".
+	var lifecycleErr *StatusLifecycleError
+	if errors.As(err, &lifecycleErr) {
+		return domain.MergeFailurePrecondition, lifecycleErr.Error()
 	}
 
 	var gitErr *git.GitError
@@ -401,7 +451,30 @@ func classifyMergeFailure(err error) (domain.MergeFailureClass, string) {
 func (o *Orchestrator) recordPrimaryMergeOutcome(ctx context.Context, run *domain.Run, mergeSHA string, phaseErr error, phase string) error {
 	log := observe.Logger(ctx)
 	now := time.Now()
-	attempts := o.nextAttemptNumber(ctx, run.RunID, repository.PrimaryRepositoryID)
+	// The prior outcome numbers the attempt (as nextAttemptNumber does)
+	// and carries a pending publication across a later failure of the
+	// same committing episode (keepPendingPublication).
+	prior, priorErr := o.store.GetRepositoryMergeOutcome(ctx, run.RunID, repository.PrimaryRepositoryID)
+	if priorErr != nil {
+		// A failure recorded without its prior could drop the prior's
+		// landed merge (KeepPendingPublication), and the retry budget
+		// could then abandon a run whose merge is on main (codex review
+		// round 8). So a failed read other than "no outcome yet" records
+		// nothing when the carry matters — a failure that is not this
+		// attempt's own push failure — and the run stays in committing
+		// for the next retry (a store outage, not counted), as the code
+		// repository loop already does for its lookup. A success, or a
+		// push failure naming its own merge, needs no carry and is
+		// recorded as before.
+		if phaseErr != nil && (phase != "push" || mergeSHA == "") && !isNotFoundError(priorErr) {
+			return fmt.Errorf("read the prior primary merge outcome: %w", priorErr)
+		}
+		prior = nil
+	}
+	attempts := 1
+	if prior != nil {
+		attempts = prior.Attempts + 1
+	}
 	outcome := domain.RepositoryMergeOutcome{
 		RunID:           run.RunID,
 		RepositoryID:    repository.PrimaryRepositoryID,
@@ -415,10 +488,15 @@ func (o *Orchestrator) recordPrimaryMergeOutcome(ctx context.Context, run *domai
 		outcome.Status = domain.RepositoryMergeStatusFailed
 		outcome.FailureClass = class
 		if phase == "push" && mergeSHA != "" {
-			outcome.FailureDetail = fmt.Sprintf("local merge succeeded (sha=%s) but push failed: %s",
-				mergeSHA, detail)
+			outcome.FailureDetail = domain.PushFailureDetail(mergeSHA, detail)
 		} else {
 			outcome.FailureDetail = detail
+			// Within the current committing episode only (review round 2
+			// of INIT-023 TASK-012); a failed read of the run's steps
+			// records nothing, as a failed read of prior does above.
+			if err := o.keepPendingPublication(ctx, run, &outcome, prior); err != nil {
+				return fmt.Errorf("decide whether the earlier primary merge is pending publication: %w", err)
+			}
 		}
 	} else {
 		mergedAt := now

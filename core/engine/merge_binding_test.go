@@ -347,8 +347,14 @@ func TestRecoveryResubmitAndAssertionOrdering(t *testing.T) {
 		f.git.setHead(f.run.BranchName, sha40('2')) // moved since: must not matter
 		e := f.exec("review", domain.StepStatusCompleted)
 		e.OutcomeID = "needs_rework"
-		if err := f.orch.SubmitStepResult(context.Background(), e.ExecutionID, StepResult{OutcomeID: "needs_rework"}); err != nil {
-			t.Fatalf("recovery re-submit: %v", err)
+		// INIT-023 TASK-008 §3a: SubmitStepResult no longer re-routes a
+		// completed execution; crash recovery goes through
+		// RecoverCompletedStep, which routes the stored outcome.
+		if err := f.orch.SubmitStepResult(context.Background(), e.ExecutionID, StepResult{OutcomeID: "needs_rework"}); !errors.Is(err, ErrStepStateChanged) {
+			t.Fatalf("SubmitStepResult on a completed execution = %v, want ErrStepStateChanged", err)
+		}
+		if err := f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID); err != nil {
+			t.Fatalf("recovery re-route: %v", err)
 		}
 		if n := f.git.callCount("binder:ResolveBranchHead"); n != 0 {
 			t.Fatalf("recovery re-submit resolved the head %d times", n)
@@ -464,7 +470,7 @@ func (c *headMovingConvergence) CheckEntryPolicy(context.Context, *domain.Diverg
 	return true, nil
 }
 
-func (c *headMovingConvergence) EvaluateAndCommit(context.Context, *domain.DivergenceContext, domain.ConvergenceDefinition) error {
+func (c *headMovingConvergence) EvaluateAndCommit(context.Context, *domain.Run, *domain.DivergenceContext, domain.ConvergenceDefinition) error {
 	c.g.setHead(c.branch, c.to)
 	return nil
 }

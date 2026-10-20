@@ -107,11 +107,18 @@ func TestValidateBranch_EmptyBranch(t *testing.T) {
 }
 
 // INIT-023 TASK-011 AC 28: branch validation ignores the new
-// ChangeSet.ReadErrors field, so a planning branch carrying an
-// unreadable entry (a gitlink named x.md whose commit is absent, which
-// `git show` refuses as "bad object") validates exactly as before: the
-// entry is skipped and the readable artifact is validated.
-func TestValidateBranch_UnreadableGitlinkIsSkippedAsBefore(t *testing.T) {
+// ChangeSet.ReadErrors field. Its fixture was a planning branch carrying
+// a gitlink named x.md whose commit is absent (which `git show` refused
+// as "bad object"): the read error was skipped and the branch validated.
+//
+// Since the INIT-023 wave 4 follow-up the git client refuses a gitlink as
+// not a file (git.ErrNotBlob) and discovery records it as a not_a_file
+// refusal, which — like TASK-003's other refusals — fails validation: a
+// gitlink .md was never read, so the branch cannot be vouched for, and it
+// would never be projected after the merge. The readable artifact is
+// still validated next to it; ReadErrors are still ignored
+// (TestValidateBranch_ReadErrorsAreIgnored keeps AC 28's own claim).
+func TestValidateBranch_GitlinkFailsAsNotAFile(t *testing.T) {
 	repo := testutil.NewTempRepo(t)
 	client := git.NewCLIClient(repo)
 	ctx := context.Background()
@@ -133,8 +140,101 @@ func TestValidateBranch_UnreadableGitlinkIsSkippedAsBefore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateBranch: %v", err)
 	}
+	if result.TotalArtifacts != 2 || result.Passed != 1 || result.Failed != 1 || len(result.Details) != 1 {
+		t.Fatalf("result = %+v, want the artifact passed and the gitlink failed", result)
+	}
+	if d := result.Details[0]; d.Path != "x.md" || len(d.Errors) != 1 || !strings.Contains(d.Errors[0], "gitlink") {
+		t.Fatalf("detail = %+v, want x.md not validated as a gitlink", d)
+	}
+}
+
+// Adversarial review of the wave 4 follow-up (P2): a regular-file entry
+// recording the id of a tree, or of a tag (here one whose target is a
+// valid artifact's blob, which `git cat-file blob` peeled to and so
+// validated content no diff shows), is not a file either. Before the fix
+// the tree was a plain read error — skipped, so the branch validated and,
+// once merged, held main's projection — and the tag validated as the
+// hidden artifact. Both fail validation as not_a_file refusals now.
+func TestValidateBranch_FileEntryRecordingANonBlobObjectFails(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+	ctx := context.Background()
+
+	testutil.WriteFile(t, repo, "README.md", "# Test\n")
+	testutil.GitAdd(t, repo, ".", "initial commit")
+	testutil.GitCheckout(t, repo, "-b", "test-branch")
+	testutil.WriteFile(t, repo, "initiatives/init-001/initiative.md",
+		"---\nid: INIT-001\ntype: Initiative\ntitle: Test\nstatus: Draft\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# INIT-001\n")
+	gitIn := func(stdin string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Stdin = strings.NewReader(stdin)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	hidden := gitIn("---\nid: INIT-002\ntype: Initiative\ntitle: Hidden\nstatus: Draft\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# INIT-002\n",
+		"hash-object", "-w", "--stdin")
+	tag := gitIn("object "+hidden+"\ntype blob\ntag v1\ntagger t <t@t> 0 +0000\n\nm\n", "mktag")
+	tree := gitIn("", "rev-parse", "HEAD^{tree}")
+	gitIn("", "update-index", "--add", "--cacheinfo", "100644,"+tree+",x.md")
+	gitIn("", "update-index", "--add", "--cacheinfo", "100644,"+tag+",initiatives/init-002/initiative.md")
+	testutil.GitAdd(t, repo, "initiatives/init-001", "add an artifact and two non-blob file entries")
+
+	result, err := ValidateBranch(ctx, client, &domain.Run{RunID: "r1", Mode: domain.RunModePlanning, BranchName: "test-branch"})
+	if err != nil {
+		t.Fatalf("ValidateBranch: %v", err)
+	}
+	if result.TotalArtifacts != 3 || result.Passed != 1 || result.Failed != 2 || len(result.Details) != 2 {
+		t.Fatalf("result = %+v, want the artifact passed and both non-blob entries failed", result)
+	}
+	for _, d := range result.Details {
+		if (d.Path != "x.md" && d.Path != "initiatives/init-002/initiative.md") || len(d.Errors) != 1 ||
+			!strings.Contains(d.Errors[0], "not validated") || !strings.Contains(d.Errors[0], "a tag, a tree or a commit") {
+			t.Fatalf("detail = %+v, want a not_a_file refusal naming the non-blob entry", d)
+		}
+	}
+}
+
+// readFailingGit fails every ReadFile of one path with a plain git error
+// (a read error, not a refusal) and otherwise is the real client.
+type readFailingGit struct {
+	git.GitClient
+	path string
+}
+
+func (g readFailingGit) ReadFile(ctx context.Context, ref, path string) ([]byte, error) {
+	if path == g.path {
+		return nil, &git.GitError{Kind: git.ErrKindPermanent, Op: "read_file", Message: "fatal: simulated"}
+	}
+	return g.GitClient.ReadFile(ctx, ref, path)
+}
+
+// INIT-023 TASK-011 AC 28, as it stands after the wave 4 follow-up:
+// branch validation ignores ChangeSet.ReadErrors — a changed .md whose
+// read fails is skipped and the readable artifact is validated, exactly
+// as before TASK-011.
+func TestValidateBranch_ReadErrorsAreIgnored(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	ctx := context.Background()
+	testutil.WriteFile(t, repo, "README.md", "# Test\n")
+	testutil.GitAdd(t, repo, ".", "initial commit")
+	testutil.GitCheckout(t, repo, "-b", "test-branch")
+	testutil.WriteFile(t, repo, "initiatives/init-001/initiative.md",
+		"---\nid: INIT-001\ntype: Initiative\ntitle: Test\nstatus: Draft\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# INIT-001\n")
+	testutil.WriteFile(t, repo, "x.md", "# unreadable\n")
+	testutil.GitAdd(t, repo, ".", "add artifact and x.md")
+
+	client := readFailingGit{GitClient: git.NewCLIClient(repo), path: "x.md"}
+	result, err := ValidateBranch(ctx, client, &domain.Run{RunID: "r1", Mode: domain.RunModePlanning, BranchName: "test-branch"})
+	if err != nil {
+		t.Fatalf("ValidateBranch: %v", err)
+	}
 	if result.TotalArtifacts != 1 || result.Passed != 1 || result.Failed != 0 {
-		t.Fatalf("result = %+v, want 1 artifact passed (the gitlink skipped)", result)
+		t.Fatalf("result = %+v, want 1 artifact passed (the unreadable file skipped)", result)
 	}
 }
 

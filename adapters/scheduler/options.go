@@ -11,6 +11,14 @@ type Option func(*Scheduler)
 // CommitRetryFunc is called by the scheduler to retry merge for committing runs.
 type CommitRetryFunc func(ctx context.Context, runID string) error
 
+// CommitExhaustedFunc decides, before a commit retry, whether a committing
+// run's automatic merge retries are spent (INIT-023 TASK-012, audit
+// P3-27). When they are it ends the run (the engine routes it like a
+// permanent merge failure) and returns abandoned = true; the scheduler then
+// does not retry it. `spine serve` passes engine.Orchestrator's
+// AbandonExhaustedMerge.
+type CommitExhaustedFunc func(ctx context.Context, runID string, maxRetries int) (abandoned bool, err error)
+
 // StepRecoveryFunc is called by recovery to resume a step through the engine.
 // For completed steps it advances the run; for failed steps it evaluates retry.
 type StepRecoveryFunc func(ctx context.Context, executionID string) error
@@ -40,12 +48,28 @@ func WithOrphanThreshold(d time.Duration) Option {
 }
 
 // WithCommitRetry sets the function used to retry merges for committing runs.
+//
+// maxRetries is the automatic retry budget (INIT-023 TASK-012, P3-27): with
+// maxRetries > 0, a committing run whose recorded merge outcome failed
+// transiently more than maxRetries times is handed to the
+// WithCommitExhausted function instead of being retried (or, with none
+// wired, left in committing with an Error log). 0 keeps today's unbounded
+// retries. threshold delays the startup recovery pass.
 func WithCommitRetry(fn CommitRetryFunc, maxRetries int, threshold time.Duration) Option {
 	return func(s *Scheduler) {
 		s.commitRetryFn = fn
 		s.commitMaxRetries = maxRetries
 		s.commitThreshold = threshold
 	}
+}
+
+// WithCommitExhausted sets the function that ends a committing run whose
+// merge retry budget (WithCommitRetry's maxRetries) is spent. Unset, an
+// exhausted run is never retried again and stays in committing, with an
+// Error log each tick: a misconfiguration stops the loop instead of
+// retrying forever.
+func WithCommitExhausted(fn CommitExhaustedFunc) Option {
+	return func(s *Scheduler) { s.commitExhaustedFn = fn }
 }
 
 // WithStepRecovery sets the function used to recover completed/failed steps.

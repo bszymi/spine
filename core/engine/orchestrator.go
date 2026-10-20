@@ -3,7 +3,9 @@ package engine
 import (
 	"fmt"
 
+	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/branchprotect"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // Orchestrator wires the workflow engine, store, actor gateway, artifact service,
@@ -36,6 +38,18 @@ type Orchestrator struct {
 	binder    CommitBinder
 	movedHead MovedHeadPolicy
 	bindingOn bool
+	// Declared artifact-status lifecycle (INIT-023 TASK-017), set only by
+	// WithStatusLifecycle; nil merges status changes unchecked as before.
+	// It requires merge binding (DC-2): MergeRunBranch refuses with
+	// ErrUnavailable when it is set and binding is off.
+	lifecycle *domain.StatusLifecycle
+	// artifactScope is the artifacts_dir the lifecycle resolves run.TaskPath
+	// under and judges diff paths with (WithArtifactsDir; zero value = the
+	// repository root, today's behaviour). Only the lifecycle reads it.
+	artifactScope artifact.PathScope
+	// governance is the governance-path guard (INIT-023 TASK-006), set
+	// only by WithGovernanceGuard; nil merges governance changes as before.
+	governance *governanceGuard
 	// cloneURLBuilder constructs the runner-facing clone URL for a
 	// resolved repository ID per ADR-015 *Assignment payload shape*.
 	// Production wires this to the workspace's git HTTP endpoint
@@ -202,3 +216,43 @@ func (o *Orchestrator) WithCloneURLBuilder(b CloneURLBuilder) {
 func (o *Orchestrator) WithBranchProtectPolicy(p branchprotect.Policy) {
 	o.policy = p
 }
+
+// WithStatusLifecycle installs the declared artifact-status lifecycle on
+// the governed merge (INIT-023 TASK-017, audit P3-21). Every merge then
+// judges the bound diff before any ref advances: a status change on an
+// artifact the run does not own is refused, the run's own change must be
+// a declared transition, and the commit.status cascade touches only the
+// artifacts the run owns (its TaskPath, plus the artifacts a planning run
+// adds). A refusal is recorded as a failed primary merge outcome (class
+// precondition) and takes the permanent route — a publish workflow sends
+// the run back to its producer, a legacy terminal-commit workflow fails
+// the run; nothing is merged.
+//
+// The lifecycle requires merge binding (EnableMergeBinding): it judges
+// the bound commit, and without binding the branch tip could move between
+// the judgement and the merge. With binding off, MergeRunBranch refuses
+// with ErrUnavailable (a configuration error) and leaves the run in
+// committing. nil (the default) is the pre-TASK-017 behaviour, byte for
+// byte. A setup-time call, like the other With* options.
+func (o *Orchestrator) WithStatusLifecycle(l *domain.StatusLifecycle) {
+	o.lifecycle = l
+}
+
+// StatusLifecycle returns the installed lifecycle, or nil.
+func (o *Orchestrator) StatusLifecycle() *domain.StatusLifecycle { return o.lifecycle }
+
+// WithArtifactsDir tells the governed-merge status lifecycle where the
+// workspace's artifacts live (INIT-023 TASK-017 DC-5): run.TaskPath is
+// artifact-relative (StartRun reads it through the artifact service, which
+// prefixes artifacts_dir) while git diffs are repository-relative, and only
+// the paths the projection treats as artifacts are judged. Pass the same
+// artifacts_dir the artifact service and the projection are configured
+// with. The zero value is the repository root (today's behaviour); it has
+// no effect while no lifecycle is installed.
+func (o *Orchestrator) WithArtifactsDir(dir string) {
+	o.artifactScope = artifact.NewPathScope(dir)
+}
+
+// ArtifactsDir returns the normalised artifacts directory the lifecycle
+// uses, "" for the repository root.
+func (o *Orchestrator) ArtifactsDir() string { return o.artifactScope.Dir() }

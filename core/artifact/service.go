@@ -1,6 +1,7 @@
 package artifact
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -61,6 +62,17 @@ func NewService(gitClient git.GitClient, events event.EventRouter, repoPath stri
 // are prefixed with this directory for file I/O and git operations.
 func (s *Service) WithArtifactsDir(dir string) {
 	s.artifactsDir = dir
+}
+
+// ArtifactsDir returns the configured artifacts directory ("/" for the
+// repository root). Wiring passes it to Orchestrator.WithArtifactsDir so
+// the governed merge resolves a run's TaskPath exactly as this service
+// read it at run start (INIT-023 TASK-017). A nil service has none.
+func (s *Service) ArtifactsDir() string {
+	if s == nil {
+		return ""
+	}
+	return s.artifactsDir
 }
 
 // WithPolicy installs the branch-protection policy consulted by every
@@ -183,7 +195,28 @@ func worktreeError(ctx context.Context, path, action string, err error) error {
 
 // readRepoFile reads an artifact's bytes from the main working tree
 // through worktreefs (symlinks refused, read capped).
+//
+// The read holds the working tree (an in-place scope, INIT-023 TASK-012
+// review round 1). In standalone's shared tree a governed sequence — a
+// convergence merging a divergence branch, the status cascade, the
+// recovery ledger — checks a run branch out while it holds the tree, and
+// an unlocked read then returned that branch's unreviewed file, which
+// the acceptance and follow-up paths wrote back onto main. Under the lock
+// the read waits for the sequence and its scope's entry restore, so it
+// sees the home branch's file. A tree with no home branch (an embedder's
+// per-request worktree) takes an uncontended lock and reads exactly what
+// it read before. The bytes are also the expected original of the update
+// that follows (updateFrom), so a change that lands between the two is a
+// conflict, never overwritten.
 func (s *Service) readRepoFile(ctx context.Context, path string) ([]byte, error) {
+	if _, err := s.cleanPath(path); err != nil {
+		return nil, err
+	}
+	scope, err := git.EnterBranch(ctx, s.repo, "", nil)
+	if err != nil {
+		return nil, domain.NewError(domain.ErrGit, err.Error())
+	}
+	defer scope.Cleanup()
 	rel, err := s.safePath(path)
 	if err != nil {
 		return nil, err
@@ -224,6 +257,11 @@ type writeOp struct {
 	operation     string
 	eventType     domain.EventType
 	logAction     string
+	// checkOriginal (Update only): the file read inside the write scope
+	// must still be original, the bytes the new content was derived from
+	// (updateFrom); otherwise the write is a conflict and nothing changes.
+	checkOriginal bool
+	original      []byte
 }
 
 func (s *Service) writeAndCommit(ctx context.Context, path, content string, op writeOp) (*WriteResult, error) {
@@ -259,7 +297,16 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	if err != nil {
 		return nil, err
 	}
+	// The deferred Cleanup covers the error paths; the success path
+	// releases the scope explicitly before any event (below).
 	defer scope.Cleanup()
+	// Every git call inside the scope uses sctx (INIT-023 TASK-012): for
+	// an in-place write it carries the shared tree's ticket, so a locked
+	// git call re-enters the scope instead of waiting for it, and in
+	// standalone's shared tree it is detached from the request (bounded),
+	// so a client disconnect cannot leave a write half-staged. Events keep
+	// ctx.
+	sctx := scope.Context(ctx)
 
 	// All file I/O below goes through worktreefs (INIT-023 TASK-004, audit
 	// F5): every component is Lstat-checked from a directory handle, so a
@@ -292,6 +339,10 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 		if err != nil {
 			return nil, worktreeError(ctx, path, "read original", err)
 		}
+		if op.checkOriginal && !bytes.Equal(originalContent, op.original) {
+			return nil, domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("artifact %s changed while the update was being prepared; retry", path))
+		}
 		// Replace never opens the existing file for writing: a fresh
 		// O_EXCL temp file is renamed over it, keeping its mode.
 		if err := tree.Replace(repoPath, []byte(content)); err != nil {
@@ -319,7 +370,7 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 		// audit record.
 		trailers["Branch-Protection-Override"] = "true"
 	}
-	commitResult, err := git.StageAndCommit(ctx, scope, repoPath, git.CommitOpts{
+	commitResult, err := git.StageAndCommit(sctx, scope, repoPath, git.CommitOpts{
 		Message:  fmt.Sprintf("%s %s: %s", op.messageVerb, artifact.Type, artifact.Title),
 		Trailers: trailers,
 		Author: git.Author{
@@ -341,13 +392,18 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 			if rbErr := tree.WriteFile(repoPath, originalContent, originalMode); rbErr != nil {
 				log.Warn("artifact rollback: restore failed", "path", path, "error", rbErr)
 			}
-		} else if rbErr := undo.RollbackClaiming(claimUntracked(ctx, scope.RepoDir, repoPath, path)); rbErr != nil {
+		} else if rbErr := undo.RollbackClaiming(claimUntracked(sctx, scope.RepoDir, repoPath, path)); rbErr != nil {
 			log.Warn("artifact rollback: remove failed", "path", path, "error", rbErr)
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
-	s.autoPush(ctx, scope.RepoDir)
+	s.autoPush(sctx, scope.RepoDir)
+	// Release the working tree before emitting (INIT-023 TASK-012): an
+	// event published while the shared tree is held could deadlock with a
+	// queue consumer that needs it. Cleanup is idempotent; the deferred
+	// call is then a no-op.
+	scope.Cleanup()
 
 	log.Info(op.logAction,
 		"path", path,
@@ -409,6 +465,15 @@ func (s *Service) Read(ctx context.Context, path, ref string) (*domain.Artifact,
 			return nil, domain.NewErrorWithCause(domain.ErrPayloadTooLarge,
 				fmt.Sprintf("artifact %s at ref %s %s", path, ref, ReadLimitPhrase(err)), err)
 		}
+		// A gitlink, a directory or a file entry recording a tag, a tree
+		// or a commit at the path (INIT-023 wave 4 follow-up and its
+		// review: the git client refuses it unread) holds no artifact:
+		// 404, as for a missing path — not the 500 a rendered listing or
+		// commit failing to parse used to be.
+		if errors.Is(err, git.ErrNotBlob) {
+			return nil, domain.NewErrorWithCause(domain.ErrNotFound,
+				fmt.Sprintf("artifact not found: %s at ref %s: %s", path, ref, NotAFilePhrase(err)), err)
+		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
@@ -430,6 +495,24 @@ func (s *Service) Update(ctx context.Context, path, content string) (*WriteResul
 		operation:     "artifact.update",
 		eventType:     domain.EventArtifactUpdated,
 		logAction:     "artifact updated",
+	})
+}
+
+// updateFrom is Update for a read-modify-write: content was derived from
+// original, the file's bytes as readRepoFile read them, and the write
+// commits only if the file is still original when the write scope holds
+// the tree (INIT-023 TASK-012 review round 1). The acceptance and
+// follow-up-link paths use it, so a governed merge that changes the task
+// between their read and their write is never reverted by it.
+func (s *Service) updateFrom(ctx context.Context, path string, original []byte, content string) (*WriteResult, error) {
+	return s.writeAndCommit(ctx, path, content, writeOp{
+		requireExists: true,
+		messageVerb:   "Update",
+		operation:     "artifact.update",
+		eventType:     domain.EventArtifactUpdated,
+		logAction:     "artifact updated",
+		checkOriginal: true,
+		original:      original,
 	})
 }
 

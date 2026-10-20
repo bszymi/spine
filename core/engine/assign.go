@@ -88,6 +88,10 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 	if err != nil {
 		return nil, err
 	}
+	// The bind is conditional on the (status, actor) read here (INIT-023
+	// TASK-008): a concurrent claim or assign that bound the step first
+	// is not overwritten; the caller gets the conflict.
+	prior := stateOf(exec)
 
 	if gated {
 		wfDef, err = o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
@@ -147,7 +151,7 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 		return nil, err
 	}
 	defer unlock()
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 		return nil, fmt.Errorf("update step execution: %w", err)
 	}
 	unlock()

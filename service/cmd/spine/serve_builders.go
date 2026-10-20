@@ -74,6 +74,11 @@ func buildWorkflowService(gitClient git.GitClient, repoPath string, st store.Sto
 		return nil, fmt.Errorf("workflow service branch-protect policy: %w", err)
 	}
 	svc.WithPolicy(policy)
+	// Declared commit.status (INIT-023 TASK-017): a workflow whose
+	// outcomes commit a status its applies_to types do not declare is
+	// refused at create/update and fails validate. No switch (owner
+	// question 5).
+	svc.WithStatusLifecycle(domain.DefaultStatusLifecycle())
 	return svc, nil
 }
 
@@ -174,8 +179,10 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 				return gateway.GitPushResources{}, noop, fmt.Errorf("git-push fallback branch-protect policy: %w", err)
 			}
 			return gateway.GitPushResources{
-				Policy:   policy,
-				Events:   fallbackEvents,
+				Policy: policy,
+				// Honoured overrides are recorded synchronously for the
+				// governance guard (INIT-023 TASK-006).
+				Events:   withOverrideProvenance(fallbackEvents, fallbackStore),
 				Runs:     runReaderOrNil(fallbackStore),
 				StepDefs: fallbackStepDefs,
 			}, noop, nil
@@ -207,7 +214,7 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 		}
 		return gateway.GitPushResources{
 			Policy:   policy,
-			Events:   events,
+			Events:   withOverrideProvenance(events, ss.Store),
 			Runs:     runReaderOrNil(ss.Store),
 			StepDefs: stepDefLookupOrNil(ss.StepAssigner),
 		}, release, nil
@@ -303,6 +310,7 @@ func buildOrchestrator(
 	artifactSvc *artifact.Service,
 	validator *validation.Engine,
 	stepEntryPolicy engine.StepEntryPolicy,
+	workflowDirs []string,
 	log *slog.Logger,
 ) *engine.Orchestrator {
 	if st == nil || wfProvider == nil {
@@ -346,6 +354,20 @@ func buildOrchestrator(
 		log.Error("merge binding init failed", "error", err)
 		return nil
 	}
+	// Declared artifact-status lifecycle at the governed merge (INIT-023
+	// TASK-017): non-owned status edits are refused and the cascade
+	// touches only run-owned artifacts. It needs the binding above; no
+	// switch (owner question 5). The artifacts directory is the artifact
+	// service's, the one StartRun resolved the TaskPath with.
+	orch.WithStatusLifecycle(domain.DefaultStatusLifecycle())
+	orch.WithArtifactsDir(artifactSvc.ArtifactsDir())
+	// Governance-path guard (INIT-023 TASK-006): on unless
+	// SPINE_GOVERNANCE_GUARD=off; workflowDirs are the projection's
+	// workflow directories (<artifacts_dir>/workflows/ included).
+	if err := enableGovernanceGuard(orch, workflowDirs); err != nil {
+		log.Error("governance guard init failed", "error", err)
+		return nil
+	}
 	// Engine step-entry policy (INIT-023 TASK-007): strict by default in
 	// `spine serve`, zero value under SPINE_STEP_ENTRY_POLICY=legacy.
 	orch.WithStepEntryPolicy(stepEntryPolicy)
@@ -363,6 +385,12 @@ func buildOrchestrator(
 	return orch
 }
 
+// defaultCommitMaxRetries is the automatic retry budget of a committing
+// run's governed merge in `spine serve` (INIT-023 TASK-012, owner question
+// 1: the value standalone already configured, now enforced). With the
+// 60 s commit tick, about four minutes of transient failure.
+const defaultCommitMaxRetries = 3
+
 // buildScheduler wires the background scheduler with recovery callbacks.
 func buildScheduler(
 	st store.Store,
@@ -375,31 +403,79 @@ func buildScheduler(
 		opts = append(opts, scheduler.WithOrphanThreshold(orphanThreshold))
 	}
 	if orch != nil {
-		opts = append(opts,
-			scheduler.WithStepRecovery(func(ctx context.Context, execID string) error {
-				exec, err := st.GetStepExecution(ctx, execID)
-				if err != nil {
-					return err
-				}
-				if exec.Status == domain.StepStatusCompleted {
-					return orch.SubmitStepResult(ctx, execID, engine.StepResult{OutcomeID: exec.OutcomeID})
-				}
-				return orch.RetryStep(ctx, exec)
-			}),
-			scheduler.WithRunFail(func(ctx context.Context, runID, reason string) error {
-				return orch.FailRun(ctx, runID, reason)
-			}),
-			// The run-timeout cancel writes the run row directly; this
-			// hook closes the run's live executions afterwards (INIT-023
-			// TASK-007). A no-op unless the step-entry policy sets
-			// TerminateStepsOnCancel.
-			scheduler.WithRunTerminated(orch.TerminateLiveSteps),
-			scheduler.WithCommitRetry(func(ctx context.Context, runID string) error {
-				return orch.MergeRunBranch(ctx, runID)
-			}, 3, 2*time.Minute),
-		)
+		opts = append(opts, engineSchedulerOptions(st, orch)...)
 	}
 	return scheduler.New(st, events, opts...)
+}
+
+// schedulerEngine is the engine surface the scheduler callbacks of both
+// builders call (*engine.Orchestrator). The wiring tests drive exactly
+// these callbacks over a fake (INIT-023 wave 4 review: a regression of the
+// step-recovery callback, or of the governance-aware retry wrapper, used
+// to pass every serve test).
+type schedulerEngine interface {
+	RecoverCompletedStep(ctx context.Context, executionID string) error
+	RetryStep(ctx context.Context, exec *domain.StepExecution) error
+	FailRun(ctx context.Context, runID, reason string) error
+	TerminateLiveSteps(ctx context.Context, runID, message string)
+	MergeRunBranch(ctx context.Context, runID string) error
+	AbandonExhaustedMerge(ctx context.Context, runID string, maxRetries int) (bool, error)
+}
+
+// engineSchedulerOptions are buildScheduler's engine callbacks.
+func engineSchedulerOptions(st store.Store, eng schedulerEngine) []scheduler.Option {
+	return []scheduler.Option{
+		scheduler.WithStepRecovery(stepRecoveryFor(st, eng)),
+		scheduler.WithRunFail(func(ctx context.Context, runID, reason string) error {
+			return eng.FailRun(ctx, runID, reason)
+		}),
+		// The run-timeout cancel writes the run row directly; this
+		// hook closes the run's live executions afterwards (INIT-023
+		// TASK-007). A no-op unless the step-entry policy sets
+		// TerminateStepsOnCancel.
+		scheduler.WithRunTerminated(eng.TerminateLiveSteps),
+		// The retry budget is enforced (INIT-023 TASK-012, P3-27): after
+		// defaultCommitMaxRetries automatic retries of a transiently
+		// failing merge the run is handed to AbandonExhaustedMerge,
+		// which routes it like a permanent merge failure. A merge held
+		// for an operator governance decision is not a failed retry
+		// (INIT-023 TASK-006): it records no outcome, so it never
+		// counts against the budget, and the wrapper keeps it out of
+		// the Error log.
+		scheduler.WithCommitRetry(commitRetryFor(eng), defaultCommitMaxRetries, 2*time.Minute),
+		scheduler.WithCommitExhausted(eng.AbandonExhaustedMerge),
+	}
+}
+
+// stepExecutionGetter is the store read stepRecoveryFor needs.
+type stepExecutionGetter interface {
+	GetStepExecution(ctx context.Context, executionID string) (*domain.StepExecution, error)
+}
+
+// stepRecoveryFor is the startup step-recovery callback of both builders.
+// A completed execution is re-routed through RecoverCompletedStep, the
+// only engine path that re-routes one (INIT-023 TASK-008): it re-checks
+// the run is active, at this step and without a successor. SubmitStepResult
+// refuses an execution that is already terminal, so the run would stay on
+// its completed step. Anything else is retried.
+func stepRecoveryFor(st stepExecutionGetter, eng schedulerEngine) func(ctx context.Context, execID string) error {
+	return func(ctx context.Context, execID string) error {
+		exec, err := st.GetStepExecution(ctx, execID)
+		if err != nil {
+			return err
+		}
+		if exec.Status == domain.StepStatusCompleted {
+			return eng.RecoverCompletedStep(ctx, execID)
+		}
+		return eng.RetryStep(ctx, exec)
+	}
+}
+
+// commitRetryFor is the commit-retry callback of both builders: the
+// governed merge behind the governance-aware wrapper (a hold is not a
+// failed retry and logs no Error line; INIT-023 TASK-006 AC 35).
+func commitRetryFor(eng schedulerEngine) func(ctx context.Context, runID string) error {
+	return governanceAwareCommitRetry(eng.MergeRunBranch)
 }
 
 // buildGitHTTPHandler assembles the git HTTP handler. Returns nil when
@@ -702,4 +778,14 @@ func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *
 		return nil, err
 	}
 	return pgStore, nil
+}
+
+// buildPrimaryGitClient builds the single-workspace primary client of
+// `spine serve`. It is standalone's shared working tree (INIT-023
+// TASK-012): its home branch is the governed-merge target,
+// engine.AuthoritativeBranch ("main"), which every sequence on the tree
+// restores and every "HEAD" read means (workspace.PrimaryClientOptions;
+// gitOpts is not modified, it still feeds code-repository clients).
+func buildPrimaryGitClient(repoPath string, gitOpts []git.CLIOption) *git.CLIClient {
+	return git.NewCLIClient(repoPath, workspace.PrimaryClientOptions(gitOpts)...)
 }

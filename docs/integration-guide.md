@@ -817,6 +817,7 @@ spec:
 | `SMP_WORKSPACE_ID` | No | - | Management platform workspace ID (dedicated mode) |
 | `SPINE_ORPHAN_THRESHOLD` | No | - | Duration before recovering orphaned steps |
 | `SPINE_STEP_ENTRY_POLICY` | No | `strict` | Engine step-entry policy (INIT-023 TASK-007). `strict` (or unset): assign/claim enforce run status, actor eligibility, execution mode, preconditions, `required_skills` on assign and separation of duties; cancelled/failed runs close their live steps; the gateway's engine-less assign fallback is disabled. `legacy`: pre-INIT-023 behaviour, logged as a `WARN` at startup (migration escape hatch, to be removed). Any other value refuses to start. See [Security Model](/architecture/security-model.md) §4.4.1. |
+| `SPINE_GOVERNANCE_GUARD` | No | on | Governance-path guards (ADR-016; INIT-023 TASK-006). On (unset, `on`, `true`, `1`, `yes`): a governed merge that changes `.spine/`, `.spine.yaml`, `workflows/` or `<artifacts_dir>/workflows/` waits in `committing`, with no timeout, until an operator approves or rejects its bound commit (`POST /runs/{run_id}/governance-decision`; `GET /runs/{run_id}/governance` shows the state), and the projection installs a branch-protection relaxation only with an operator record (an approved merge or an honoured override push). `off`, `false`, `0` or `no` (any case) turn both guards off, logged as a `WARN` at startup. Any other value keeps them on, with a `WARN` naming the value. See [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) and §12. |
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |
 | `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | `5` | Per-actor cap on concurrent SSE stream connections, counted per (workspace, actor) in shared mode (≤0 disables the cap) |
 | `SPINE_EVENT_DELIVERY` | No | `false` | Feature flag — set to `true` to enable webhook / SSE / pull-log delivery. Without it, only projection polling works. |
@@ -865,3 +866,199 @@ embedder opts in.
    `engine.ReasonRunBranchMovedSinceGate`, …) to your own error codes.
 5. **Read the binding for display** from `runs.commit_meta` (`engine.CommitMetaBoundSHA`,
    `engine.CommitMetaBoundBy`). Only the engine writes these keys; workflow outcomes cannot.
+
+---
+
+## 10. Embedding: Submitter Identity, Compare-and-Swap State Writes and Step-Output Evidence
+
+INIT-023 TASK-008 (audit P3-17, P3-19, P3-24). Run-status writes are compare-and-swap for every
+embedder (through `TransitionRunStatus`, which every `engine.RunStore` has); the rest is opt-in:
+
+1. **Send the submitter.** Set `engine.SubmitRequest.ActorID` to the authenticated actor on every
+   submit you can attribute. `IngestResult` then refuses (`domain.ErrForbidden`) a submission for an
+   execution bound to another actor, before any other check. A server-internal system submit with
+   no requester (for example a stuck-step recovery) leaves it empty; an empty value keeps your own
+   ownership check as the only one. A queue-consumer style caller of `SubmitStepResult` sets
+   `engine.StepResult.ActorID` to the actor the assignment was delivered to.
+2. **Opt into the step compare-and-swap** by implementing the optional
+   `engine.StepExecutionTransitioner` on your `RunStore`:
+   `TransitionStepExecution(ctx, exec, fromStatus, fromActorID) (applied bool, err error)` writes
+   exactly `UpdateStepExecution`'s columns only while the row still holds `fromStatus` and
+   `fromActorID` (NULL and "" both meaning "no actor"); `(false, nil)` when the row moved; a domain
+   `ErrNotFound` when it does not exist. A PostgreSQL-backed store can delegate to
+   `(*store.PostgresStore).TransitionStepExecution`. Assert it at compile time
+   (`var _ engine.StepExecutionTransitioner = (*YourStore)(nil)`): the engine finds it by type
+   assertion, so a store that loses the method silently falls back to blind writes. Keep any
+   in-process locks you have; the compare-and-swap is what protects a second replica.
+3. **Handle the new answers.** A lost race is `domain.ErrConflict` wrapping
+   `engine.ErrStepStateChanged` (step) or `engine.ErrRunStateChanged` (run, after three
+   re-evaluations); test them with `errors.Is`. `IngestResult` already maps a lost submit race to
+   the persisted state with a nil error, like a sequential duplicate, and `AcknowledgeStep` answers
+   an acknowledgment lost to the same actor's own (a concurrent retry, or its submit
+   auto-acknowledging) with the idempotent `in_progress` result. `SubmitStepResult` no longer
+   routes an execution that is terminal when read: re-route a completed execution whose run did
+   not advance with `Orchestrator.RecoverCompletedStep` (implement the optional
+   `engine.RunCursorTransitioner` and `engine.BranchCursorTransitioner` too —
+   `(*store.PostgresStore).TransitionCurrentStep` / `TransitionBranchCursor` — so its resume of a
+   routing successor never rewinds a run or branch cursor a live submit moved on). On the
+   assignment store, implement the optional `engine.AssignmentRowDeleter` (delegate to
+   `(*store.PostgresStore).DeleteAssignment`) together with the step compare-and-swap. A claim
+   whose step write lost then removes the row it created; without the port the row stays
+   cancelled, and separation of duties and the prior-holder re-offer read it as a binding
+   (KNOWN-LIMITATIONS "Engine State Writes …" 11).
+4. **Show the evidence.** `step_completed` carries `branch_change` and
+   `required_outputs_unchanged` (architecture/event-schemas.md §4.2), and
+   `Orchestrator.StepOutputEvidence(ctx, runID)` returns the persisted per-execution evidence for
+   run detail (`engine.StepOutputEvidence`). Both need merge binding (§9): without it every entry
+   is `unknown`/`head_sha_unrecorded` and nothing is persisted.
+
+---
+
+## 11. Embedding: The Declared Artifact-Status Lifecycle
+
+INIT-023 TASK-017 (audit P3-21). The governed merge can judge every artifact-status change a run
+branch carries against a declared lifecycle (`architecture/engine-state-machine.md` §5A). It is
+off for embedders until they opt in; `spine serve` turns it on. Three independent options:
+
+1. **The merge:** `orch.WithStatusLifecycle(domain.DefaultStatusLifecycle())`. It needs merge
+   binding (§9) — with binding off every merge is refused with `ErrUnavailable` — and, when the
+   artifact service is configured with an `artifacts_dir`, `orch.WithArtifactsDir(dir)` with the
+   same value (TaskPaths are artifact-relative; diffs are repository-relative). A refusal is a
+   failed primary merge outcome of class `precondition` whose detail starts
+   `status_lifecycle_violation:`, and the last completed step's `error_detail.classification` is
+   `status_lifecycle_violation`. A retryable failure judging the bound commit returns an error
+   and records a failed primary outcome with a transient class, so a retry budget
+   (`AbandonExhaustedMerge`, §12 and TASK-012) counts it.
+2. **Workflow writes:** `workflowSvc.WithStatusLifecycle(domain.DefaultStatusLifecycle())`. Create
+   and Update then refuse a body whose `commit.status` is not a declared status of its
+   `applies_to` types, and `ValidateBody` reports it (`rule_id: commit_status`). An embedder with
+   its own validate preview appends `workflow.ValidateCommitStatuses(wf, lifecycle)` so the preview
+   matches create.
+3. **Blocking status conflicts:**
+   `validation.NewEngine(st, validation.WithBlockingStatusConflicts(validation.DefaultBlockingStatusConflicts...))`.
+   `*validation.Engine` implements the optional `engine.StatusChangeValidator`, so an orchestrator
+   whose validator is that engine (or embeds it) also checks an owned status transition against
+   the blocking rules at the merge.
+
+4. **Merges whose checks never ran** (INIT-023 wave 4 review). With the merge option on (or the
+   governance guard, §12), a merge attempt that can move the local `main` records
+   `engine.CommitMetaMergeUnverified` (`"<base sha> <source sha>"`) on the run before
+   `MergeBound`, and clears it in the same write that records the accepted merge, before any push.
+   A `MergeBound` error after `main` moved is taken back at once; if `main` cannot be read after
+   the error, or moved to something other than this attempt's merge, the attempt is a transient
+   failure whatever the error's class, so the run stays committing. A run that still carries the
+   record (the process died in the merge block, or a take-back failed) has that merge taken back
+   at the start of its next attempt, which then merges and checks again; one that can no longer be
+   taken back (something was committed on top of it) refuses the attempt as `ErrUnavailable`
+   until an operator resets the local `main` so it no longer contains it (cancel is not allowed
+   from `committing`), and `AbandonExhaustedMerge` never abandons such a run. The `RunStore` writes one more
+   `commit_meta` row per merge attempt (`MergeCommitMeta` when it has it).
+
+Before turning the merge option on, check that every workflow's merge-time transition is in the
+table (`core/workflow/commit_status_compat_test.go` is Spine's gate; SMP's `task-default` relies on
+Task `Pending → In Progress`). A planning run's additions are stamped with the outcome's status; a
+standard run's additions keep their authored status, which must be an initial status of their
+type.
+
+---
+
+## 12. Embedding: the Governance-Path Guard
+
+INIT-023 TASK-006 ([ADR-016](/architecture/adr/ADR-016-governance-path-guard.md)) holds a governed
+merge that changes governance paths until an operator approves the bound commit, and keeps the
+projection from installing an unprovenanced branch-protection removal. `spine serve` enables both;
+an embedder opts in. The library's zero value is the v1 behaviour.
+
+1. **Prerequisites.** Merge binding on (§9), and a `GitOperator` that implements the optional
+   `engine.MergeBaseLister` — `MergeBases(ctx, a, b)` returns every merge base (`git merge-base
+   --all`), full lowercase ids, and an **empty list with a nil error** for unrelated histories
+   (`git merge-base` exits 1 with no output): the guard refuses such a merge permanently, while
+   any error is treated as possibly transient and retried. A remote-backed operator fetches like
+   its `MergeBase` does. Its `Diff` must accept two local
+   object ids (the post-merge check diffs the unpushed merge commit against its base).
+2. **Enable the merge guard** after `EnableMergeBinding`:
+   ```go
+   err := orch.WithGovernanceGuard(engine.GovernanceGuard{
+       Enabled:      true,
+       WorkflowDirs: projectionSvc.WorkflowDirs(), // or projection.WorkflowDirs(artifactsDir)
+       // Paths: nil → .spine/, .spine.yaml, workflows/
+       // ExemptWorkflowLifecycleTaskPath: ADR-008 lifecycle runs (spine serve: true)
+       // ExemptOwnRunEvidence: .spine/runs/<run id>/evidence/ (spine serve: true)
+   })
+   ```
+   It errors, and leaves the guard off, without binding or `MergeBaseLister`, or for an invalid
+   path entry.
+3. **Handle holds.** `MergeRunBranch` returns a `precondition_failed` `*domain.SpineError`
+   wrapping `engine.ErrGovernanceApprovalRequired` and leaves the run `committing`; the publish
+   step (or the last completed step) carries `error_detail.classification =
+   governance_approval_required`, and `governance.merge_held` is emitted. A retry loop should
+   treat the hold as waiting, not failed: a hold records no merge attempt, and
+   `AbandonExhaustedMerge` never abandons a held run, nor one whose refused merge could not be
+   taken back (that run carries `spine.governance.blocked_target`, and every governed merge is
+   refused as unavailable until the local `main` no longer contains the refused merge, whichever
+   check refused it). `orch.GovernanceMergeStatus(ctx, runID)` reports the
+   bound commit, the governed paths (capped) and any recorded approval.
+4. **Decide.** `orch.DecideGovernanceMerge(ctx, engine.GovernanceDecisionRequest{RunID, CommitSHA,
+   Decision: engine.GovernanceApprove|engine.GovernanceReject, Actor, Reason})`. Pass the
+   authenticated caller as `Actor` with its Spine role; the engine refuses below
+   `domain.RoleOperator` (`ErrForbidden`), a SHA other than the bound one (`ErrConflict`), a run
+   that is not committing (`ErrConflict`) and a merge with no governance change
+   (`ErrPrecondition`). Approve records the approval only while the run is still committing
+   (otherwise `ErrConflict`, nothing recorded) and merges at once (a merge failure is in
+   `MergeError`; approving the same commit again retries — also after the merge landed locally
+   and only its push failed, when nothing is left to evaluate); reject needs a reason, revokes the
+   approval, takes `merge_failed` and revokes again, and is `ErrConflict` once the approved merge
+   completed or reached the local `main`. A merge that can never be evaluated (no merge base, a
+   diff over the git output limit) is `ErrPrecondition`: `MergeRunBranch` refuses it permanently.
+   With the status lifecycle on (§11) the decision evaluates the lifecycle's merge source, as the
+   gate does, and a merge the lifecycle now refuses is `ErrPrecondition` too.
+   Within one process the engine serialises decisions with merge attempts per run (an in-process
+   stripe that `MergeRunBranch` also takes while the guard is on); **if you run several replicas
+   against one database**, also serialise `DecideGovernanceMerge` with `MergeRunBranch` per run
+   across them (for example a database advisory lock on the run id) — KNOWN-LIMITATIONS
+   "Governance-Path Guard" 9. Run decisions inside whatever serialises your other
+   merge-cascading calls.
+5. **Atomic writes (recommended).** If your `RunStore` can implement
+   `MergeCommitMeta(ctx, runID string, patch map[string]string) error` (`commit_meta || patch`)
+   and `MergeCommitMetaIfStatus(ctx, runID string, status domain.RunStatus, patch
+   map[string]string) (applied bool, err error)` (the same, `WHERE status = $status`; false for a
+   wrong status or an unknown run), the engine uses them — the second for the approval, so it can
+   never land after a reject routed the run away; otherwise it falls back to read-modify-write
+   plus a re-read (KNOWN-LIMITATIONS "Governance-Path Guard" 9). `*store.PostgresStore`
+   implements both.
+6. **Enable the projection guard:**
+   ```go
+   projectionSvc.WithProtectionRemovalGuard(projection.ProtectionRemovalGuard{
+       Enabled:    true,
+       Provenance: pgStore, // *store.PostgresStore: ListGovernanceAuthorizations
+       // Events: nil → the service's router; AuthoritativeBranch: "" → WithAuthoritativeBranch or "main"
+   })
+   ```
+   Provenance is a database record of an operator act that changed the config: an honoured
+   `branch_protection.override` git push in `runtime.event_log` (whole-`domain.Event` JSON with
+   `payload.pre_receive_ref.old_sha`), or an approved merge's consumption marker in
+   `runs.commit_meta` — the approved merge must also account for every kind being removed: its
+   own diff removed it (its base config applied it), or its base config is byte for byte the
+   result of an earlier valid record its base descends from, judged the same way (a chain of
+   custody through the records the reader returns, so keep `Lookback` above the number of
+   operator acts one sync window can see). The provenance reader needs `SELECT` on `runtime.event_log` and
+   `runtime.runs`; a read error holds the sync (retried), a missing reader refuses every removal.
+   It also lists runs still `committing` with an approval (pending, never authorisations): an
+   unmatched removal while such a run's approved commit is on the head without a reachable
+   consumption marker holds the sync for a retry instead of being refused.
+   Your engine's own pushes of `main` must never emit `branch_protection.override` — every merge
+   would become provenance and the guard would be void.
+7. **Reserved keys** `domain.CommitMetaGovernanceApproval*`, `engine.CommitMetaGovernanceBlockedTarget`,
+   `engine.CommitMetaGovernanceStartedBy` (the lifecycle run's starter, written only with the
+   lifecycle exemption on) and `engine.CommitMetaMergeUnverified` (§11, item 4) are written only by
+   the engine; read them for display.
+8. **A refused merge that could not be taken back** (INIT-023 wave 4 review) is reported, not
+   hidden: `GovernanceMergeStatus` sets `Blocked` and `BlockedMergeSHA` (and never `Held`) while
+   the run's `spine.governance.blocked_target` merge is still in the local `main`'s history; a
+   reject is `ErrConflict` meanwhile (the run stays committing and its next attempt takes the
+   merge back first), and an approve whose merge ended blocked reports it in `MergeError`. A
+   decision counts as a merge attempt in flight for the retry budget: while
+   `AbandonExhaustedMerge` is abandoning the run it is `ErrUnavailable` with nothing recorded
+   (try again). `AbandonExhaustedMerge` returns an error, and changes nothing, when a read it
+   needs to decide fails (the hold, a recorded block against the local `main`, the route), so a
+   scheduler skips the run for that tick.

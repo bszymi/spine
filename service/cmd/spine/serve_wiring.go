@@ -52,6 +52,28 @@ func (a *runAdapter) StartRun(ctx context.Context, taskPath string) (*gateway.Ru
 	}, nil
 }
 
+// The standalone store must keep the engine's optional compare-and-swap
+// port (INIT-023 TASK-008): adapters/store cannot import core/engine, so
+// the assertion lives where the two meet, and the build fails if the store
+// ever stops satisfying it — every engine step write would silently fall
+// back to the blind UpdateStepExecution.
+var _ engine.StepExecutionTransitioner = (*store.PostgresStore)(nil)
+
+// The same for the conditional cursor move crash recovery uses to resume a
+// routing successor (INIT-023 TASK-008, codex review round 2).
+var _ engine.RunCursorTransitioner = (*store.PostgresStore)(nil)
+
+// And for the conditional branch-cursor move of a divergence-branch
+// recovery (INIT-023 TASK-008 review round 1, codex).
+var _ engine.BranchCursorTransitioner = (*store.PostgresStore)(nil)
+
+// And for the removal of a lost claim's assignment row (INIT-023 TASK-008
+// review round 2, codex). Without the port the row would be left
+// cancelled: the separation-of-duties ledger would then count the lost
+// claimant as a run author, and the prior-holder re-offer would read the
+// row as a release.
+var _ engine.AssignmentRowDeleter = (*store.PostgresStore)(nil)
+
 // resultAdapter adapts engine.Orchestrator to gateway.ResultHandler.
 type resultAdapter struct {
 	orch *engine.Orchestrator
@@ -63,6 +85,10 @@ func (a *resultAdapter) IngestResult(ctx context.Context, req gateway.ResultSubm
 		OutcomeID:         req.OutcomeID,
 		ArtifactsProduced: req.ArtifactsProduced,
 		ExpectedHeadSHA:   req.ExpectedHeadSHA,
+		// The authenticated submitter: the engine refuses a foreign one
+		// even where the gateway's own pre-check was skipped (INIT-023
+		// TASK-008, audit P3-17).
+		ActorID: req.ActorID,
 	})
 	if err != nil {
 		return nil, err
@@ -329,6 +355,9 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 			return nil, fmt.Errorf("projection authoritative branch: %w", err)
 		}
 		_ = projSync.ProbeAuthoritativeRef(ctx)
+		// Protection-removal guard (INIT-023 TASK-006), on unless
+		// SPINE_GOVERNANCE_GUARD=off.
+		enableProtectionRemovalGuard(projSync, deps.Store)
 	}
 
 	// In platform-binding mode the global projSync above is moot: every
@@ -380,7 +409,12 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 			// (EPIC-006). The Noop resolver makes the seam visible
 			// without changing today's LC-004 behavior — every
 			// non-projection link target is still dangling.
-			validation.WithGovernedFileResolver(validation.NoopGovernedFileResolver()))
+			validation.WithGovernedFileResolver(validation.NoopGovernedFileResolver()),
+			// A Completed epic with open tasks (SC-002) or initiative
+			// with open epics (SC-003) is an error, not a warning
+			// (INIT-023 TASK-017 owner question 4); the governed merge
+			// checks an owned status change against it.
+			validation.WithBlockingStatusConflicts(validation.DefaultBlockingStatusConflicts...))
 	}
 
 	wfResolver, wfProvider := buildWorkflowResolver(deps.Store, primaryClient)
@@ -390,7 +424,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	// same instance pool.PrimaryClient() returns — passing it here
 	// keeps semantics identical to a routed call without expanding
 	// the abstract interface.
-	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, deps.StepEntryPolicy, log)
+	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, deps.StepEntryPolicy, workflowDirsFor(deps.SpineCfg), log)
 	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
 	// Reuses the registry built above so the pool and the orchestrator
 	// resolve through the same authoritative source.

@@ -177,6 +177,93 @@ jobs:
             exit 1
           fi
 
+      # INIT-023 / EPIC-002 / TASK-008: the PostgreSQL store's conditional
+      # step-execution, run-status, run-cursor and branch-cursor writes (audit P3-24: a
+      # lost race writes nothing; one of two racers applies), the removal of a
+      # lost claim's assignment row (review round 2), and the two
+      # scenarios that carry P3-19/P3-24 end to end — step-output evidence
+      # recorded at submit and read back for run detail after the run's
+      # event-log rows are deleted, and a completed execution never routed
+      # twice. All green and must never skip.
+      - name: TASK-008 store compare-and-swap and step-output evidence (must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags integration -count=1 -run '^(TestTransitionStepExecution_|TestTransitionRunStatusAt$|TestTransitionCurrentStep$|TestTransitionBranchCursor$|TestDeleteAssignment$)' -v ./adapters/store/ 2>&1 | tee integration-step-cas.log
+          go test -tags scenario -count=1 -run '^(TestStepOutputEvidence_RecordedAndReadBack|TestCompletedStep_IsNotReRouted)$' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-step-evidence.log
+          if grep -hE '^[[:space:]]*--- SKIP: ' integration-step-cas.log scenario-step-evidence.log; then
+            echo "::error::a TASK-008 store or scenario test skipped — they must pass, never skip"
+            exit 1
+          fi
+          for t in TestTransitionStepExecution_AppliesOnMatch TestTransitionStepExecution_MissesOnMismatch TestTransitionStepExecution_MissingRow TestTransitionStepExecution_OneOfTwoRacersApplies TestTransitionRunStatusAt TestTransitionCurrentStep TestTransitionBranchCursor TestDeleteAssignment; do
+            if ! grep -qE "^--- PASS: ${t} " integration-step-cas.log; then
+              echo "::error::${t} did not pass"
+              exit 1
+            fi
+          done
+          for t in TestStepOutputEvidence_RecordedAndReadBack TestCompletedStep_IsNotReRouted; do
+            if ! grep -qE "^--- PASS: ${t} " scenario-step-evidence.log; then
+              echo "::error::${t} did not pass"
+              exit 1
+            fi
+          done
+
+      # INIT-023 / EPIC-002 / TASK-017: the declared artifact-status
+      # lifecycle end to end on the scenario runtime (the planning package
+      # cascade, a refused non-owned status edit, artifacts_dir) and the
+      # pooled validator's blocking status conflicts — the one standalone
+      # wiring line only a database-backed test catches — are the
+      # Postgres-backed evidence for audit P3-21. All are green and must
+      # never skip.
+      - name: Status-lifecycle scenarios and pooled validator (must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags scenario -count=1 -run 'StatusLifecycle' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-status-lifecycle.log
+          if grep -E '^[[:space:]]*--- SKIP: ' scenario-status-lifecycle.log; then
+            echo "::error::a status-lifecycle scenario or step skipped — they must pass, never skip"
+            exit 1
+          fi
+          for t in TestPlanningRun_StatusCascadesToChildren_StatusLifecycle TestStandardRun_StatusLifecycleRefusesNonOwnedStatusEdit TestStandardRun_StatusLifecycleArtifactsDir; do
+            if ! grep -qE "^--- PASS: ${t} " scenario-status-lifecycle.log; then
+              echo "::error::${t} did not pass"
+              exit 1
+            fi
+          done
+          go test -tags integration -count=1 -run '^TestBuildServiceSet_ValidatorBlocksStatusConflicts$' -v ./service/internal/workspace/ 2>&1 | tee integration-status-lifecycle.log
+          if grep -E '^[[:space:]]*--- SKIP: ' integration-status-lifecycle.log; then
+            echo "::error::the pooled validator's blocking-status-conflicts test skipped — it must pass, never skip"
+            exit 1
+          fi
+          if ! grep -qE '^--- PASS: TestBuildServiceSet_ValidatorBlocksStatusConflicts ' integration-status-lifecycle.log; then
+            echo "::error::TestBuildServiceSet_ValidatorBlocksStatusConflicts did not pass"
+            exit 1
+          fi
+
+      # INIT-023 / EPIC-002 / TASK-006: the governance-path guard end to end
+      # (a held merge, the contributor's 403, the operator's approval
+      # through the API, the projection installing the approved workflow)
+      # and its provenance SQL (the override events and consumed approvals
+      # the projection's protection-removal guard trusts, the atomic and
+      # conditional commit_meta writes). Postgres-backed; must never skip.
+      - name: Governance-path guard scenario and store (must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags scenario -count=1 -run '^TestGovernancePathGuard_' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-governance.log
+          go test -tags integration -count=1 -run '^TestGovernanceStore_Integration$' -v ./adapters/store/ 2>&1 | tee integration-governance-store.log
+          if grep -E '^[[:space:]]*--- SKIP: ' scenario-governance.log integration-governance-store.log; then
+            echo "::error::a governance-path guard test skipped — it must pass, never skip"
+            exit 1
+          fi
+          for t in TestGovernancePathGuard_HeldUntilOperatorApproves; do
+            if ! grep -qE "^--- PASS: ${t} " scenario-governance.log; then
+              echo "::error::${t} did not pass"
+              exit 1
+            fi
+          done
+          if ! grep -qE '^--- PASS: TestGovernanceStore_Integration ' integration-governance-store.log; then
+            echo "::error::TestGovernanceStore_Integration did not pass"
+            exit 1
+          fi
+
   # INIT-023 / EPIC-001 / TASK-002: the git client's ref grammar (exact
   # `show-ref --verify` lookups, `--end-of-options`, `git switch
   # --no-guess`, `<oid>^{commit}` push sources, `worktree add --detach`)

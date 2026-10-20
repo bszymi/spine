@@ -1049,8 +1049,12 @@ func (o *Orchestrator) TerminateLiveSteps(ctx context.Context, runID, message st
 // logged and the loop continues: the run is already terminal, and under
 // EnforceRunStatus every entry point refuses a dead run's executions anyway.
 //
-// It is not atomic against a concurrent bind (UpdateStepExecution is a blind
-// write until TASK-008's compare-and-swap); see TerminateStepsOnCancel.
+// Each write is conditional on the (status, actor) listed (INIT-023
+// TASK-008, through writeStepExecution): with a store that implements
+// StepExecutionTransitioner an execution that moved meanwhile — a submit
+// completed it, a bind took it — is skipped, never overwritten, and its
+// assignment rows are left to the writer that won. Without the capability
+// the write stays blind (see TerminateStepsOnCancel).
 func (o *Orchestrator) terminateLiveSteps(ctx context.Context, runID, message string) {
 	if !o.entryPolicy.TerminateStepsOnCancel {
 		return
@@ -1069,6 +1073,7 @@ func (o *Orchestrator) terminateLiveSteps(ctx context.Context, runID, message st
 		if e.Status.IsTerminal() {
 			continue
 		}
+		prior := stateOf(e)
 		res, err := workflow.EvaluateStepTransition(e.Status, workflow.StepTransitionRequest{
 			Trigger: workflow.StepTriggerRunTerminated,
 		})
@@ -1085,7 +1090,11 @@ func (o *Orchestrator) terminateLiveSteps(ctx context.Context, runID, message st
 			StepID:         e.StepID,
 			ActorID:        e.ActorID,
 		}
-		if err := o.store.UpdateStepExecution(ctx, e); err != nil {
+		if err := o.writeStepExecution(ctx, e, prior); err != nil {
+			if isStepStateChanged(err) {
+				log.Info("terminate live steps: execution moved concurrently; skipped", "run_id", runID, "execution_id", e.ExecutionID)
+				continue
+			}
 			log.Warn("terminate live steps: update step execution failed", "run_id", runID, "execution_id", e.ExecutionID, "error", err)
 			continue
 		}

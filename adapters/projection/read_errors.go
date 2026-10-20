@@ -17,6 +17,12 @@ const (
 	entryTree           = "tree"            // a directory
 	entryNone           = "none"            // the commit's tree has no entry at that exact path
 	entryContentRefused = "content_refused" // isContentReadError: the blob exists but its content is refused
+	// entryNonBlobObject: a file entry (a blob mode) whose recorded object
+	// is not a blob — a tag, a tree or a commit (git.NotBlobError with
+	// FileEntry; adversarial review of the wave 4 follow-up). The mode is
+	// all TreeEntryType sees, so only the git client's read, which types
+	// the object itself, can prove it.
+	entryNonBlobObject = "non_blob_object"
 )
 
 // classifyReadFailure decides whether a failed ReadFile of path at ref is
@@ -51,7 +57,15 @@ const (
 //     they never get here; this classifier serves changed-artifact reads
 //     and readFileEntry's fallback for a client without it.
 //   - isContentReadError (a blob whose content is refused by a size bound,
-//     registered by the bounded-read work) is deterministic too.
+//     registered by the bounded-read work) is deterministic too, and so
+//     is the git client's own not-a-file refusal (git.ErrNotBlob, wave 4
+//     follow-up), which is described as the entry it names (notBlobEntry).
+//     That refusal is consulted BEFORE the tree: a file entry recording a
+//     tree or a commit (or a tag) is a "blob" to TreeEntryType, which reads
+//     only the mode, and taking that answer would make the failed read
+//     infrastructure — a wedge any push could plant (adversarial review of
+//     the follow-up: `cat-file blob` failed such an entry with a plain
+//     "bad file"; ReadFile now types the object and refuses it).
 //   - Anything that cannot be proved — a cancelled context, a git client
 //     without the TreeEntryTyper capability, a failure to read the tree —
 //     is infrastructure. Holding the sync on an unproved failure is
@@ -65,6 +79,9 @@ func (s *Service) classifyReadFailure(ctx context.Context, ref, path string, rea
 	}
 	if ctx.Err() != nil {
 		return "", readErr
+	}
+	if entry, ok := notBlobEntry(readErr); ok {
+		return entry, nil
 	}
 	if isContentReadError(readErr) {
 		return entryContentRefused, nil
@@ -108,10 +125,37 @@ func nonFileEntry(typ string) (string, error) {
 	}
 }
 
+// notBlobEntry maps the git client's not-a-file refusal (a
+// *git.NotBlobError: ReadFile typed the entry, or the object a file entry
+// records, and refused it unread) to entryGitlink, entryTree or
+// entryNonBlobObject. ok is false for any other error, and for a refusal
+// of a type it does not document — that one is still isContentReadError,
+// so it stays deterministic as refused content.
+func notBlobEntry(err error) (string, bool) {
+	var nb *git.NotBlobError
+	if !errors.As(err, &nb) {
+		return "", false
+	}
+	if nb.FileEntry {
+		switch nb.Type {
+		case git.ObjectTag, git.TreeEntryTree, git.TreeEntryCommit:
+			return entryNonBlobObject, true
+		}
+		return "", false
+	}
+	switch nb.Type {
+	case git.TreeEntryCommit:
+		return entryGitlink, true
+	case git.TreeEntryTree:
+		return entryTree, true
+	}
+	return "", false
+}
+
 // unreadableEntry is readFileEntry's deterministic outcome: the commit
 // holds no content the projection may read at the path, ever.
 type unreadableEntry struct {
-	entry   string // entryGitlink, entryTree, entryNone or entryContentRefused
+	entry   string // entryGitlink, entryTree, entryNone, entryNonBlobObject or entryContentRefused
 	readErr error  // the failed read, when one was attempted (entryContentRefused)
 }
 
@@ -139,11 +183,20 @@ func (u *unreadableEntry) cause() error {
 // reviewed workflow could be replaced by a review-less one, or the
 // branch-protection rules relaxed, with nothing visible to review.
 //
+// The entry's mode is not proof either (adversarial review of the wave 4
+// follow-up): a file entry can record the id of a tag, a tree or a commit,
+// and `git cat-file blob` peeled such a tag to its target blob — again
+// content no diff shows (git diff shows the tag object's text). The git
+// client's ReadFile types the recorded object itself and refuses anything
+// but a blob (git.NotBlobError with FileEntry), which is an
+// unreadableEntry here (entryNonBlobObject) like a gitlink.
+//
 // It returns exactly one of: the content of a blob; an unreadableEntry
 // (a gitlink, a directory, no entry at that exact path — a quoted or
-// normalised path a listing produced — or content isContentReadError
-// refuses); or an infrastructure error (the tree could not be typed, an
-// unexpected type, or git failed to read a blob that is there).
+// normalised path a listing produced —, a file entry recording an object
+// that is not a blob, or content isContentReadError refuses); or an
+// infrastructure error (the tree could not be typed, an unexpected type,
+// or git failed to read a blob that is there).
 //
 // A git client without git.TreeEntryTyper keeps the historical read: a
 // successful read is trusted and a failure goes through
@@ -184,8 +237,13 @@ func (s *Service) readFileEntry(ctx context.Context, ref, path string) ([]byte, 
 	if err == nil {
 		return content, nil, nil
 	}
-	if ctx.Err() == nil && isContentReadError(err) {
-		return nil, &unreadableEntry{entry: entryContentRefused, readErr: err}, nil
+	if ctx.Err() == nil {
+		if entry, ok := notBlobEntry(err); ok {
+			return nil, &unreadableEntry{entry: entry}, nil
+		}
+		if isContentReadError(err) {
+			return nil, &unreadableEntry{entry: entryContentRefused, readErr: err}, nil
+		}
 	}
 	return nil, nil, err
 }

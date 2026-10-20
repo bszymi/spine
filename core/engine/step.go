@@ -24,6 +24,17 @@ type StepResult struct {
 	// (INIT-023 TASK-005). Optional; it is checked even with merge
 	// binding off.
 	ExpectedHeadSHA string
+	// ActorID is the authenticated submitter (INIT-023 TASK-008, audit
+	// P3-17). When non-empty, the submit is refused with ErrForbidden for
+	// an execution bound to a different actor — on a terminal execution
+	// too — and nothing is written. Empty means the caller enforces
+	// ownership itself (the behaviour before TASK-008).
+	ActorID string
+
+	// expect is IngestResult's snapshot handoff (§3a): the (status, actor)
+	// it validated the submission against. Unexported, so only
+	// IngestResult sets it and external keyed literals keep compiling.
+	expect *stepState
 }
 
 // ActivateStep evaluates preconditions for a step and, if they pass, requests
@@ -72,9 +83,14 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	if err != nil {
 		return err
 	}
+	// Every write below is conditional on the execution still holding the
+	// status and actor read here (INIT-023 TASK-008): an activation that
+	// lost a race to a concurrent one (or to a claim) writes nothing, binds
+	// nobody, delivers no assignment and runs no handler.
+	prior := stateOf(exec)
 
 	if passed, valResult := o.evaluatePreconditions(ctx, stepDef, run); !passed {
-		return o.preparePreconditionFailure(ctx, exec, valResult, runID, stepID)
+		return o.preparePreconditionFailure(ctx, exec, prior, valResult, runID, stepID)
 	}
 
 	// Internal steps are advanced by the Spine engine itself via a
@@ -82,7 +98,7 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	// no actor selection, no assignment record. Route them here before
 	// the actor-dispatch code below takes over.
 	if stepDef.Type == domain.StepTypeInternal {
-		return o.activateInternalStep(ctx, exec, stepDef, run)
+		return o.activateInternalStep(ctx, exec, prior, stepDef, run)
 	}
 
 	exec.ErrorDetail = nil
@@ -121,7 +137,7 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		// Stay in waiting. Pull-based actors discover via
 		// ListStepExecutions and call /claim; operators bind via
 		// /assign. Either path moves the step out of waiting.
-		if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+		if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 			return fmt.Errorf("update step execution: %w", err)
 		}
 		log.Info("step ready for assignment",
@@ -138,7 +154,10 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	}
 	exec.Status = stepResult.ToStatus
 
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	// A miss (a concurrent activation or claim bound the step first)
+	// returns here: no assignment record, no DeliverAssignment, no
+	// step_assigned.
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
 	}
 	// Bound: release the stripe before the assignment record, the runner
@@ -183,7 +202,7 @@ func executionModeForLog(stepDef *domain.StepDefinition) string {
 // step execution and returns the appropriate domain error. Callers return the
 // result directly; the step stays in waiting because waiting→blocked is not
 // a valid transition.
-func (o *Orchestrator) preparePreconditionFailure(ctx context.Context, exec *domain.StepExecution, valResult *domain.ValidationResult, runID, stepID string) error {
+func (o *Orchestrator) preparePreconditionFailure(ctx context.Context, exec *domain.StepExecution, prior stepState, valResult *domain.ValidationResult, runID, stepID string) error {
 	log := observe.Logger(ctx)
 	if valResult != nil && len(valResult.Errors) > 0 {
 		exec.ErrorDetail = &domain.ErrorDetail{
@@ -192,7 +211,7 @@ func (o *Orchestrator) preparePreconditionFailure(ctx context.Context, exec *dom
 			StepID:         stepID,
 			Violations:     valResult.Errors,
 		}
-		if updateErr := o.store.UpdateStepExecution(ctx, exec); updateErr != nil {
+		if updateErr := o.writeStepExecution(ctx, exec, prior); updateErr != nil {
 			log.Warn("failed to persist validation errors", "error", updateErr)
 		}
 	}
@@ -329,10 +348,46 @@ func (o *Orchestrator) trackStepTimeout(ctx context.Context, exec *domain.StepEx
 
 // SubmitStepResult processes an actor's result for a step, validates the outcome,
 // routes to the next step, and advances the run.
+//
+// It is "submit", never "re-route" (INIT-023 TASK-008 §3a). Right after
+// its read it checks, in order:
+//
+//  1. ownership: a non-empty result.ActorID must be the execution's actor
+//     (ErrForbidden, even on a terminal execution — the gateway's rule);
+//  2. the snapshot handoff: when IngestResult validated the submission
+//     against an earlier read (result.expect), the row must still hold
+//     that (status, actor); otherwise it moved in between — a rebind, a
+//     concurrent submit, the timeout scanner — and nothing is written
+//     (ErrConflict wrapping ErrStepStateChanged). This also closes the
+//     rebind window for callers that send no ActorID;
+//  3. an execution that is already terminal is never written, emitted or
+//     routed again (ErrConflict wrapping ErrStepStateChanged): the step
+//     state machine accepts step.submit on completed as a no-op, so a
+//     compare-and-swap could not see a second submit that re-read the row
+//     after the first one completed it. Crash recovery re-routes a
+//     completed execution through RecoverCompletedStep instead;
+//  4. an execution with no actor bound is a 409, as before.
+//
+// Every write is conditional on the (status, actor) read (writeStepExecution;
+// the terminal write expects the post-acknowledge state), so with a store
+// that implements StepExecutionTransitioner a submit that loses a race
+// stops before CompleteAssignment, the required-outputs Warn,
+// step_completed and routing.
 func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string, result StepResult) error {
 	exec, err := o.store.GetStepExecution(ctx, executionID)
 	if err != nil {
 		return fmt.Errorf("get step execution: %w", err)
+	}
+
+	if err := checkSubmitter(exec, result.ActorID); err != nil {
+		return err
+	}
+	if result.expect != nil && !acknowledgedOrSame(*result.expect, stateOf(exec)) {
+		return stepStateChanged(executionID, fmt.Sprintf(
+			"it moved from %s to %s since the submission was validated", result.expect.status, exec.Status))
+	}
+	if exec.Status.IsTerminal() {
+		return stepStateChanged(executionID, fmt.Sprintf("it is already %s", exec.Status))
 	}
 
 	// Defense-in-depth ownership check: a result can only complete a
@@ -341,7 +396,7 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	// queue consumer's executeAndSubmit) call this method directly. A
 	// pre-Option-B phantom row delivered to the runner before the fix
 	// must NOT be silently completed here (INIT-020/EPIC-001/TASK-004).
-	if exec.ActorID == "" && !exec.Status.IsTerminal() {
+	if exec.ActorID == "" {
 		return domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("cannot submit result: step %s has no actor bound; call /assign or /claim before submitting",
 				executionID))
@@ -352,8 +407,8 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		return fmt.Errorf("get run: %w", err)
 	}
 	// EnforceRunStatus (INIT-023 TASK-007): the engine funnel for every
-	// submit — IngestResult, the queue consumer and the scheduler's step
-	// recovery callback — never advances a run that is not active.
+	// submit — IngestResult and the queue consumer — never advances a run
+	// that is not active.
 	if err := o.requireActiveRun(run, "submitted"); err != nil {
 		return err
 	}
@@ -384,11 +439,44 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		return err
 	}
 
-	// If step is assigned, auto-acknowledge to in_progress first.
-	if exec.Status == domain.StepStatusAssigned {
-		if err := o.autoAcknowledgeStep(ctx, exec, run); err != nil {
-			return err
+	// Step-output evidence (INIT-023 TASK-008, P3-19), derived from the
+	// capture and the run's previous binding as read above, before this
+	// submit's commit_meta write. At most one time-boxed diff; it never
+	// fails the submit. With a capture it is persisted in the binding's
+	// own commit_meta write below (hb.extra). The derivation has no other
+	// side effect: the flag's Warn is logged only once the terminal write
+	// below has applied (review round 1), so a submission that is refused
+	// or loses its race leaves no audit warning behind.
+	change := o.branchChangeAtSubmit(ctx, run, exec, hb)
+	unchanged := requiredOutputsUnchanged(stepDef, change)
+	if hb != nil {
+		key, val, err := evidenceMetaEntry(exec.ExecutionID, change, unchanged)
+		if err != nil {
+			return fmt.Errorf("encode step output evidence: %w", err)
 		}
+		hb.extra = map[string]string{key: val}
+	}
+
+	// If step is assigned, auto-acknowledge to in_progress first. The
+	// terminal write below must then expect the acknowledged state
+	// (in_progress, actor), not the (assigned, actor) read above.
+	prior := stateOf(exec)
+	if exec.Status == domain.StepStatusAssigned {
+		if err := o.autoAcknowledgeStep(ctx, exec, prior, run); err != nil {
+			// The same actor acknowledging concurrently (its runner's
+			// /acknowledge racing the submit) is not a conflict (codex
+			// review, round 3): continue from the acknowledged row. Any
+			// other move — a rebind, a release, a terminal write — stands.
+			if !isStepStateChanged(err) {
+				return err
+			}
+			cur, rerr := o.store.GetStepExecution(ctx, executionID)
+			if rerr != nil || !acknowledgedOrSame(prior, stateOf(cur)) || cur.Status != domain.StepStatusInProgress {
+				return err
+			}
+			exec = cur
+		}
+		prior = stateOf(exec)
 	}
 
 	stepTResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
@@ -401,18 +489,18 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 
 	// A captured binding is stored BEFORE the execution completes (INIT-023
 	// wave 3 integration, codex review). The scheduler's step recovery
-	// re-submits a completed execution without capturing again
-	// (captureHead skips terminal executions: the head may have moved
-	// since), so a binding written only after the completion — lost to a
-	// failed SetCommitMeta or a crash in between — left the run with the
-	// previous step's binding, or with none, and a gate then compares
-	// against nothing and accepts whatever the branch holds. Written here,
-	// a completed execution always has its binding; a failed write leaves
-	// the execution uncompleted (auto-acknowledged at most), so it can be
+	// re-routes a completed execution without capturing again (captureHead
+	// skips terminal executions: the head may have moved since), so a
+	// binding written only after the completion — lost to a failed
+	// SetCommitMeta or a crash in between — left the run with the previous
+	// step's binding, or with none, and a gate then compares against
+	// nothing and accepts whatever the branch holds. Written here, a
+	// completed execution always has its binding; a failed write leaves the
+	// execution uncompleted (auto-acknowledged at most), so it can be
 	// submitted again. It is the same single commit_meta write
-	// routeStepOutcome made (outcome commit map and binding together),
-	// only earlier; with no capture (binding off, among others) it stays
-	// where it was.
+	// routeStepOutcome made (outcome commit map and binding together, plus
+	// this execution's evidence key), only earlier; with no capture
+	// (binding off, among others) it stays where it was.
 	metaRecorded := false
 	if hb != nil {
 		if err := o.recordStepCommitMeta(ctx, stepDef, outcome, exec, run, wfDef, hb); err != nil {
@@ -425,14 +513,20 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	exec.Status = stepTResult.ToStatus
 	exec.OutcomeID = result.OutcomeID
 	exec.CompletedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
+		// A lost race (INIT-023 TASK-008) stops here: no CompleteAssignment,
+		// no step_completed, no routing. IngestResult answers it with the
+		// winner's persisted state.
 		return fmt.Errorf("update step execution: %w", err)
 	}
 
 	o.CompleteAssignment(ctx, executionID)
 
-	o.emitEvent(ctx, domain.EventStepCompleted, exec.RunID, run.TraceID,
-		fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], exec.StepID), nil)
+	if unchanged {
+		warnRequiredOutputsUnchanged(ctx, stepDef, exec, change)
+	}
+	o.emitStepCompleted(ctx, run, exec,
+		baseStepCompletedPayload(stepDef, outcome, exec, now).withEvidence(stepDef, result.ArtifactsProduced, change, unchanged))
 
 	if exec.StartedAt != nil {
 		observe.GlobalMetrics.StepDuration.ObserveDuration(time.Since(*exec.StartedAt))
@@ -441,10 +535,447 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, now, hb, metaRecorded)
 }
 
+// recoverBranchStep is RecoverCompletedStep for an execution on a
+// divergence branch (codex review, round 5), whose routing is
+// completeBranchStep: it moves the BRANCH cursor (UpdateBranch) and then
+// creates the branch's next execution. The run's cursor must be at this
+// branch's divergence and the branch still open (pending or in progress);
+// a later execution on the branch means it was routed. Then:
+//
+//   - an outcome that ends the branch, with the branch cursor still at this
+//     step and no later execution: completeBranchStep runs again (branch
+//     completed, convergence checked);
+//   - otherwise the next execution is claimed like recoverAdvance claims
+//     it — created first under a pinned attempt, so of two recoveries one
+//     wins the primary key — when the branch cursor is still at this step
+//     (nothing of the routing ran; step_completed is re-emitted with
+//     branch_change unknown/recovered) or already at the next step (the
+//     routing stopped before creating it); only the creator then moves the
+//     branch cursor and activates the step;
+//   - a successor this recovery created whose branch cursor it did not
+//     move (it stopped in between) is finished: cursor moved, activated.
+//
+// Every branch-cursor move is conditional (moveBranchCursorIfAt, review
+// round 1): only while the branch is open and still at this step, and
+// only the cursor is written, so a recovery never writes back a stale
+// branch snapshot over a branch that moved on or completed; a miss is a
+// conflict and nothing is activated.
+//
+// Anything else is ErrConflict and changes nothing. A branch that was
+// marked completed but whose convergence check never ran is not covered
+// (KNOWN-LIMITATIONS "Engine State Writes …").
+func (o *Orchestrator) recoverBranchStep(ctx context.Context, run *domain.Run, exec *domain.StepExecution) error {
+	branch, err := o.store.GetBranch(ctx, exec.BranchID)
+	if err != nil {
+		return fmt.Errorf("get branch: %w", err)
+	}
+	if branch.Status != domain.BranchStatusPending && branch.Status != domain.BranchStatusInProgress {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("branch %s is %s; step %s is not re-routed", branch.BranchID, branch.Status, exec.ExecutionID))
+	}
+	if run.CurrentStepID != "divergence:"+branch.DivergenceID {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s is at %q, not at divergence %s; step %s is not re-routed", run.RunID, run.CurrentStepID, branch.DivergenceID, exec.ExecutionID))
+	}
+	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
+	if err != nil {
+		return fmt.Errorf("list step executions: %w", err)
+	}
+	var later []*domain.StepExecution
+	for i := range execs {
+		e := &execs[i]
+		if e.ExecutionID != exec.ExecutionID && e.BranchID == exec.BranchID &&
+			(e.CreatedAt.After(exec.CreatedAt) || (e.StepID == exec.StepID && e.Attempt > exec.Attempt)) {
+			later = append(later, e)
+		}
+	}
+	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+	if err != nil {
+		return fmt.Errorf("load workflow: %w", err)
+	}
+	stepDef := findStepDef(wfDef, exec.StepID)
+	if stepDef == nil {
+		return domain.NewError(domain.ErrNotFound, fmt.Sprintf("step %q not found in workflow", exec.StepID))
+	}
+	outcome := findOutcome(stepDef, exec.OutcomeID)
+	if outcome == nil {
+		return domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("stored outcome %q not defined for step %s", exec.OutcomeID, exec.StepID))
+	}
+	routed := func(why string) error {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("branch %s: step %s is not re-routed (%s)", branch.BranchID, exec.ExecutionID, why))
+	}
+	log := observe.Logger(ctx)
+	next := outcome.NextStep
+	if next == "" || next == "end" {
+		// completeBranchStep marks the branch completed and checks
+		// convergence; nothing to re-run when the branch moved or a later
+		// execution exists.
+		if len(later) > 0 || branch.CurrentStepID != exec.StepID {
+			return routed("the branch moved on")
+		}
+		o.emitRecoveredBranchStep(ctx, run, exec, stepDef, outcome)
+		return o.completeBranchStep(ctx, run, exec, outcome, time.Now(), wfDef)
+	}
+
+	// The successor exists but the branch cursor was not moved: a
+	// recovery created it (the claim below) and stopped. Finish it. Two
+	// recoveries can both get here; the cursor move is conditional
+	// (review round 1, codex), so only one moves it and activates, and
+	// neither writes back its stale snapshot of the branch.
+	if len(later) == 1 && later[0].StepID == next && later[0].Status == domain.StepStatusWaiting &&
+		later[0].ExecutionID == fmt.Sprintf("%s-%s-%s-%d", run.RunID, exec.BranchID, next, later[0].Attempt) &&
+		branch.CurrentStepID == exec.StepID {
+		moved, err := o.moveBranchCursorIfAt(ctx, branch.BranchID, exec.StepID, next)
+		if err != nil {
+			return err
+		}
+		if !moved {
+			return routed("the branch moved on while it was being recovered")
+		}
+		log.Info("recovery: resumed a branch successor whose branch cursor had not moved",
+			"run_id", run.RunID, "branch_id", branch.BranchID, "successor", later[0].ExecutionID)
+		if err := o.ActivateStep(ctx, run.RunID, next); err != nil {
+			log.Warn("branch step activation failed", "step_id", next, "error", err)
+		}
+		return nil
+	}
+	if len(later) > 0 {
+		return routed("a later execution exists on the branch")
+	}
+	if branch.CurrentStepID != exec.StepID && branch.CurrentStepID != next {
+		return routed(fmt.Sprintf("the branch is at %q", branch.CurrentStepID))
+	}
+
+	// Claim the routing by creating the successor under a pinned attempt
+	// (see recoverAdvance), then move the branch cursor — only the
+	// recovery that created it writes the cursor.
+	attempt := 1
+	for i := range execs {
+		if execs[i].StepID == next && execs[i].Attempt >= attempt {
+			attempt = execs[i].Attempt + 1
+		}
+	}
+	nextRepoID := resolveStepRepoIDByStepID(wfDef, next)
+	nextExec := &domain.StepExecution{
+		ExecutionID:  fmt.Sprintf("%s-%s-%s-%d", run.RunID, exec.BranchID, next, attempt),
+		RunID:        run.RunID,
+		StepID:       next,
+		BranchID:     exec.BranchID,
+		RepositoryID: nextRepoID,
+		Status:       domain.StepStatusWaiting,
+		Attempt:      attempt,
+		CreatedAt:    time.Now(),
+	}
+	if branch.CurrentStepID == exec.StepID {
+		o.emitRecoveredBranchStep(ctx, run, exec, stepDef, outcome)
+	}
+	if err := o.claimSuccessor(ctx, nextExec, exec); err != nil {
+		return err
+	}
+	recordStepRoutingDecision(ctx, run.RunID, next, findStepDef(wfDef, next), nextRepoID)
+	if branch.CurrentStepID != next {
+		// Conditional, as on the main path (moveCursorIfAt): a branch that
+		// moved since the read is not rewound with this snapshot.
+		moved, err := o.moveBranchCursorIfAt(ctx, branch.BranchID, exec.StepID, next)
+		if err != nil {
+			return err
+		}
+		if !moved {
+			log.Warn("recovery: created the branch successor but the branch had moved; not activating it",
+				"run_id", run.RunID, "branch_id", branch.BranchID, "successor", nextExec.ExecutionID)
+			return routed("the branch moved on while it was being recovered")
+		}
+	}
+	log.Info("branch step progressed (recovery)",
+		"run_id", run.RunID, "branch_id", branch.BranchID, "completed_step", exec.StepID, "next_step", next)
+	if err := o.ActivateStep(ctx, run.RunID, next); err != nil {
+		log.Warn("branch step activation failed", "step_id", next, "error", err)
+	}
+	return nil
+}
+
+// emitRecoveredBranchStep re-emits a recovered branch execution's
+// step_completed (same per-execution id; the event log keeps the first).
+func (o *Orchestrator) emitRecoveredBranchStep(ctx context.Context, run *domain.Run, exec *domain.StepExecution, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition) {
+	o.CompleteAssignment(ctx, exec.ExecutionID)
+	completedAt := time.Now()
+	if exec.CompletedAt != nil {
+		completedAt = *exec.CompletedAt
+	}
+	recovered := BranchChange{RepositoryID: domain.PrimaryRepositoryID, Status: BranchChangeUnknown, Reason: EvidenceReasonRecovered}
+	o.emitStepCompleted(ctx, run, exec,
+		baseStepCompletedPayload(stepDef, outcome, exec, completedAt).withEvidence(stepDef, nil, recovered, false))
+}
+
+// resumeRoutedSuccessor is RecoverCompletedStep's tail when routing
+// already created the successor but did not move the run's cursor (see
+// there). Anything other than exactly that successor — more than one later
+// execution, another step, a divergence branch, a successor that is no
+// longer waiting, an id advanceToNextStep would not build, an outcome that
+// starts a divergence or ends the run — is refused: the execution was
+// routed, and nothing is changed.
+func (o *Orchestrator) resumeRoutedSuccessor(ctx context.Context, run *domain.Run, exec *domain.StepExecution, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition, later []*domain.StepExecution) error {
+	next := outcome.NextStep
+	succ := later[0]
+	routable := next != "" && next != "end" && (stepDef.Diverge == "" || o.divergence == nil)
+	if !routable || len(later) != 1 || succ.StepID != next || succ.BranchID != "" ||
+		succ.Status != domain.StepStatusWaiting ||
+		succ.ExecutionID != fmt.Sprintf("%s-%s-%d", run.RunID, next, succ.Attempt) {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s already has a later execution (%s); step %s was routed", run.RunID, succ.ExecutionID, exec.ExecutionID))
+	}
+	log := observe.Logger(ctx)
+	// The cursor moves only while the run is still active and at this
+	// step (codex review, round 2): a live submit finishing the same
+	// routing may already have moved it — and gone further — so a plain
+	// write could rewind it to a step that was routed.
+	moved, err := o.moveCursorIfAt(ctx, run.RunID, exec.StepID, next)
+	if err != nil {
+		return err
+	}
+	if !moved {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s moved on while step %s was being recovered; nothing to resume", run.RunID, exec.ExecutionID))
+	}
+	log.Info("recovery: routing stopped before the run's cursor moved; resumed the successor",
+		"run_id", run.RunID, "execution_id", exec.ExecutionID, "next_step", next, "successor", succ.ExecutionID)
+	// Activate only a successor that is still waiting; one a live submit
+	// activated (or finished) meanwhile is left to it.
+	if cur, err := o.store.GetStepExecution(ctx, succ.ExecutionID); err != nil || cur.Status != domain.StepStatusWaiting {
+		return nil
+	}
+	if err := o.ActivateStep(ctx, run.RunID, next); err != nil {
+		// As in advanceToNextStep: the cursor moved; an activation that
+		// fails (or loses its compare-and-swap to a live activation) is
+		// logged, not returned.
+		log.Warn("recovery: successor activation failed", "step_id", next, "error", err)
+	}
+	return nil
+}
+
+// acknowledgedOrSame reports whether cur is the state `was` described, or
+// that state acknowledged by the same actor (assigned → in_progress). An
+// acknowledgment is the one benign move between a submission's reads and
+// its write: the step's owner (or its runner) started it. Any other change
+// of status or actor means the execution moved under the submission.
+func acknowledgedOrSame(was, cur stepState) bool {
+	if cur == was {
+		return true
+	}
+	return was.status == domain.StepStatusAssigned && cur.status == domain.StepStatusInProgress &&
+		cur.actorID == was.actorID && was.actorID != ""
+}
+
+// checkSubmitter is the engine's own submit-ownership check (INIT-023
+// TASK-008, audit P3-17): a non-empty submitter must be the actor the
+// execution is bound to. An empty submitter means the caller enforces
+// ownership itself (every caller before TASK-008; SMP until SMP TASK-011);
+// an execution with no actor is left to the callers' own checks (409 when
+// live, the idempotent answer when terminal). The refusal does not name
+// the owner.
+func checkSubmitter(exec *domain.StepExecution, submitter string) error {
+	if submitter == "" || exec.ActorID == "" || exec.ActorID == submitter {
+		return nil
+	}
+	return domain.NewError(domain.ErrForbidden,
+		fmt.Sprintf("step execution %s is not assigned to the submitting actor", exec.ExecutionID))
+}
+
+// RecoverCompletedStep re-routes a step execution that completed but whose
+// run did not advance — the process stopped between the completion write
+// and routing (INIT-023 TASK-008 §3a). It is the only engine path that
+// routes an already-completed execution, and the crash-recovery callbacks
+// of `spine serve` use it instead of SubmitStepResult (which refuses
+// terminal executions).
+//
+// Preconditions, re-checked here rather than trusted from the scheduler:
+// the execution is completed; the run is active and its current step is
+// the execution's step; and no execution of the run was created after
+// this one — otherwise a submit has already routed it. Each refusal is
+// ErrConflict and changes nothing.
+//
+// One later execution is the exception (codex review, round 1): exactly
+// the successor this execution's routing creates — the outcome's next
+// step on the main path, `waiting`, under the deterministic id
+// advanceToNextStep builds. Then routing stopped between creating it and
+// moving the run's cursor (a crash; or a live submit that is about to do
+// the same two writes), and recovery finishes it instead of refusing:
+// the cursor moves to that step and the step is activated, exactly
+// advanceToNextStep's tail. Refusing left the run stranded — nothing else
+// activates the successor, and an internal publish step is never claimed
+// or assigned, so its merge never ran. A live submit racing it writes the
+// same cursor, and the second activation of the step is a lost
+// compare-and-swap (the store capability `spine serve` always has), so the
+// handler and the assignment delivery run once.
+//
+// It makes no step write and routes the STORED outcome. It emits
+// step_completed again under the execution's own event id with
+// branch_change unknown/recovered; an event log that already has the
+// original keeps it (ON CONFLICT DO NOTHING). Two recoveries of the same
+// execution at once may both pass the checks; the routing to a next step
+// is claimed by creating the successor first under an attempt pinned from
+// the checked listing (recoverAdvance), so exactly one creates it and the
+// other gets a conflict (codex review, round 6).
+func (o *Orchestrator) RecoverCompletedStep(ctx context.Context, executionID string) error {
+	exec, err := o.store.GetStepExecution(ctx, executionID)
+	if err != nil {
+		return fmt.Errorf("get step execution: %w", err)
+	}
+	if exec.Status != domain.StepStatusCompleted {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("step execution %s is %s, not completed; nothing to recover", executionID, exec.Status))
+	}
+	run, err := o.store.GetRun(ctx, exec.RunID)
+	if err != nil {
+		return fmt.Errorf("get run: %w", err)
+	}
+	if run.Status != domain.RunStatusActive {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s is %s, not active; step %s is not re-routed", run.RunID, run.Status, executionID))
+	}
+	if exec.BranchID != "" {
+		return o.recoverBranchStep(ctx, run, exec)
+	}
+	if run.CurrentStepID != exec.StepID {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s is at step %q, not %q; step %s is not re-routed", run.RunID, run.CurrentStepID, exec.StepID, executionID))
+	}
+	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
+	if err != nil {
+		return fmt.Errorf("list step executions: %w", err)
+	}
+	var later []*domain.StepExecution
+	for i := range execs {
+		e := &execs[i]
+		if e.ExecutionID == exec.ExecutionID {
+			continue
+		}
+		if e.CreatedAt.After(exec.CreatedAt) || (e.StepID == exec.StepID && e.Attempt > exec.Attempt) {
+			later = append(later, e)
+		}
+	}
+
+	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+	if err != nil {
+		return fmt.Errorf("load workflow: %w", err)
+	}
+	stepDef := findStepDef(wfDef, exec.StepID)
+	if stepDef == nil {
+		return domain.NewError(domain.ErrNotFound,
+			fmt.Sprintf("step %q not found in workflow", exec.StepID))
+	}
+	outcome := findOutcome(stepDef, exec.OutcomeID)
+	if outcome == nil {
+		return domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("stored outcome %q not defined for step %s", exec.OutcomeID, exec.StepID))
+	}
+	if len(later) > 0 {
+		return o.resumeRoutedSuccessor(ctx, run, exec, stepDef, outcome, later)
+	}
+
+	observe.Logger(ctx).Info("re-routing a completed step after recovery",
+		"run_id", run.RunID, "execution_id", executionID, "step_id", exec.StepID, "outcome_id", exec.OutcomeID)
+
+	o.CompleteAssignment(ctx, executionID)
+	completedAt := time.Now()
+	if exec.CompletedAt != nil {
+		completedAt = *exec.CompletedAt
+	}
+	recovered := BranchChange{RepositoryID: domain.PrimaryRepositoryID, Status: BranchChangeUnknown, Reason: EvidenceReasonRecovered}
+	o.emitStepCompleted(ctx, run, exec,
+		baseStepCompletedPayload(stepDef, outcome, exec, completedAt).withEvidence(stepDef, nil, recovered, false))
+
+	next := outcome.NextStep
+	if next == "" || next == "end" || (stepDef.Diverge != "" && o.divergence != nil) {
+		// Run completion and divergence start go through the normal
+		// routing: CompleteRun is a run compare-and-swap, so a second
+		// recovery gets its conflict.
+		return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, time.Now(), nil, false)
+	}
+	return o.recoverAdvance(ctx, run, exec, stepDef, outcome, wfDef, execs, next)
+}
+
+// recoverAdvance is RecoverCompletedStep's routing to a next step (codex
+// review, round 6). advanceToNextStep numbers the next attempt from the
+// executions it lists when it runs, so a second recovery that passed the
+// same checks a moment after the first one routed would create a second
+// attempt of the successor (review-2 beside review-1) and rewind the
+// cursor with its plain write. Recovery therefore claims the routing: the
+// attempt is pinned from the listing its checks used, the successor is
+// created FIRST under advanceToNextStep's deterministic id — so of two
+// recoveries exactly one creates it, the other fails on the primary key
+// and answers a conflict — and only then is the cursor moved, with the
+// conditional cursor move, and the successor activated. A crash between
+// the create and the cursor move is what resumeRoutedSuccessor finishes.
+func (o *Orchestrator) recoverAdvance(ctx context.Context, run *domain.Run, exec *domain.StepExecution, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition, wfDef *domain.WorkflowDefinition, listed []domain.StepExecution, next string) error {
+	log := observe.Logger(ctx)
+	if err := o.recordStepCommitMeta(ctx, stepDef, outcome, exec, run, wfDef, nil); err != nil {
+		return err
+	}
+	attempt := 1
+	for i := range listed {
+		if listed[i].StepID == next && listed[i].Attempt >= attempt {
+			attempt = listed[i].Attempt + 1
+		}
+	}
+	if attempt > domain.MaxReworkCycles {
+		log.Warn("rework cycle limit exceeded",
+			"run_id", run.RunID, "step_id", next, "attempt", attempt, "max", domain.MaxReworkCycles)
+		return o.FailRun(ctx, run.RunID,
+			fmt.Sprintf("rework cycle limit exceeded for step %s (attempt %d)", next, attempt))
+	}
+	nextRepoID := resolveStepRepoIDByStepID(wfDef, next)
+	nextExec := &domain.StepExecution{
+		ExecutionID:  fmt.Sprintf("%s-%s-%d", run.RunID, next, attempt),
+		RunID:        run.RunID,
+		StepID:       next,
+		RepositoryID: nextRepoID,
+		Status:       domain.StepStatusWaiting,
+		Attempt:      attempt,
+		CreatedAt:    time.Now(),
+	}
+	if err := o.claimSuccessor(ctx, nextExec, exec); err != nil {
+		return err
+	}
+	recordStepRoutingDecision(ctx, run.RunID, next, findStepDef(wfDef, next), nextRepoID)
+	moved, err := o.moveCursorIfAt(ctx, run.RunID, exec.StepID, next)
+	if err != nil {
+		return err
+	}
+	if !moved {
+		log.Warn("recovery: created the successor but the run's cursor had moved; not activating it",
+			"run_id", run.RunID, "execution_id", exec.ExecutionID, "successor", nextExec.ExecutionID)
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s moved on while step %s was being recovered", run.RunID, exec.ExecutionID))
+	}
+	log.Info("step progressed (recovery)", "run_id", run.RunID, "completed_step", exec.StepID, "next_step", next)
+	if err := o.ActivateStep(ctx, run.RunID, next); err != nil {
+		log.Warn("next step activation failed", "step_id", next, "error", err)
+	}
+	return nil
+}
+
+// claimSuccessor creates a recovery's successor execution. The create is
+// the claim: when it fails because the execution already exists, another
+// recovery (or the original routing) created it first, which is a
+// conflict with nothing changed; any other failure is returned.
+func (o *Orchestrator) claimSuccessor(ctx context.Context, next, from *domain.StepExecution) error {
+	if err := o.store.CreateStepExecution(ctx, next); err != nil {
+		if _, gerr := o.store.GetStepExecution(ctx, next.ExecutionID); gerr == nil {
+			return domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("step %s was routed concurrently (%s exists)", from.ExecutionID, next.ExecutionID))
+		}
+		return fmt.Errorf("create next step: %w", err)
+	}
+	return nil
+}
+
 // autoAcknowledgeStep transitions an assigned step to in_progress before the
 // submit transition. Extracted so SubmitStepResult's main body stays on the
 // happy path; an error here aborts submission.
-func (o *Orchestrator) autoAcknowledgeStep(ctx context.Context, exec *domain.StepExecution, run *domain.Run) error {
+func (o *Orchestrator) autoAcknowledgeStep(ctx context.Context, exec *domain.StepExecution, prior stepState, run *domain.Run) error {
 	ackResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger: workflow.StepTriggerAcknowledged,
 	})
@@ -454,7 +985,7 @@ func (o *Orchestrator) autoAcknowledgeStep(ctx context.Context, exec *domain.Ste
 	now := time.Now()
 	exec.Status = ackResult.ToStatus
 	exec.StartedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
 	}
 	o.emitEvent(ctx, domain.EventStepStarted, exec.RunID, run.TraceID,
@@ -727,7 +1258,7 @@ func (o *Orchestrator) tryConvergence(ctx context.Context, run *domain.Run, dive
 		h0, h0Err = o.binder.ResolveBranchHead(ctx, run.BranchName)
 	}
 
-	if err := o.convergence.EvaluateAndCommit(ctx, divCtx, *convDef); err != nil {
+	if err := o.convergence.EvaluateAndCommit(ctx, run, divCtx, *convDef); err != nil {
 		return fmt.Errorf("evaluate and commit convergence: %w", err)
 	}
 	if o.bindingOn && run.BranchName != "" {

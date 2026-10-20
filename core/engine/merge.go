@@ -46,13 +46,57 @@ const AuthoritativeBranch = authoritativeBranch
 // binding (failing closed without one), applies the status cascade AT
 // the bound commit, and every later phase merges exactly that commit.
 // With binding off it returns the zero value and nothing changes.
+//
+// With the status lifecycle or the governance-path guard on, an attempt
+// first settles a merge an earlier attempt of the run may have left on the
+// local main unverified (settleUnverifiedMerge, INIT-023 wave 4 review).
+//
+// With the governance-path guard on (WithGovernanceGuard, INIT-023
+// TASK-006) governanceGate runs next: a merge that changes governance
+// paths without an operator approval of the bound commit is held (the
+// error wraps ErrGovernanceApprovalRequired), and mergePrimaryBound
+// asserts after the merge that it changed nothing else. The whole attempt
+// then runs under the run's governance stripe, so an operator decision on
+// the run waits for it (governanceRunStripes).
 func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
+	// An exhaustion abandonment of this run in progress (AbandonExhaustedMerge,
+	// INIT-023 TASK-012) is routing it: this attempt stands down, nothing
+	// is recorded. Never the case for an embedder that does not wire the
+	// scheduler's exhaustion handler. Registered before the governance
+	// stripe below (INIT-023 wave 4 integration), so an attempt waiting
+	// for an operator decision on the run already counts as in flight and
+	// no abandonment routes the run while it waits.
+	end, ok := mergeAttemptGate.beginAttempt(runID)
+	if !ok {
+		observe.Logger(ctx).Info("merge retries of this run are being abandoned; this merge attempt stands down", "run_id", runID)
+		return nil
+	}
+	defer end()
+	ctx, unlock, err := o.lockGovernanceRunIfGuarded(ctx, runID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	run, done, err := o.preflightCheck(ctx, runID)
 	if err != nil || done {
 		return err
 	}
+	// A merge an earlier attempt left on the local main without its
+	// post-merge checks (the process died in the block, or a take-back
+	// failed) is taken back before anything reads main (INIT-023 wave 4
+	// review; merge_inflight.go). Only with V1 or the guard on.
+	if err := o.settleUnverifiedMerge(ctx, run); err != nil {
+		return err
+	}
 	src, done, err := o.resolveMergeSource(ctx, run)
 	if err != nil || done {
+		return err
+	}
+	// Governance-path guard (ADR-016; INIT-023 TASK-006): after the
+	// binding is validated and the merge source built, before any code
+	// repository or the primary merges. A held merge returns here with
+	// the run still committing.
+	if done, err := o.governanceGate(ctx, run, &src); err != nil || done {
 		return err
 	}
 	if retried, err := o.mergeCodeRepos(ctx, run); err != nil || retried {
@@ -77,7 +121,11 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 //
 // applyCommitStatus failures are logged and swallowed — exactly as in the
 // pre-extraction code — because the merge itself is the contract: a
-// failed status rewrite must not block the merge.
+// failed status rewrite must not block the merge. That holds only with the
+// status lifecycle off: with it on (INIT-023 TASK-017) binding is
+// required — the combination with binding off is refused here as a
+// configuration error — and the lifecycle judges the bound commit in
+// resolveMergeSource, failing closed.
 func (o *Orchestrator) preflightCheck(ctx context.Context, runID string) (*domain.Run, bool, error) {
 	log := observe.Logger(ctx)
 
@@ -113,13 +161,39 @@ func (o *Orchestrator) preflightCheck(ctx context.Context, runID string) (*domai
 		return nil, false, err
 	}
 
+	// The status lifecycle judges the bound commit (INIT-023 TASK-017
+	// DC-2): without binding the tip could move between the judgement and
+	// the merge, so the combination is a configuration error, refused
+	// before anything is written (like a nil policy). The run stays in
+	// committing; no outcome is recorded.
+	if o.lifecycle != nil && !o.bindingOn {
+		return nil, false, domain.NewError(domain.ErrUnavailable,
+			"engine: the status lifecycle requires merge binding (EnableMergeBinding); refusing to merge")
+	}
+
 	// Apply commit metadata (e.g., rewrite artifact status) on the branch
 	// before merging so the updated file lands on main. Under merge
 	// binding the cascade runs at the bound commit instead
 	// (resolveMergeSource → applyCommitStatusAt) and never touches the
 	// run branch.
+	//
+	// The cascade is one git-only block on the shared working tree
+	// (INIT-023 TASK-012, worktree.go): checkout run → write → commit →
+	// checkout main can no longer interleave with another run's merge, so
+	// its status commit never lands on main outside the governed merge.
+	// The block re-checks the run status first: a second entry for a run
+	// another entry already completed stands down here.
 	if newStatus := run.CommitMeta["status"]; newStatus != "" && !o.bindingOn {
-		if err := o.applyCommitStatus(ctx, run, newStatus); err != nil {
+		err := o.withTree(ctx, func(ctx context.Context) error {
+			if err := o.requireStillCommitting(ctx, run.RunID); err != nil {
+				return err
+			}
+			return o.applyCommitStatus(ctx, run, newStatus)
+		})
+		if done, ret := blockExit(err); done {
+			return nil, true, ret
+		}
+		if err != nil {
 			log.Warn("failed to apply commit status, proceeding with merge",
 				"run_id", runID, "error", err)
 		}
@@ -189,19 +263,46 @@ func (o *Orchestrator) mergePrimary(ctx context.Context, run *domain.Run, src *m
 		"Trace-ID": run.TraceID,
 	}
 
-	mergeResult, mergeErr := o.git.Merge(ctx, git.MergeOpts{
-		Source:   run.BranchName,
-		Target:   authoritativeBranch,
-		Strategy: "merge-commit",
-		Message:  fmt.Sprintf("Merge run %s: %s", run.RunID, run.TaskPath),
-		Trailers: trailers,
+	// The merge, its abort and the push are one git-only block on the
+	// shared working tree (INIT-023 TASK-012, worktree.go). It takes the
+	// tree fresh, so its entry restore puts a clean main under the merge;
+	// it re-checks the run status first; and it holds the tree across the
+	// push, so no other writer moves main between the merge and the push.
+	// Outcome recording, classification and routing run after it.
+	pushOn := autoPushEnabled()
+	var mergeResult git.MergeResult
+	var mergeErr, pushErr error
+	blockErr := o.withTree(ctx, func(ctx context.Context) error {
+		if err := o.requireStillCommitting(ctx, run.RunID); err != nil {
+			return err
+		}
+		mergeResult, mergeErr = o.git.Merge(ctx, git.MergeOpts{
+			Source:   run.BranchName,
+			Target:   authoritativeBranch,
+			Strategy: "merge-commit",
+			Message:  fmt.Sprintf("Merge run %s: %s", run.RunID, run.TaskPath),
+			Trailers: trailers,
+		})
+		if mergeErr != nil {
+			// Abort early, inside the block, so the tree is clean for
+			// whatever holds it next.
+			o.abortMerge(ctx)
+			return nil
+		}
+		if pushOn {
+			pushErr = o.git.Push(ctx, "origin", "main")
+		}
+		return nil
 	})
+	if done, ret := blockExit(blockErr); done {
+		return true, ret
+	}
+	if blockErr != nil {
+		mergeErr = blockMergeError(blockErr)
+	}
 
-	// On merge failure abort early — the only retry-relevant signal
-	// is mergeErr, and aborting in advance leaves the working copy
-	// clean for whatever path follows.
+	// On merge failure: the only retry-relevant signal is mergeErr.
 	if mergeErr != nil {
-		o.abortMerge(ctx)
 		// Record the failed outcome before any state transition so the
 		// audit row is in place. A persistence failure here is fatal:
 		// returning the error keeps the run in committing for retry,
@@ -242,15 +343,15 @@ func (o *Orchestrator) mergePrimary(ctx context.Context, run *domain.Run, src *m
 		"fast_forward", mergeResult.FastForward,
 	)
 
-	// Push the authoritative branch to origin after a successful merge.
-	// On failure record the primary outcome as failed before the run
-	// state transition: the local merge happened (mergeResult.SHA is
-	// known) but origin/main has not advanced, so dashboards must see
-	// the same "failed" status they would for a code repo whose push
-	// did not land. The local SHA is captured in failure_detail so the
-	// recovery path can confirm what was applied locally.
-	if autoPushEnabled() {
-		if pushErr := o.git.Push(ctx, "origin", "main"); pushErr != nil {
+	// The push of the authoritative branch ran in the block. On failure
+	// record the primary outcome as failed before the run state
+	// transition: the local merge happened (mergeResult.SHA is known) but
+	// origin/main has not advanced, so dashboards must see the same
+	// "failed" status they would for a code repo whose push did not land.
+	// The local SHA is captured in failure_detail so the recovery path can
+	// confirm what was applied locally.
+	if pushOn {
+		if pushErr != nil {
 			if recErr := o.recordPrimaryMergeOutcome(ctx, run, mergeResult.SHA, pushErr, "push"); recErr != nil {
 				return false, recErr
 			}
@@ -349,14 +450,23 @@ func (o *Orchestrator) handlePermanentMergeFailure(ctx context.Context, run *dom
 		return o.failRunOnMergeError(ctx, run, mergeErr)
 	}
 	stepExec, _ := o.findActiveMergeStep(ctx, run, wfDef)
-	if stepExec == nil {
+	return o.routePermanentMergeFailure(ctx, run, mergeErr, stepExec != nil)
+}
+
+// routePermanentMergeFailure is handlePermanentMergeFailure's route once
+// the caller has decided whether the run has a live publish step:
+// merge_failed through it, or a failed run.
+func (o *Orchestrator) routePermanentMergeFailure(ctx context.Context, run *domain.Run, mergeErr error, publish bool) error {
+	if !publish {
 		return o.failRunOnMergeError(ctx, run, mergeErr)
 	}
 	o.recordGitConflictOnStep(ctx, run, mergeErr)
 	return o.advancePublishStepIfAny(ctx, run, "merge_failed")
 }
 
-// abortMerge cleans up a failed merge so the repo is not left dirty.
+// abortMerge cleans up a failed merge so the repo is not left dirty. It
+// runs inside the merge block (INIT-023 TASK-012): the abort re-enters the
+// tree the merge holds.
 func (o *Orchestrator) abortMerge(ctx context.Context) {
 	// git merge --abort to clean up conflicted state.
 	// This is best-effort — if it fails, the repo may need manual cleanup.
@@ -476,12 +586,16 @@ func (o *Orchestrator) transitionToPartiallyMerged(ctx context.Context, run *dom
 
 // failRunOnMergeError transitions a run to failed due to a permanent merge error.
 // Persists git_conflict classification on the last completed step for visibility.
+//
+// The run write is a compare-and-swap from the status the merge read
+// (INIT-023 TASK-008): when another path already moved the run (a
+// concurrent merge attempt completed it, an operator acted), the miss is
+// logged and nil returned, exactly like completeAfterMerge — no run_failed,
+// no executions closed, and no merge-failure detail written onto a run
+// that another path finished (the git_conflict detail is recorded only
+// after the transition applied).
 func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run, mergeErr error) error {
 	log := observe.Logger(ctx)
-
-	// Persist git_conflict detail on the last completed step so actors
-	// can see why the run failed via the step execution record.
-	o.recordGitConflictOnStep(ctx, run, mergeErr)
 
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 		Trigger: workflow.TriggerGitCommitFailedPerm,
@@ -490,9 +604,19 @@ func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run,
 		return err
 	}
 
-	if err := o.store.UpdateRunStatus(ctx, run.RunID, result.ToStatus); err != nil {
+	applied, err := o.store.TransitionRunStatus(ctx, run.RunID, run.Status, result.ToStatus)
+	if err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
+	if !applied {
+		log.Info("run already transitioned, skipping permanent merge failure",
+			"run_id", run.RunID, "error", mergeErr)
+		return nil
+	}
+
+	// Persist git_conflict detail on the last completed step so actors
+	// can see why the run failed via the step execution record.
+	o.recordGitConflictOnStep(ctx, run, mergeErr)
 	// TerminateStepsOnCancel (INIT-023 TASK-007): the publish step (and any
 	// other live execution) closes with the run.
 	o.terminateLiveSteps(ctx, run.RunID, "run failed: merge failed permanently")
@@ -526,20 +650,30 @@ func (o *Orchestrator) recordGitConflictOnStep(ctx context.Context, run *domain.
 		return
 	}
 
-	// Classify based on error type: merge conflicts get git_conflict,
-	// other permanent merge errors get permanent_error.
+	// Classify based on error type: spent retry budgets get
+	// merge_retries_exhausted (INIT-023 TASK-012, P3-27), a status-lifecycle
+	// refusal gets status_lifecycle_violation (INIT-023 TASK-017), merge
+	// conflicts get git_conflict, other permanent merge errors get
+	// permanent_error.
 	classification := domain.FailurePermanent
 	var gitErr *git.GitError
-	if errors.As(mergeErr, &gitErr) && strings.Contains(gitErr.Message, "conflict") {
+	var lifecycleErr *StatusLifecycleError
+	switch {
+	case isRetriesExhausted(mergeErr):
+		classification = domain.FailureMergeRetriesExhausted
+	case errors.As(mergeErr, &lifecycleErr):
+		classification = domain.FailureStatusLifecycle
+	case errors.As(mergeErr, &gitErr) && strings.Contains(gitErr.Message, "conflict"):
 		classification = domain.FailureGitConflict
 	}
 
+	prior := stateOf(lastCompleted)
 	lastCompleted.ErrorDetail = &domain.ErrorDetail{
 		Classification: classification,
 		Message:        fmt.Sprintf("merge failed: %s", mergeErr.Error()),
 		StepID:         lastCompleted.StepID,
 	}
-	if updateErr := o.store.UpdateStepExecution(ctx, lastCompleted); updateErr != nil {
+	if updateErr := o.writeStepExecution(ctx, lastCompleted, prior); updateErr != nil {
 		observe.Logger(ctx).Warn("failed to record git conflict on step", "error", updateErr)
 	}
 }
@@ -635,6 +769,10 @@ var statusFieldRegexp = regexp.MustCompile(`(?m)^status:\s*.*$`)
 // Enumeration is best-effort: if Diff fails, the cascade degrades to the
 // original single-artifact behaviour on run.TaskPath so the primary contract
 // is preserved.
+//
+// It must run inside the cascade block (preflightCheck, INIT-023
+// TASK-012): its checkout → write → commit → checkout is a working-tree
+// sequence, and ctx must be the block's.
 func (o *Orchestrator) applyCommitStatus(ctx context.Context, run *domain.Run, newStatus string) error {
 	log := observe.Logger(ctx)
 
