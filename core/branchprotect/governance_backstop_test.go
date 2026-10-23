@@ -26,7 +26,7 @@ func TestWorkflowDefinitionDirs(t *testing.T) {
 		{"hidden .yaml leaf", []string{"x/workflows/.yaml"}, []string{"x/workflows"}},
 		{"glob characters are literal", []string{"app/[id]/workflows/x.yaml"}, []string{"app/[id]/workflows"}},
 		{"leading slash", []string{"/spine/workflows/x.yaml"}, []string{"spine/workflows"}},
-		{"C-quoted path decodes", []string{`"sp\303\244ce/workflows/x.yaml"`}, []string{"späce/workflows"}},
+		{"C-quoted path decodes", []string{`"sp\303\244ce/workflows/x.yaml"`}, []string{"sp\u00e4ce/workflows"}},
 		{"once per folded parent", []string{"d/workflows/a.yaml", "D/Workflows/b.yml", "d/workflows/c.yaml"}, []string{"d/workflows"}},
 		{"nested file", []string{"workflows/steps/x.yaml"}, nil},
 		{"not yaml", []string{"docs/workflows/README.md", "docs/workflows/x.yaml.bak"}, nil},

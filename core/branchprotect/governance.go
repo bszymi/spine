@@ -43,6 +43,23 @@ var DefaultGovernancePaths = []string{".spine/", ".spine.yaml", "workflows/"}
 type GovernancePaths struct {
 	// entries are folded (foldPath) and carry no trailing "/".
 	entries []string
+	// set indexes entries for Match (INIT-024 TASK-002, codex round 1).
+	// Since the guard adds an entry per changed workflow directory at
+	// decision time (WithDirs, WorkflowDefinitionDirs), the entry count
+	// grows with the run's diff: a linear scan of the entries for every
+	// changed path made one evaluation quadratic in run-controlled input.
+	// Match now looks up the path and each of its "/"-ancestors instead,
+	// which decides exactly the same "q == E or q has the prefix E + /".
+	set map[string]struct{}
+}
+
+// governancePathsOf builds the set from folded, de-duplicated entries.
+func governancePathsOf(entries []string) GovernancePaths {
+	set := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		set[e] = struct{}{}
+	}
+	return GovernancePaths{entries: entries, set: set}
 }
 
 // ErrInvalidGovernancePath is wrapped by every NewGovernancePaths error.
@@ -79,7 +96,7 @@ func NewGovernancePaths(entries []string) (GovernancePaths, error) {
 		out = append(out, e)
 	}
 	sort.Strings(out)
-	return GovernancePaths{entries: out}, nil
+	return governancePathsOf(out), nil
 }
 
 func defaultGovernancePaths() GovernancePaths {
@@ -166,7 +183,7 @@ func (g GovernancePaths) WithDirs(dirs ...string) GovernancePaths {
 		out = append(out, e)
 	}
 	sort.Strings(out)
-	return GovernancePaths{entries: out}
+	return governancePathsOf(out)
 }
 
 // workflowsDirName is the folded last segment of a directory the backstop
@@ -276,13 +293,32 @@ func (g GovernancePaths) Match(p string) bool {
 		}
 		p = dec
 	}
-	entries := g.entries
-	if entries == nil {
-		entries = defaultGovernancePaths().entries
+	if g.entries == nil {
+		g = defaultGovernancePaths()
 	}
 	q := foldPath(strings.TrimLeft(p, "/"))
-	for _, e := range entries {
-		if q == e || strings.HasPrefix(q, e+"/") {
+	if g.set == nil {
+		// Not built by a constructor of this package (cannot happen
+		// today): the plain scan decides the same, only slower.
+		for _, e := range g.entries {
+			if q == e || strings.HasPrefix(q, e+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	// q == E, or q has the prefix E + "/": E is q itself or q up to one
+	// of its "/" bytes. Entries carry no trailing "/", and a "/" byte is
+	// never inside a multi-byte UTF-8 sequence, so these lookups decide
+	// exactly what the scan above decides, in time linear in len(q).
+	if _, ok := g.set[q]; ok {
+		return true
+	}
+	for i := 0; i < len(q); i++ {
+		if q[i] != '/' {
+			continue
+		}
+		if _, ok := g.set[q[:i]]; ok {
 			return true
 		}
 	}
