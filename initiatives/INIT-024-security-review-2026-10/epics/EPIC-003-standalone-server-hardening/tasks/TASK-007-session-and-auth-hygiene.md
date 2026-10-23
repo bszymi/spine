@@ -413,6 +413,7 @@ main); `core/auth`'s `SPINE_ENV` mention is a comment.
 |---|---|---|---|
 | 1 | `f2b8666f` | `01a169f1-0557-7e40-8889-825ea10e32ef` | none ("patch is correct", 0.87) |
 | 2 | `a197c9f7` | `01a169f5-2ba1-70b0-9c55-9331337e4149` | none ("patch is correct") |
+| 3 | `15abd1ea` (notes commit) | `01a16a2d-ee9d-7583-a777-c2006606369b` | none ("patch is correct") |
 
 The one real defect found after round 1 came from the self-review (the credential in the new
 pre-auth log line, `a197c9f7`), not from codex.
