@@ -131,8 +131,13 @@ bootstrap admin, subscription-secret sweep) is built only for a request that car
 bearer, because that bearer can only be validated against the workspace's own token store. Until it
 is validated, every refusal — missing or malformed header, unresolved, inactive or unbuildable
 workspace, missing auth service, unknown, expired or revoked token, suspended actor, token-store
-error — is one `401` with one body, on `/api/v1` and on `/git`, so a caller cannot tell an existing
-workspace from a missing one by status or message. The cause is logged server-side.
+error — is one `401` with one body on `/api/v1`, so a caller cannot tell an existing workspace from
+a missing one by status or message; a request without a well-formed bearer is refused before the
+workspace is even resolved. On `/git` the same holds for every failure of a well-formed bearer
+(build failure, missing auth service, token-store error, every token state). The `/git` cases of a
+missing or malformed `Authorization` header, and of a push while receive-pack is off (a `403` for
+an existing workspace), are made uniform by INIT-024 TASK-006, not by this change. The cause is
+logged server-side.
 
 ---
 

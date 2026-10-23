@@ -876,13 +876,27 @@ The following limitations have been resolved:
   the revocation and the next heartbeat are still delivered: the window is at most one interval.
   A token-store error or timeout during the check closes the stream too (fail closed); the client
   reconnects. Proactive close through an event bus is out of scope.
-- **Pre-authentication builds (N-15).** In shared mode a request without a well-formed bearer never
-  builds a workspace's ServiceSet, and every refusal before the bearer is validated is the same
-  `401`. A well-formed but invalid bearer still builds a cold workspace's services (database pool,
-  bootstrap admin, secret sweep): the bearer can only be checked against that workspace's own
-  token store. Such builds are bounded by the per-IP rate limiter and the pool's idle eviction.
-  Response *timing* still differs between a missing workspace (no build, no query) and an existing
-  one; the refusals are not constant-time.
+- **Pre-authentication builds (N-15).** In shared mode an `/api/v1` request without a well-formed
+  bearer is refused before the workspace is even resolved — no registry query, no platform binding
+  fetch, no ServiceSet build — and every refusal before the bearer is validated is the same `401`.
+  A well-formed but invalid bearer still resolves the workspace and builds its services: the
+  bearer can only be checked against that workspace's own token store. That build is not cheap or
+  side-effect free — the first one opens the workspace's database pool, sweeps its subscription
+  secrets, seeds the bootstrap `smp-admin` rows when `SMP_ADMIN_TOKEN` is set and starts the
+  workspace's event delivery — and it is **not** bounded by idle eviction: every `Get`/`Release`
+  refreshes the entry's last access, so one junk bearer per workspace per idle timeout (10 min by
+  default) keeps a workspace built indefinitely. The per-IP rate limiter bounds the request rate,
+  not the number of workspaces kept warm. In `db` mode this adds little — the projection sync
+  already builds every active workspace on each poll — but in `platform-binding` mode it lets an
+  anonymous caller who knows workspace ids keep them loaded. A per-workspace build rate limit or a
+  negative cache for failed builds is a follow-up (TASK-007 review round 1, finding 3).
+- **`/git` still resolves before its gate.** `/git/{workspace}/...` resolves the workspace before
+  it looks at the bearer, because trusted-CIDR and development reads are token-less and need the
+  workspace to decide; in `platform-binding` mode a header-less request therefore still costs a
+  binding fetch for a workspace id the cache does not hold. The answers are uniform (below); the
+  fetch is not.
+- **Timing.** Response *timing* still differs between a missing workspace (no build, no query)
+  and an existing one; the refusals are not constant-time.
 - **Shared mode answers `401` for an unbuildable workspace (N-15).** A caller whose workspace's
   services fail to build, or whose token store errors, gets the uniform `401` — even with a token
   that is valid there — where it used to get `500`/`503`. The cause is logged at `Warn`/`Error`
