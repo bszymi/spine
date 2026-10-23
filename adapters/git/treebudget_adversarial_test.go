@@ -387,3 +387,22 @@ func TestClone_FailedCheckoutLeavesTheDirectoryEmpty(t *testing.T) {
 		t.Fatalf("the failed clone left %v in the directory", names)
 	}
 }
+
+// TestTreeBudget_RestoreMeasuresHEADBeforeItsReset (codex round 3, P2):
+// the shared tree's restore resets HEAD's tree whenever the index or the
+// tree differs from it, and HEAD's ref can move under the tree without a
+// checkout (here an update-ref of the checked-out home branch to the
+// bomb). The reset is measured first: refused, nothing is written.
+func TestTreeBudget_RestoreMeasuresHEADBeforeItsReset(t *testing.T) {
+	ctx := context.Background()
+	repo, _, bomb, _ := tbRepo(t)
+	c := git.NewCLIClient(repo, git.WithHomeBranch("main"), git.WithTreeBudget(smallBudget))
+	tbGit(t, repo, nil, "update-ref", "refs/heads/main", bomb)
+	_, err := c.RestoreWorkingTree(ctx)
+	if !errors.Is(err, git.ErrTreeTooLarge) {
+		t.Fatalf("restore over an over-budget HEAD: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "docs")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the restore wrote the bomb: %v", err)
+	}
+}

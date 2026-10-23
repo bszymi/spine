@@ -19,8 +19,10 @@ package git
 //   - EnterBranch (before `git worktree add`, so a refusal creates no
 //     temporary directory), Checkout, Merge (target and source),
 //     MergeBound / Merge with SourceSHA (source and target), ResetBranch's
-//     `read-tree -m -u` and its `read-tree --reset -u` fallback, and the
-//     shared tree's restore when it switches back to the home branch;
+//     `read-tree -m -u` and its `read-tree --reset -u` fallback, the
+//     shared tree's restore (its `reset --hard` of HEAD and its switch
+//     back to the home branch), and Clone (made --no-checkout, then
+//     measured and written by its own `reset --hard`);
 //   - a tree over the budget is refused with a permanent *GitError
 //     wrapping *TreeTooLargeError (errors.Is(err, ErrTreeTooLarge)), and
 //     the command never runs: nothing is written and no ref moves.

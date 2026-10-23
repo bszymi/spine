@@ -1118,8 +1118,8 @@ The following limitations have been resolved:
   1000 entries reach terabytes). A `git.CLIClient` that carries a checkout budget now measures the
   tree before every command that writes one — `EnterBranch` (before the worktree's directory
   exists), `Checkout`, `Merge` and `MergeBound` (target and source), `ResetBranch`'s
-  `read-tree -m -u` and its `read-tree --reset -u` fallback, the shared tree's restore switch to
-  its home branch, and `Clone` (made `--no-checkout`, measured, then `reset --hard`) — and refuses
+  `read-tree -m -u` and its `read-tree --reset -u` fallback, the shared tree's restore (its
+  `reset --hard` of HEAD and its switch to the home branch), and `Clone` (made `--no-checkout`, measured, then `reset --hard`) — and refuses
   one over it with a permanent error matching `git.ErrTreeTooLarge` before anything is written or
   moved. The limits: 200,000 entries (files, links, gitlinks and directories), 2 GiB of blob bytes
   and 16 MiB of summed path bytes (`git.TreeBudget`; owner question 1, defaults pending the
@@ -1169,6 +1169,11 @@ The following limitations have been resolved:
   is then not run. `push` and the network part of `clone` are not deadlined by it (their time is
   the network's; a governed merge's push stays bounded by the sequence timeout). A smudge filter
   the host configured keeps running after its git is stopped.
+- **An over-budget home branch blocks the shared tree.** When the standalone tree's HEAD or home
+  branch is itself over the budget (moved there without a measured checkout — an operator's
+  `update-ref`, a push to the checked-out branch under a non-default `receive.denyCurrentBranch`),
+  every restore refuses with nothing reset, so every sequence on that workspace fails until the
+  branch is fixed or the limits raised: fail closed rather than fill the disk.
 - **Refusals are permanent.** A refused governed merge is a permanent merge failure for the run
   (retrying cannot shrink the tree); a refused branch-scoped write fails with `git_error`. One
   budget covers every client of the process, code-repository clones and merges included, so a

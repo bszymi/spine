@@ -18,7 +18,7 @@ change.
 - **Checkout budget in standalone.** `spine serve` now measures every tree its git client is about
   to write — `EnterBranch` (before the worktree directory exists), `Checkout`, `Merge` and
   `MergeBound` (target and source), `ResetBranch`'s `read-tree -m -u` and its `--reset -u`
-  fallback, the shared tree's restore switch, and `Clone` (now `--no-checkout`, measured, then
+  fallback, the shared tree's restore (`reset --hard` of HEAD and the switch home), and `Clone` (now `--no-checkout`, measured, then
   `reset --hard`) — and refuses one over 200,000 entries, 2 GiB of blob bytes (after the expansion
   the tree's own `.gitattributes` can apply: `ident`, `text`/`eol`, `working-tree-encoding`) or
   16 MiB of summed path bytes, before anything is written or any ref moves. The measure streams

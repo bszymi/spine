@@ -676,6 +676,14 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 				"nothing was reset — move it out of the working tree", p)}
 	}
 	resetHard := func() error {
+		// The checkout budget (INIT-024 TASK-003, codex round 3): `reset
+		// --hard` writes HEAD's whole tree wherever the index or the tree
+		// differs from it, and HEAD's ref can have moved under the tree
+		// (an update-ref, a push to the checked-out branch) without any
+		// measured checkout. Refused, the restore fails with nothing reset.
+		if err := c.checkTrees(ctx, op, "HEAD"); err != nil {
+			return err
+		}
 		if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
 			return err
 		} else if p != "" {
