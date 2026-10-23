@@ -21,7 +21,7 @@ package scenarios_test
 //   - The scenario harness called the orchestrator with a context that
 //     carried only a log actor id, so under the guard every lifecycle run
 //     was held as "the run's starter is not recorded". The harness's start
-//     steps now bind the scenario's actor (lifecycleStartCtx);
+//     steps now bind the scenario's actor (planningStartCtx);
 //     ..._DraftAuthorCannotReview_GuardOn is TASK-014's scenario under the
 //     guard.
 
@@ -194,6 +194,13 @@ func assertLifecycleRunHeld(path string) engine.Step {
 // workflow-lifecycle skills, and installs `spine serve`'s step-entry
 // policy.
 func lifecycleActors() []engine.Step {
+	return append(lifecycleActorsOnly(), installStrictStepEntryPolicy())
+}
+
+// lifecycleActorsOnly registers the actors of lifecycleActors and installs
+// no step-entry policy (an embedder that runs the guard with separation of
+// duties off).
+func lifecycleActorsOnly() []engine.Step {
 	steps := []engine.Step{
 		registerSkill("skill-wf-author", "workflow_authoring", "governance"),
 		registerSkill("skill-wf-review", "workflow_review", "governance"),
@@ -204,7 +211,7 @@ func lifecycleActors() []engine.Step {
 			assignSkillToActor(id, "skill-wf-author"),
 			assignSkillToActor(id, "skill-wf-review"))
 	}
-	return append(steps, installStrictStepEntryPolicy())
+	return steps
 }
 
 func guardedLifecycleEnv() []harness.EnvOption {
@@ -243,12 +250,43 @@ func TestWorkflowLifecycle_GatewayStartedRunReviewedByAnotherIsExempt(t *testing
 }
 
 // The same start, but the starter — who wrote the body through POST
-// /workflows — reviews it: the step-entry policy lets them claim (they ran
-// no step), and the exemption refuses them, so the merge waits for an
-// operator.
-func TestWorkflowLifecycle_GatewayStartedRunReviewedByItsStarterIsHeld(t *testing.T) {
+// /workflows — tries to review it under `spine serve`'s step-entry policy:
+// separation of duties counts the planning starter as a run author
+// (INIT-024 TASK-001), so the claim is refused, and the run waits for an
+// independent reviewer.
+func TestWorkflowLifecycle_GatewayStartedRunStarterCannotClaimReview(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	steps := append([]engine.Step{engine.SyncProjections()}, lifecycleActors()...)
+	steps = append(steps,
+		lifecycleGatewayServer("wl-starter"),
+		startLifecycleRunThroughAPI("wl-starter", "new-flow", newWorkflowBodyV1),
+		assertLifecycleStarter("wl-starter"),
+		claimCurrentStep("rev-a"),
+		engine.SubmitStepResult("submitted", "workflow_body"),
+		engine.AssertCurrentStep("review"),
+		claimCurrentStepRefused("wl-starter", domain.ErrForbidden),
+		claimCurrentStep("rev-b"),
+		engine.SubmitStepResult("approved"),
+		engine.AssertRunCompleted(),
+		engine.AssertFileExists("workflows/new-flow.yaml"),
+	)
+	engine.RunScenario(t, engine.Scenario{
+		Name:        "workflow-lifecycle-gateway-start-starter-refused-review",
+		Description: "The reviewer who started a lifecycle run through POST /workflows cannot claim its review under the strict step-entry policy",
+		EnvOpts:     guardedLifecycleEnv(),
+		Steps:       steps,
+	})
+}
+
+// The same start with separation of duties off (the guard and the lifecycle
+// exemption on): the starter may claim the review (they ran no step), and
+// the exemption refuses them, so the merge waits for an operator — the
+// guard's own starter check, kept as defence in depth. Before INIT-024
+// TASK-001 this ran under the strict policy, whose separation of duties
+// did not count the starter.
+func TestWorkflowLifecycle_GatewayStartedRunReviewedByItsStarterIsHeld(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	steps := append([]engine.Step{engine.SyncProjections()}, lifecycleActorsOnly()...)
 	steps = append(steps,
 		lifecycleGatewayServer("wl-starter"),
 		startLifecycleRunThroughAPI("wl-starter", "new-flow", newWorkflowBodyV1),

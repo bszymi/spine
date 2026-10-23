@@ -145,7 +145,13 @@ func (b *headBinding) apply(reserved map[string]string) map[string]string {
 //     only when the outcome has a commit — today's single write, minus
 //     reserved keys. Reserved keys already stored are dropped with the
 //     rest of the old map (replace semantics), so turning binding off
-//     retires them at the next commit-carrying outcome.
+//     retires them at the next commit-carrying outcome — except the
+//     planning starter record (CommitMetaGovernanceStartedBy), which is
+//     not binding state: separation of duties reads it for the whole run
+//     (runAuthor), and dropping it at a draft outcome's commit would leave
+//     the run reviewable by nobody (INIT-024 TASK-001). It exists only
+//     while separation of duties or the governance guard wrote it at start
+//     (recordPlanningStarter), so without either this is unchanged.
 //   - Binding on: the non-reserved part is stripReserved(outcomeCommit)
 //     when the outcome has a commit (replace semantics, as today: earlier
 //     non-reserved keys are dropped) or current's non-reserved keys when it
@@ -160,6 +166,9 @@ func mergeCommitMeta(current, outcomeCommit map[string]string, hasCommit, bindin
 		}
 		if stripped == nil {
 			stripped = map[string]string{}
+		}
+		if starter := current[CommitMetaGovernanceStartedBy]; starter != "" {
+			stripped[CommitMetaGovernanceStartedBy] = starter
 		}
 		return stripped, true
 	}

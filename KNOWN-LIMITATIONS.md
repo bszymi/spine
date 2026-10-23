@@ -224,6 +224,26 @@ This document tracks known gaps and deferred functionality.
     authors with the reviewer before accepting.
   - **A push admitted while bound can land after the step is submitted** (see "Run-Branch
     Admission Is a Push-Start Check"); its actor still counts as an author, because it was bound.
+- **Planning runs without a recorded starter are reviewable by nobody (INIT-024 TASK-001,
+  Decision 2; owner question 1 default: fail closed).** Separation of duties counts the actor who
+  started a planning-mode run as a run author, from the starter the engine records at start
+  (`commit_meta` key `spine.governance.started_by`). A planning run started before the upgrade, or
+  while separation of duties was off (`legacy`, or an embedder without the policy), has no record,
+  and nobody can tell who wrote its content, so every candidate for its `review` steps is refused
+  (403, `(run start: starter not recorded)`) and the candidate listing offers it to nobody. Such a
+  run waits until an operator cancels it and starts it again, or runs
+  `SPINE_STEP_ENTRY_POLICY=legacy` for the migration window. (A guard-only deployment records the
+  starter too, so its runs stay reviewable when the policy is turned on.)
+  - **A review bound before the upgrade stays bound.** Separation of duties is checked when an
+    actor is bound; a starter who already holds its run's review keeps it. Cancel such runs, or
+    release and re-offer the review, before relying on the rule.
+  - **Standard runs are unchanged.** The actor who starts a standard run wrote no content and is
+    not an author; nor is the author of the task file on `main` (out of scope).
+  - **Embedders:** under `SeparationOfDuties`, every planning start (`StartPlanningRun`,
+    `StartWorkflowPlanningRun`, `StartWorkflowUpdatePlanningRun`) needs `domain.WithActor` on the
+    context, under exactly the actor ID the step-entry resolver later binds (the compare is
+    exact; SMP: the member's `human-<uuid>` handle in `CreateEntry`). Without it every planning
+    start is `ErrUnauthorized`.
 - **Separation-of-duties bind race across processes:** the SoD check reads state and the bind
   writes it later. Within one process the engine serialises a run's check-and-bind (an in-process
   lock shared by every orchestrator, held only while the check is re-run and the bind written), so

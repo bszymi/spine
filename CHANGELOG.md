@@ -6,6 +6,57 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-001 TASK-001: a planning run's starter is a run author)
+
+Closes review finding N-3 (2026-10-22): separation of duties did not count the actor who started a
+planning run, although that actor wrote the run's content. No runtime schema change, no API change.
+
+### Security
+
+- **The starter of a planning run cannot review it under separation of duties.** A planning start
+  (`POST /runs` with `mode: planning`, `POST /artifacts/entry`, and the workflow-lifecycle starts
+  behind `POST` / `PUT /workflows`) writes the caller's content onto the run branch, but the caller
+  was bound to no execution, so separation of duties did not see them: they could let another
+  actor (an AI draft step) submit the draft unchanged and then claim, approve and merge their own
+  content. Every planning start now records the authenticated starter in the run's `commit_meta`
+  (`spine.governance.started_by`, the key the ADR-016 lifecycle exemption already used) before the
+  content is written, and separation of duties counts that actor as a run author: assign, claim and
+  engine auto-selection of the run's review steps refuse it (403, naming `(run start)`), and the
+  candidate listing does not offer it. A failed record aborts the start before any content is
+  written. With merge binding off the record also survives commit-carrying outcomes.
+
+### Changed (standalone)
+
+- Under the default (strict) step-entry policy, a planning start with no authenticated actor
+  (a dev-mode request without a token) is refused with **401** before any run, branch or git read
+  exists.
+- **An in-flight planning run's review is refused** after the upgrade: a planning run started
+  before it (or under `SPINE_STEP_ENTRY_POLICY=legacy`) has no recorded starter and can be
+  reviewed by nobody (403, `(run start: starter not recorded)`). Cancel and restart such runs, or
+  keep `SPINE_STEP_ENTRY_POLICY=legacy` until they finish (`KNOWN-LIMITATIONS.md`).
+- The reviewer who started a workflow-lifecycle run can no longer claim its review (it was held
+  for an operator by the lifecycle exemption before; the exemption's starter check stays).
+
+### Changed (embedders)
+
+- **Inert with the zero value.** Without `StepEntryPolicy.SeparationOfDuties` (and without the
+  governance guard's lifecycle exemption) no starter is recorded, no commit_meta write is made at
+  start and nothing new is refused; `StartPlanningRun`'s signature is unchanged.
+- With `SeparationOfDuties` on, `StartPlanningRun`, `StartWorkflowPlanningRun` and
+  `StartWorkflowUpdatePlanningRun` return `ErrUnauthorized` unless the context carries
+  `domain.WithActor` with a non-empty `ActorID`, which must be exactly the ID the step-entry
+  resolver later binds for that person (SMP: the member's `human-<uuid>` handle in `CreateEntry`).
+  They record it with one `MergeCommitMeta` (or `GetRun` + `SetCommitMeta`) call before the content
+  write; a failed write fails the start, deletes the branch and marks the pending run failed.
+- A workflow planning run whose start fails on the branch logs "planning run start failed; could
+  not mark the run failed" (was "workflow planning run start failed; …") when it cannot be marked
+  failed.
+- Merge binding off: a commit-carrying outcome's commit_meta write keeps
+  `spine.governance.started_by` (every other reserved key is still dropped). The key is written
+  only under separation of duties or the guard, so without either nothing changes.
+
+---
+
 ## INIT-023 — Security Audit Remediation: wave 4 follow-up
 
 Fixes found after the wave 4 integration (a TASK-003 residual SMP INIT-027/EPIC-004/TASK-008 measured

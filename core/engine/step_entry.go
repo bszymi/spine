@@ -67,6 +67,16 @@ type StepEntryPolicy struct {
 	// isAuthorStepType) cannot be bound to a review step of that run, and an
 	// actor holding a live review execution cannot be bound to an author
 	// step of the same run.
+	//
+	// The actor who started a planning-mode run is a run author too
+	// (INIT-024 TASK-001): it wrote the run's content at start. Every
+	// planning starter (StartPlanningRun, StartWorkflowPlanningRun,
+	// StartWorkflowUpdatePlanningRun) therefore needs an authenticated actor
+	// on the context (domain.WithActor; ErrUnauthorized otherwise) and
+	// records it in the run's commit_meta (CommitMetaGovernanceStartedBy)
+	// before it writes the content; a planning run with no record — started
+	// before the upgrade or while this was off — can be reviewed by nobody
+	// (runAuthor).
 	SeparationOfDuties bool
 	// ReofferToPriorHolder (audit P3-6 residual; INIT-023 TASK-014 owner
 	// question 7): ClaimStep of an author step (isAuthorStepType — every
@@ -886,7 +896,18 @@ func (o *Orchestrator) separationOfDuties(ctx context.Context, run *domain.Run, 
 		if err != nil {
 			return err
 		}
-		if authored != "" {
+		switch authored {
+		case "":
+		case runStartAuthorStep:
+			return domain.NewError(domain.ErrForbidden,
+				fmt.Sprintf("separation of duties: actor %q started planning run %s and wrote its content %s, and cannot review it (step %q)",
+					actorID, run.RunID, runStartAuthorStep, stepDef.ID))
+		case planningStarterUnknown:
+			// Not about this actor: nobody may review the run (Decision 2).
+			return domain.NewError(domain.ErrForbidden,
+				fmt.Sprintf("separation of duties: planning run %s has no recorded starter %s, so no actor can review it (step %q); cancel the run and start it again",
+					run.RunID, planningStarterUnknown, stepDef.ID))
+		default:
 			return domain.NewError(domain.ErrForbidden,
 				fmt.Sprintf("separation of duties: actor %q executed step %q of run %s and cannot review it (step %q)",
 					actorID, authored, run.RunID, stepDef.ID))
@@ -907,14 +928,47 @@ func (o *Orchestrator) separationOfDuties(ctx context.Context, run *domain.Run, 
 	return nil
 }
 
+// runStartAuthorStep is the pseudo-step runAuthor names for the actor who
+// started a planning-mode run (INIT-024 TASK-001, review finding N-3).
+// planningStarterUnknown is the one it names for every candidate when a
+// planning run records no starter: such a run is reviewable by nobody while
+// separation of duties is on (fail closed; INIT-024 TASK-001 Decision 2,
+// owner question 1 default). Step ids have no enforced grammar, so a
+// workflow could name a step like one of these; that changes only the
+// wording of the refusal, never whether the bind is refused.
+const (
+	runStartAuthorStep     = "(run start)"
+	planningStarterUnknown = "(run start: starter not recorded)"
+)
+
 // runAuthor returns the step through which actorID authored the run, or ""
-// when it did not. An actor is a run author when either holds:
+// when it did not. An actor is a run author when any holds:
 //
+//	(s) the run is planning-mode and actorID is the starter recorded in
+//	    its commit_meta (CommitMetaGovernanceStartedBy) — runStartAuthorStep;
+//	    a planning run with no recorded starter makes every candidate an
+//	    author — planningStarterUnknown;
 //	(a) it is the ActorID of an author execution of the run
 //	    (isAuthorStepType: any type but review and internal), in any
 //	    status (failed, in-progress and completed attempts all count);
 //	(b) it is the actor_id of an actor_assignments row, in any status, of
 //	    such an execution.
+//
+// (s) exists because a planning run's content is written onto its branch
+// at start (StartPlanningRun, StartWorkflowPlanningRun and
+// StartWorkflowUpdatePlanningRun write the caller's artifact or workflow
+// body), by the caller, who is bound to no execution and holds no
+// assignment row. Without it the starter could let another actor (an AI
+// draft step, say) submit the draft unchanged and then review and accept
+// their own content: the N-3 self-review. Every planning starter records
+// the authenticated actor (domain.ActorFromContext) under separation of
+// duties and refuses to start without one (recordPlanningStarter,
+// requirePlanningStarter), so a missing record means the run was started
+// before the upgrade or while the policy was off; nobody can tell who
+// wrote it, so nobody may review it. The comparison is exact, like every
+// separation-of-duties compare (see StepEntryPolicy.Actors). Standard runs
+// are not affected: their starter writes no content (out of scope: the
+// author of the task file on main).
 //
 // (b) exists because rebinding reuses the execution row: ReleaseStep blanks
 // ActorID and the next claimant overwrites it (as does restart recovery plus
@@ -931,6 +985,14 @@ func (o *Orchestrator) separationOfDuties(ctx context.Context, run *domain.Run, 
 // append-only binding ledger (a schema change).
 func (o *Orchestrator) runAuthor(ctx context.Context, run *domain.Run, wfDef *domain.WorkflowDefinition,
 	target *domain.StepExecution, actorID string, execs []domain.StepExecution) (string, error) {
+	if run.Mode == domain.RunModePlanning {
+		switch starter := run.CommitMeta[CommitMetaGovernanceStartedBy]; starter {
+		case "":
+			return planningStarterUnknown, nil
+		case actorID:
+			return runStartAuthorStep, nil
+		}
+	}
 	known := make(map[string]bool, len(execs))
 	authorExecs := make(map[string]string, len(execs)) // execution ID → step ID
 	for i := range execs {
