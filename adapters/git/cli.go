@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	pathpkg "path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -147,6 +149,14 @@ type CLIClient struct {
 	// NewCLIClient), and the refusal when it was not a valid branch name.
 	homeBranch string
 	homeErr    error
+
+	// Checkout limits (INIT-024 TASK-003, treebudget.go): the client's
+	// own WithTreeBudget (nil: the process default, if any) and
+	// WithMutateTimeout (0: likewise). Read through CheckoutLimits() at
+	// every call. measureHook is a test hook (SetMeasureHookForTest).
+	treeBudget    *TreeBudget
+	mutateTimeout time.Duration
+	measureHook   func(MeasureTrace)
 }
 
 // CLIOption configures a CLIClient.
@@ -546,7 +556,20 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 	// remote.origin.tagOpt=--no-tags, so later fetches do not either.
 	// Branch arguments never resolve through tags anyway (exact lookup);
 	// this keeps upstream-controlled names out of rev resolution too.
-	args = append(args, "clone", "--no-tags", "--", url, path)
+	//
+	// With a checkout budget (INIT-024 TASK-003, adversarial review) the
+	// clone does not check out: a code repository's default branch is
+	// whatever its remote holds, and `git clone` would write it before
+	// anything could measure it. The clone runs with --no-checkout, its
+	// HEAD tree is measured, and only then written (checkoutClone).
+	limits := c.CheckoutLimits()
+	args = append(args, "clone", "--no-tags")
+	if limits.Budget != nil {
+		args = append(args, "--no-checkout")
+	}
+	args = append(args, "--", url, path)
+	_, statErr := os.Lstat(path)
+	created := errors.Is(statErr, fs.ErrNotExist)
 	cmd := newGitCmd(ctx, args...)
 	// Build the clone environment when the client carries any auth
 	// state — askpass token, credential-helper env (e.g.
@@ -586,6 +609,48 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 		gitErr.Err = err
 		return gitErr
 	}
+	if limits.Budget != nil {
+		return c.checkoutClone(ctx, path, created, limits)
+	}
+	return nil
+}
+
+// checkoutClone writes the HEAD tree of a clone made with --no-checkout,
+// after measuring it against limits' budget (INIT-024 TASK-003). An
+// empty repository (unborn HEAD) has nothing to write. Over the budget,
+// or on any failure, the clone is removed (see discard) so no half-made
+// clone is later taken for a usable one; the error is returned. The write is `git reset --hard`,
+// run under the mutate deadline.
+func (c *CLIClient) checkoutClone(ctx context.Context, path string, created bool, limits CheckoutLimits) error {
+	cc := &CLIClient{repoPath: path, maxBlobBytes: c.maxBlobBytes, maxOutputBytes: c.maxOutputBytes,
+		maxGitAllocBytes: c.maxGitAllocBytes, treeBudget: limits.Budget, mutateTimeout: limits.MutateTimeout}
+	// A refused or failed clone is removed: all of it when Clone created
+	// the directory; otherwise its .git (a --no-checkout clone writes
+	// nothing else), so the directory no longer looks like a clone.
+	// RemoveAll never follows a link inside what it removes.
+	discard := func(err error) error {
+		if created {
+			_ = os.RemoveAll(path)
+		} else {
+			_ = os.RemoveAll(filepath.Join(path, ".git"))
+		}
+		return err
+	}
+	out, _, err := cc.runWith(ctx, "clone", runOpts{}, "rev-parse", "-q", "--verify", "HEAD^{commit}")
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && strings.TrimSpace(out) == "" {
+			return nil // unborn HEAD: an empty repository
+		}
+		return discard(err)
+	}
+	head := strings.TrimSpace(out)
+	if err := cc.checkTrees(ctx, "clone", head); err != nil {
+		return discard(err)
+	}
+	if _, _, err := cc.runWith(ctx, "clone", runOpts{}, "reset", "--hard", "-q"); err != nil {
+		return discard(err)
+	}
 	return nil
 }
 
@@ -602,6 +667,11 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 // It takes the client's working tree for its duration (INIT-023 TASK-012,
 // treelock.go): re-entrant inside WithWorkingTree, it never restores the
 // tree — a sequence owns HEAD.
+//
+// With a checkout budget (INIT-024 TASK-003, treebudget.go) the branch's
+// tree is measured first and one over the budget is refused
+// (ErrTreeTooLarge) before `git switch` runs; without one nothing extra
+// runs.
 func (c *CLIClient) Checkout(ctx context.Context, branch string) error {
 	short, _, err := checkBranch("checkout", "branch", branch)
 	if err != nil {
@@ -612,7 +682,24 @@ func (c *CLIClient) Checkout(ctx context.Context, branch string) error {
 		return err
 	}
 	defer h.release()
+	if err := c.checkBranchTree(h.ctx, "checkout", "branch", branch, short); err != nil {
+		return err
+	}
 	return c.switchTo(h.ctx, short)
+}
+
+// checkBranchTree is the checkout budget of a switch to branch short: the
+// branch's tree, looked up exactly, measured (checkTrees). No budget: nil,
+// and no git process — not even the lookup.
+func (c *CLIClient) checkBranchTree(ctx context.Context, op, what, value, short string) error {
+	if c.CheckoutLimits().Budget == nil {
+		return nil
+	}
+	oid, err := c.resolveBranchOID(ctx, op, what, value, short)
+	if err != nil {
+		return err
+	}
+	return c.checkTrees(ctx, op, oid)
 }
 
 // switchTo runs the Checkout argv for an already-validated short name.
@@ -684,6 +771,12 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 // target tip the merge was computed on.
 //
 // The whole call (lookup, switch, merge) holds the working tree.
+//
+// With a checkout budget (INIT-024 TASK-003) the target's tree and the
+// source commit's tree are measured after the lookup and before the
+// switch; either over the budget is refused (ErrTreeTooLarge) with
+// nothing switched, merged or moved. The abort path measures nothing: it
+// restores the state the merge started from.
 func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, error) {
 	if opts.Strategy == "abort" || opts.Source == "--abort" {
 		if opts.Target != "" {
@@ -734,10 +827,32 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 	if err != nil {
 		return MergeResult{}, err
 	}
+	if err := c.checkMergeTrees(ctx, opts.Target, target, source); err != nil {
+		return MergeResult{}, err
+	}
 	if err := c.switchTo(ctx, target); err != nil {
 		return MergeResult{}, err
 	}
 	return c.runMerge(ctx, opts, source)
+}
+
+// checkMergeTrees is the checkout budget of a merge of source (an object
+// id, or "HEAD") into target (short; "" merges into the checked-out
+// branch, whose tree is already written): both trees measured together
+// (checkTrees). No budget: nil and no git process.
+func (c *CLIClient) checkMergeTrees(ctx context.Context, targetValue, target, source string) error {
+	if c.CheckoutLimits().Budget == nil {
+		return nil
+	}
+	revs := []string{source}
+	if target != "" {
+		oid, err := c.resolveBranchOID(ctx, "merge", "target", targetValue, target)
+		if err != nil {
+			return err
+		}
+		revs = append([]string{oid}, revs...)
+	}
+	return c.checkTrees(ctx, "merge", revs...)
 }
 
 // errMergeTargetRequired is Merge's refusal of an implicit target.
@@ -1673,14 +1788,17 @@ var opClasses = map[string]opClass{
 	"rev-parse":  opRead,
 	"merge-base": opRead,
 	"tree_entry": opRead,
-	"diff":       opDiff,
-	"checkout":   opMutate,
-	"merge":      opMutate,
-	"commit":     opMutate,
-	"add":        opMutate,
-	"branch":     opMutate,
-	"config":     opMutate,
-	"push":       opMutate,
+	// measure_tree: the checkout budget's .gitattributes read (its
+	// streamed listing builds the same environment, commandEnv).
+	"measure_tree": opRead,
+	"diff":         opDiff,
+	"checkout":     opMutate,
+	"merge":        opMutate,
+	"commit":       opMutate,
+	"add":          opMutate,
+	"branch":       opMutate,
+	"config":       opMutate,
+	"push":         opMutate,
 }
 
 func classOf(op string) opClass {
@@ -1748,6 +1866,18 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 		// Clone).
 		args = append(append([]string{}, noAmbientAuthArgs...), args...)
 	}
+	// The mutate deadline (INIT-024 TASK-003, WithMutateTimeout): every
+	// local mutating command — not push, whose time is the network's —
+	// runs under it, so a checkout or merge the tree budget admitted still
+	// cannot run unbounded. Zero (the library default): ctx alone.
+	parent := ctx
+	var deadline time.Duration
+	if class == opMutate && op != "push" {
+		deadline = c.CheckoutLimits().MutateTimeout
+	}
+	ctx, cancelDeadline := withMutateDeadline(ctx, deadline)
+	defer cancelDeadline()
+
 	cmd := newGitCmd(ctx, args...)
 	cmd.Dir = c.repoPath
 
@@ -1798,13 +1928,7 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 	//   - read commands only: GIT_ALLOC_LIMIT. diff is exempt (opDiff).
 	allocLimit := c.gitAllocLimit()
 	if class == opRead || class == opDiff {
-		env := append(os.Environ(),
-			deltaBaseCacheEnv(os.Getenv("GIT_CONFIG_PARAMETERS"), c.blobLimit()),
-			"LC_ALL=C", "LANGUAGE=")
-		if class == opRead {
-			env = append(env, "GIT_ALLOC_LIMIT="+strconv.FormatInt(allocLimit, 10))
-		}
-		cmd.Env = env
+		cmd.Env = c.commandEnv(class)
 	}
 
 	stdout := newStdoutSink(limit, sizeHint, class != opMutate, text)
@@ -1814,6 +1938,9 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 
 	err := cmd.Run()
 	errText := stderr.String()
+	if err != nil && mutateDeadlineHit(parent, ctx, deadline) {
+		return nil, mutateTimeout(op, deadline, err)
+	}
 
 	// Size refusals first. The alloc refusal is honoured even when git
 	// exited 0: after a gentle allocation failure its output may be
@@ -1832,6 +1959,21 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 		return nil, gitErr
 	}
 	return stdout, nil
+}
+
+// commandEnv is the environment of a read (opRead) or diff (opDiff)
+// command: the inherited environment, the pinned delta-base cache, the C
+// locale, and for reads GIT_ALLOC_LIMIT (see runSink). The checkout
+// budget's streamed listing (treebudget.go) runs with exactly the read
+// environment.
+func (c *CLIClient) commandEnv(class opClass) []string {
+	env := append(os.Environ(),
+		deltaBaseCacheEnv(os.Getenv("GIT_CONFIG_PARAMETERS"), c.blobLimit()),
+		"LC_ALL=C", "LANGUAGE=")
+	if class == opRead {
+		env = append(env, "GIT_ALLOC_LIMIT="+strconv.FormatInt(c.gitAllocLimit(), 10))
+	}
+	return env
 }
 
 // buildCommitMessage constructs a commit message with trailers.

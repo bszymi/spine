@@ -47,7 +47,10 @@ package git
 //     effect before it prints, so a failing ceiling would report a merge
 //     that had already moved main as failed. Their stdout is drained —
 //     the head is kept, the rest discarded — and they get no alloc limit
-//     (checkout and merge legitimately materialise large files). `diff`
+//     (checkout and merge legitimately materialise large files). What
+//     they WRITE is bounded instead by the checkout budget and the
+//     mutate deadline when the client carries them (INIT-024 TASK-003,
+//     treebudget.go). `diff`
 //     gets the failing ceiling but no alloc limit: rename detection loads
 //     both blobs of a candidate pair, and a legitimate large rename on
 //     main must not wedge projection sync (KNOWN-LIMITATIONS.md, "Git
@@ -62,6 +65,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bszymi/spine/core/worktreefs"
 )
@@ -119,6 +123,37 @@ const (
 	// limit), so what a command's output costs is a function of its size
 	// alone, not of how the pipe happened to chunk it.
 	minSinkGrowth = 512
+)
+
+// Checkout budget defaults (INIT-024 TASK-003, review finding N-1; owner
+// question 1, defaults pending the owner). The read bounds above limit
+// what a git command PRINTS; these limit what a checkout or merge WRITES
+// (treebudget.go). They apply only to a client that carries a budget
+// (WithTreeBudget, or SetDefaultCheckoutLimits, which `spine serve`
+// calls): an unset field of an enabled TreeBudget means its default.
+// Measured at a560c210 with `git ls-tree -r -l HEAD`: Spine is 1,624
+// entries / 21 MB, SMP 3,708 / 33 MB, so the defaults are ~50x the
+// entries and ~60x the bytes of the largest real tree.
+const (
+	// DefaultTreeMaxEntries caps the entries of a tree — files,
+	// symbolic links, gitlinks and directories — each of which costs an
+	// inode (or a directory) when written.
+	DefaultTreeMaxEntries int64 = 200_000
+	// DefaultTreeMaxTotalBytes caps the summed sizes of a tree's blobs,
+	// after the checkout-time expansion its .gitattributes can apply
+	// (treebudget.go, attributeExpansion).
+	DefaultTreeMaxTotalBytes int64 = 2 << 30
+	// DefaultTreeMaxPathBytesTotal caps the summed full-path bytes of a
+	// tree's entries. It also bounds the depth of a tree (a path of
+	// depth d costs O(d^2) summed) and keeps every admitted tree's
+	// listing within DefaultMaxOutputBytes territory, so TASK-004's
+	// listings cannot be wedged by a tree this budget admits.
+	DefaultTreeMaxPathBytesTotal int64 = 16 << 20
+	// DefaultMutateTimeout is the wall-clock deadline `spine serve`
+	// gives every local mutating git command (owner question 2: 2 min).
+	// A client with no deadline (the library default) runs them under
+	// the caller's context alone, as before.
+	DefaultMutateTimeout = 2 * time.Minute
 )
 
 // WithMaxBlobBytes sets the per-blob ReadFile limit. n <= 0 keeps the

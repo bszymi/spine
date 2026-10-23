@@ -1,0 +1,228 @@
+package githttp
+
+// INIT-024 TASK-003 (review finding N-1): the checkout-budget
+// pre-receive hook, driven through Handler.ServeHTTP with the real git
+// client. The hook script execs this test binary, whose package init
+// runs PreReceiveHookMain exactly as `spine git-hook pre-receive` does.
+// Fixtures are a handful of tiny objects: the "bomb" is 50 entries of
+// one 4 KiB blob (200 KiB when checked out), refused by a 64 KiB budget.
+
+import (
+	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/domain"
+)
+
+// hookTestBudget refuses the 200 KiB bomb on bytes and admits a commit of
+// a few small files.
+var hookTestBudget = git.TreeBudget{MaxEntries: 1000, MaxTotalBytes: 64 << 10, MaxPathBytesTotal: 1 << 20}
+
+// budgetHandler is nulHandler with the small checkout budget. Its hook
+// execs this test binary, which runs the hook from the package init
+// (HookProcessEnv) exactly as the spine binary does.
+func budgetHandler(t *testing.T, repo string) *Handler {
+	t.Helper()
+	h := nulHandler(t, repo)
+	h.budgetHook.budget = hookTestBudget
+	return h
+}
+
+// budgetServer serves h as a contributor (who may push feature branches).
+func budgetServer(t *testing.T, h *Handler, repo string) string {
+	t.Helper()
+	actor := &domain.Actor{ActorID: "actor-contributor", Role: domain.RoleContributor}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := WithRepoPath(r.Context(), repo)
+		ctx = WithEvents(ctx, &nulEmitter{})
+		ctx = domain.WithActor(ctx, actor)
+		h.ServeHTTP(w, r.WithContext(ctx))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + "/"
+}
+
+// budgetClone clones url and returns the work tree.
+func budgetClone(t *testing.T, url string) string {
+	t.Helper()
+	work := t.TempDir()
+	clone := exec.Command("git", "clone", "-q", url, work)
+	clone.Env = nulGitEnv(t)
+	if out, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v %s", err, out)
+	}
+	return work
+}
+
+// pushBomb builds the review PoC's amplifying commit in work (one 4 KiB
+// blob named by 50 entries) on top of HEAD and returns its id.
+func pushBomb(t *testing.T, work string) string {
+	t.Helper()
+	blob := nulGit(t, work, bytes.Repeat([]byte("x"), 4<<10), "hash-object", "-w", "--stdin")
+	var mk strings.Builder
+	for i := 0; i < 50; i++ {
+		fmt.Fprintf(&mk, "100644 blob %s\tf%04d.md\n", blob, i)
+	}
+	inner := nulGit(t, work, []byte(mk.String()), "mktree")
+	root := nulGit(t, work, []byte("040000 tree "+inner+"\tdocs\n"), "mktree")
+	return nulGit(t, work, nil, "commit-tree", root, "-p", "HEAD", "-m", "bomb")
+}
+
+func gitPush(t *testing.T, work, url string, refspecs ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", work, "push", "--porcelain", url}, refspecs...)...)
+	cmd.Env = nulGitEnv(t)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// TestPrereceive_RefusesOverBudgetTreePush: with receive-pack on, the
+// amplifying push is refused by the pre-receive hook with a "remote:"
+// line naming the budget and its variable, the ref does not move and the
+// pushed objects are not in the repository. A push within the budget
+// lands. At a560c210 the amplifying push landed.
+func TestPrereceive_RefusesOverBudgetTreePush(t *testing.T) {
+	repo, _, _, _ := nulRepo(t, "")
+	h := budgetHandler(t, repo)
+	url := budgetServer(t, h, repo)
+	work := budgetClone(t, url)
+
+	bomb := pushBomb(t, work)
+	out, err := gitPush(t, work, url, bomb+":refs/heads/feature-bomb")
+	if err == nil {
+		t.Fatalf("the amplifying push landed:\n%s", out)
+	}
+	t.Logf("refused push:\n%s", out)
+	for _, want := range []string{"remote: spine: push refused", git.TreeTooLargeMessage, "MaxTotalBytes", EnvTreeMaxBytes, "pre-receive hook declined"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("push output lacks %q:\n%s", want, out)
+		}
+	}
+	if nulRefExists(t, repo, "refs/heads/feature-bomb") {
+		t.Fatal("feature-bomb was created")
+	}
+	if objectExists(t, repo, bomb) {
+		t.Fatal("the refused push's commit is in the repository (quarantine not discarded)")
+	}
+
+	// Within the budget: a normal commit lands through the same hook.
+	testFile := filepath.Join(work, "ok.md")
+	if err := os.WriteFile(testFile, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nulGit(t, work, nil, "add", "ok.md")
+	nulGit(t, work, nil, "commit", "-q", "-m", "ok")
+	if out, err := gitPush(t, work, url, "HEAD:refs/heads/feature-ok"); err != nil {
+		t.Fatalf("a push within the budget was refused: %v\n%s", err, out)
+	}
+	if got, want := nulGit(t, repo, nil, "rev-parse", "refs/heads/feature-ok"), nulGit(t, work, nil, "rev-parse", "HEAD"); got != want {
+		t.Fatalf("feature-ok = %s, want %s", got, want)
+	}
+	hook, err := os.ReadFile(filepath.Join(repo, "hooks", "pre-receive"))
+	if err != nil || !bytes.Contains(hook, []byte(budgetHookMarker)) {
+		t.Fatalf("installed hook: %v\n%s", err, hook)
+	}
+}
+
+// TestPrereceive_BudgetHookCannotBeRedirected: a core.hooksPath in the
+// repository's config does not take the hook away (the CGI pins it), a
+// deleted or edited hook is rewritten on the next push, and a
+// pre-receive hook Spine did not write is never replaced — the push is
+// refused instead (fail closed).
+func TestPrereceive_BudgetHookCannotBeRedirected(t *testing.T) {
+	repo, _, _, _ := nulRepo(t, "")
+	h := budgetHandler(t, repo)
+	url := budgetServer(t, h, repo)
+	work := budgetClone(t, url)
+	empty := t.TempDir()
+	nulGit(t, repo, nil, "config", "core.hooksPath", empty)
+
+	bomb := pushBomb(t, work)
+	if out, err := gitPush(t, work, url, bomb+":refs/heads/b1"); err == nil || !strings.Contains(out, "remote: spine: push refused") {
+		t.Fatalf("core.hooksPath in the repository config bypassed the hook: %v\n%s", err, out)
+	}
+
+	hookPath := filepath.Join(repo, "hooks", "pre-receive")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\n"+budgetHookMarker+"\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := gitPush(t, work, url, bomb+":refs/heads/b2"); err == nil || !strings.Contains(out, "remote: spine: push refused") {
+		t.Fatalf("an edited Spine hook was not rewritten: %v\n%s", err, out)
+	}
+	if err := os.Remove(hookPath); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := gitPush(t, work, url, bomb+":refs/heads/b3"); err == nil || !strings.Contains(out, "remote: spine: push refused") {
+		t.Fatalf("a deleted hook was not reinstalled: %v\n%s", err, out)
+	}
+
+	foreign := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(hookPath, foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := gitPush(t, work, url, "HEAD:refs/heads/b4"); err == nil {
+		t.Fatalf("a push went through with a foreign pre-receive hook in place:\n%s", out)
+	}
+	if got, _ := os.ReadFile(hookPath); !bytes.Equal(got, foreign) {
+		t.Fatal("a foreign pre-receive hook was replaced")
+	}
+	for _, ref := range []string{"b1", "b2", "b3", "b4"} {
+		if nulRefExists(t, repo, "refs/heads/"+ref) {
+			t.Errorf("%s was created", ref)
+		}
+	}
+}
+
+// TestBudgetHook_ScriptQuoting: the script is one exec line whose words
+// are single-quoted; a word holding a newline is refused.
+func TestBudgetHook_ScriptQuoting(t *testing.T) {
+	b := budgetHook{argv: []string{"/opt/it's here/spine", "git-hook", "pre-receive"}, budget: git.DefaultTreeBudget(), timeout: 30e9}
+	s, err := b.script()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s, `exec '/opt/it'\''s here/spine' 'git-hook' 'pre-receive' '--max-entries=200000'`) || !strings.Contains(s, "'--timeout=30s'") ||
+		!strings.Contains(s, "\nexport "+HookProcessEnv+"\n") {
+		t.Fatalf("script:\n%s", s)
+	}
+	b.argv = []string{"/bin/spine\nrm -rf /"}
+	if _, err := b.script(); err == nil {
+		t.Fatal("a newline in the command was accepted")
+	}
+	if got := hooksPathEnv("/r/it's!/hooks"); got != `GIT_CONFIG_PARAMETERS='core.hooksPath=/r/it'\''s'\!'/hooks'` {
+		t.Fatalf("hooksPathEnv = %s", got)
+	}
+}
+
+// TestBudgetHook_ProcessEntryRefusesMisuse: a process started with
+// HookProcessEnv but without the script's argv (or outside git) refuses
+// instead of running as anything else.
+func TestBudgetHook_ProcessEntryRefusesMisuse(t *testing.T) {
+	var stderr bytes.Buffer
+	t.Setenv("GIT_DIR", "")
+	if code := runHookProcess([]string{"git-hook", "pre-receive"}, strings.NewReader(""), &stderr); code != 2 {
+		t.Fatalf("outside git: exit %d", code)
+	}
+	t.Setenv("GIT_DIR", ".")
+	if code := runHookProcess([]string{"-test.run=."}, strings.NewReader(""), &stderr); code != 2 {
+		t.Fatalf("wrong argv: exit %d", code)
+	}
+	if !strings.Contains(stderr.String(), HookProcessEnv) {
+		t.Fatalf("stderr: %s", stderr.String())
+	}
+}
+
+func objectExists(t *testing.T, repo, oid string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "-C", repo, "cat-file", "-e", oid)
+	cmd.Env = nulGitEnv(t)
+	return cmd.Run() == nil
+}

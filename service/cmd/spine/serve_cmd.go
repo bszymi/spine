@@ -72,6 +72,13 @@ func serveCmd() *cobra.Command {
 				log.Warn(smpAdminWarning, "env", runtimeEnv)
 			}
 
+			// The git checkout budget and mutate deadline (INIT-024
+			// TASK-003): the process default of every git client below,
+			// installed before any is built or used.
+			if err := installCheckoutLimits(log); err != nil {
+				return err
+			}
+
 			codeRepoBase, err := loadCodeRepoBase(runtimeEnv)
 			if err != nil {
 				return err

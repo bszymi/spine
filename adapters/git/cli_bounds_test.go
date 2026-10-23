@@ -725,8 +725,9 @@ func TestEveryOpHasAnOutputClass(t *testing.T) {
 	want := map[string]string{
 		"read_file": "read", "list_files": "read", "log": "read", "head": "read", "ref-sha": "read",
 		"rev-parse": "read", "merge-base": "read", "tree_entry": "read",
-		"diff":     "diff",
-		"checkout": "mutate", "merge": "mutate", "commit": "mutate", "add": "mutate", "branch": "mutate",
+		"measure_tree": "read", // INIT-024 TASK-003: the checkout budget's reads
+		"diff":         "diff",
+		"checkout":     "mutate", "merge": "mutate", "commit": "mutate", "add": "mutate", "branch": "mutate",
 		"config": "mutate", "push": "mutate",
 	}
 	if got := git.OpClassesForTest(); !reflect.DeepEqual(got, want) {

@@ -96,7 +96,17 @@ type runOpts struct {
 // and the read-only commands here parse the commit being merged, which the
 // merge itself then reads without an allocation limit (KNOWN-LIMITATIONS,
 // "Git read bounds").
+//
+// Every command it runs is local, and several materialise the working
+// tree (`read-tree -m -u`, `read-tree --reset -u`, `reset --hard`,
+// `switch`, `merge --abort`), so all of them run under the client's
+// mutate deadline (INIT-024 TASK-003, WithMutateTimeout); none when the
+// client has none.
 func (c *CLIClient) runWith(ctx context.Context, op string, o runOpts, args ...string) (string, string, error) {
+	parent := ctx
+	deadline := c.CheckoutLimits().MutateTimeout
+	ctx, cancelDeadline := withMutateDeadline(ctx, deadline)
+	defer cancelDeadline()
 	cmd := newGitCmd(ctx, args...)
 	cmd.Dir = c.repoPath
 	env := append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
@@ -112,6 +122,9 @@ func (c *CLIClient) runWith(ctx context.Context, op string, o runOpts, args ...s
 	cmd.Stderr = stderr
 	err := cmd.Run()
 	errText := stderr.String()
+	if err != nil && mutateDeadlineHit(parent, ctx, deadline) {
+		return stdout.String(), errText, mutateTimeout(op, deadline, err)
+	}
 	if stdout.overflow {
 		return "", errText, &GitError{Kind: ErrKindPermanent, Op: op, Message: "output exceeds read limit",
 			Err: &OutputTooLargeError{Op: op, Limit: limit}}
@@ -489,6 +502,12 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 	if err := c.verifyCommitOID(ctx, "merge", "source sha", opts.SourceSHA); err != nil {
 		return MergeResult{}, err
 	}
+	// The checkout budget (INIT-024 TASK-003): the bound commit's tree
+	// and the target's, before the switch — over it, nothing is switched
+	// or merged and the target does not move. No budget: no process.
+	if err := c.checkMergeTrees(ctx, opts.Target, target, opts.SourceSHA); err != nil {
+		return MergeResult{}, err
+	}
 	var base string
 	if target != "" {
 		if err := c.switchTo(ctx, target); err != nil {
@@ -612,6 +631,15 @@ func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string
 	attached, err := c.headIsBranch(ctx, op, full)
 	if err != nil {
 		return err
+	}
+	// The checkout budget (INIT-024 TASK-003): when the tree will follow
+	// the ref, `to`'s tree is measured before the ref moves, so a refusal
+	// leaves the branch, index and tree as they are (and the take-back
+	// pending). No budget: no process.
+	if attached && to != expected {
+		if err := c.checkTrees(ctx, op, to); err != nil {
+			return err
+		}
 	}
 	if _, _, err := c.runWith(ctx, op, runOpts{},
 		"update-ref", "-m", "spine: take back a refused bound merge", "--end-of-options", full, to, expected); err != nil {

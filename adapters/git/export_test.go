@@ -127,3 +127,29 @@ func StdoutSinkForTest(p []byte, chunk int, limit int64, failing, text bool) Sin
 	}
 	return r
 }
+
+// SetMeasureHookForTest installs the checkout-budget measure hook
+// (INIT-024 TASK-003): it is called once per measure with the listing
+// bytes git handed the parser and the totals when it stopped.
+func (c *CLIClient) SetMeasureHookForTest(hook func(MeasureTrace)) {
+	c.measureHook = hook
+}
+
+// ResetDefaultCheckoutLimitsForTest clears the process default
+// (SetDefaultCheckoutLimits).
+func ResetDefaultCheckoutLimitsForTest() {
+	processCheckoutLimits.Store(nil)
+}
+
+// AttributeExpansionForTest is the worst-case checkout expansion factor
+// of a .gitattributes text, for object ids of hexLen hex digits.
+func AttributeExpansionForTest(text string, hexLen int) float64 {
+	return attributeClasses([]byte(text)).factor(hexLen)
+}
+
+// ReadTreeForTest runs ResetBranch's two-tree switch (`read-tree -m -u
+// from to`) through runWith, under the client's mutate deadline.
+func (c *CLIClient) ReadTreeForTest(ctx context.Context, from, to string) error {
+	_, _, err := c.runWith(ctx, "reset_branch", runOpts{}, "read-tree", "-m", "-u", "--end-of-options", from, to)
+	return err
+}
