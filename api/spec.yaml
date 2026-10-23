@@ -1759,6 +1759,17 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/StepExecution'
+        evidence:
+          type: object
+          description: |
+            Per-repository execution-evidence summary
+            (architecture/execution-evidence.md §6.4); absent for planning
+            runs and when no evidence querier is wired. Each
+            `repositories[]` entry carries `source_ref` (the ref it was read
+            from) and `verified` (INIT-024 TASK-007): `false` marks a record
+            read from the author-writable run branch, not a server record.
+            `unverified_repositories` lists those repositories; `status`
+            still rolls them up.
         step_output_evidence:
           type: array
           description: |

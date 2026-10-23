@@ -114,7 +114,25 @@ Service accounts provide identity for non-human actors but do not grant addition
 |-------------|-----------------|---------|
 | CLI | Per-invocation (stateless) or cached token | Token re-read on each invocation |
 | API | Per-request (stateless) | No session state; token on each request |
+| Event stream (SSE) | Until disconnect, re-validated on every heartbeat | Bearer re-checked every 30 s; the stream closes when it fails |
 | GUI | Time-limited session with refresh | Session expires after inactivity timeout |
+
+**Long-lived streams (INIT-024 TASK-007, review finding N-14).** `GET /api/v1/events/stream` is the
+one request that outlives its authentication. On every heartbeat (30 s) it re-runs the connect-time
+checks against the stream's own bearer — token revocation, expiry, actor status and the
+`events.read` permission, through the auth service that validated it (the workspace's own in
+shared mode) — and closes with a final `: reauthentication required` comment frame when any of them
+fails, or when the check itself cannot complete (fail closed). The client's reconnect then meets
+the normal `401`. Revocation therefore takes effect on an open stream within one heartbeat
+interval; events broadcast inside that window are still delivered.
+
+**Pre-authentication work in shared mode (N-15).** A workspace's ServiceSet (database pool,
+bootstrap admin, subscription-secret sweep) is built only for a request that carries a well-formed
+bearer, because that bearer can only be validated against the workspace's own token store. Until it
+is validated, every refusal — missing or malformed header, unresolved, inactive or unbuildable
+workspace, missing auth service, unknown, expired or revoked token, suspended actor, token-store
+error — is one `401` with one body, on `/api/v1` and on `/git`, so a caller cannot tell an existing
+workspace from a missing one by status or message. The cause is logged server-side.
 
 ---
 
@@ -319,6 +337,13 @@ Actor responses are untrusted input. The system must:
 - Validate that any artifacts produced conform to the artifact schema
 - Not execute arbitrary code provided by actors
 - Not trust actor-provided metadata for authorization decisions
+- Not present actor-written records as server records. Execution evidence is the case in point
+  (INIT-024 TASK-007, review finding N-17): `run.status` reads an active run's evidence from its run
+  branch, which the run's author can push anything to, so every repository entry carries the ref it
+  was read from (`source_ref`) and `verified`, true only for the authoritative branch (which only
+  a governed merge or an operator override writes), and the summary lists `unverified_repositories`;
+  `spine run inspect` prints an `UNVERIFIED` marker. The governed merge never reads this display
+  path ([execution-evidence.md](/architecture/execution-evidence.md) §6.4.5).
 
 ---
 

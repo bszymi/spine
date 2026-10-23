@@ -240,7 +240,7 @@ The committed default is **YAML** to match the rest of `/.spine/` and the artifa
 Operators and external integrations read evidence via the gateway's run inspect path:
 
 - **Endpoint**: `GET /api/v1/runs/{run_id}` — returns the existing run state plus an `evidence` block whose schema lives in [`internal/evidence`](../internal/evidence/).
-- **Output shape**: `evidence.RunSummary` carries the run-level rollup status (`missing`/`failed`/`pending`/`passed`/`unknown`) plus a deterministic per-repository list. Each `RepositorySummary` exposes `present`, `status`, `branch_name`, `base_commit`, `head_commit`, `actor`, `generated_at`, `policies`, `changed_paths`, and the projected check rows. Required-check rollups (`failing_checks`, `pending_checks`, `missing_checks`) are surfaced as flat string slices so dashboards can pin a known check ID without iterating row lists.
+- **Output shape**: `evidence.RunSummary` carries the run-level rollup status (`missing`/`failed`/`pending`/`passed`/`unknown`) plus a deterministic per-repository list. Each `RepositorySummary` exposes `present`, `status`, `branch_name`, `base_commit`, `head_commit`, `actor`, `generated_at`, `policies`, `changed_paths`, the projected check rows, and its provenance: `source_ref` and `verified` (§6.4.5; the summary adds `unverified_repositories`). Required-check rollups (`failing_checks`, `pending_checks`, `missing_checks`) are surfaced as flat string slices so dashboards can pin a known check ID without iterating row lists.
 - **Grouping**: the response is grouped by `repository_id` (lexically sorted) per EPIC-006 TASK-005 AC #2.
 - **Logs are referenced, not embedded**: `CheckSummary.evidence_uri` carries the producer's pointer to detailed logs; the response shape has no `stdout`/`stderr`/`output`/`logs` field. A wire-format test pins this contract (`internal/gateway/handlers_run_evidence_test.go`).
 - **Missing-evidence visibility**: a repo with no committed evidence appears as `present: false` with a human-readable `reason`. The aggregate `RunSummary.status` is `missing` whenever ANY affected repo lacks evidence — operators see the gap before publication (TASK-005 AC #4).
@@ -272,6 +272,27 @@ The gateway run-status handler treats evidence loading as best-effort: a non-nil
 #### 6.4.4 Identity Cross-Check
 
 The loader rejects an evidence file whose stored `run_id` / `repository_id` does not match the requested keys. A typo in producer-side path construction (writing to `.spine/runs/<wrong-id>/...`) would otherwise produce a summary that names the requested run while reporting checks from a different run; the cross-check surfaces the producer bug rather than masking it.
+
+#### 6.4.5 Provenance: Verified and Unverified Evidence
+
+The run branch is author-writable: anyone who can push the run branch can write a schema-valid
+`.spine/runs/<run_id>/evidence/<repository_id>.yaml` whose every check says `passed`. The query
+layer keeps reading it — operators rely on in-flight evidence for active and partially-merged runs —
+but never presents it as a server record (INIT-024 TASK-007, review finding N-17):
+
+- `RepositorySummary.source_ref` is the ref the record was read from, chosen by the reader
+  (`RefsForRun`), never taken from the file (unlike `branch_name`, which is the record's own claim).
+- `RepositorySummary.verified` is `true` only when that ref is the authoritative branch the querier
+  is configured with (`main`) and is not the run's own branch; it is `false` for run-branch
+  evidence, and serialized either way so the marker is explicit. "Verified" means the record passed
+  the run's governed merge, not that the server produced or signed it.
+- `RunSummary.unverified_repositories` lists the present-but-unverified repositories. The `status`
+  rollup still counts them, so a `passed` headline with a non-empty list is partly the author's
+  claim.
+- `spine run inspect` prints `UNVERIFIED (read from <ref>, author-writable)` beside each such
+  repository and says how many repositories the headline covers.
+
+The fields are additive. Nothing that gates a merge reads this summary.
 
 ---
 

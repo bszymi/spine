@@ -828,11 +828,13 @@ The following limitations have been resolved:
 ### Auth Bypass in Dev Mode
 - **No auth service:** when `SPINE_DATABASE_URL` is not set the auth service is nil, and the auth
   middleware answers 503 (fail closed) — no bypass. Production deployments MUST configure a
-  database and auth.
+  database and auth. In shared mode a workspace whose ServiceSet has no auth service answers the
+  uniform `401` instead, with the cause logged (INIT-024 TASK-007; see "Session and Auth Hygiene").
 - **`SPINE_DEV_MODE` (API only).** `1`/`true` lets unauthenticated requests through `authorize()`
   on `/api/v1`. It is refused at startup only when `SPINE_ENV=production`, so it is accepted with
-  `SPINE_ENV` unset or `staging` (INIT-023 TASK-015 owner question 5: unchanged, pending the
-  owner). Since INIT-023 TASK-015 it has **no effect on `/git`**; it used to drop git
+  `SPINE_ENV=staging` (INIT-023 TASK-015 owner question 5: unchanged, pending the owner). An unset
+  or unknown `SPINE_ENV` no longer reaches this check: `spine serve` refuses to start without a
+  known value (INIT-024 TASK-007). Since INIT-023 TASK-015 it has **no effect on `/git`**; it used to drop git
   authentication for clone and push.
 - **`SPINE_GIT_HTTP_DEV_NO_AUTH` (git reads only).** `1`/`true`/`yes`/`on` lets every client clone
   and fetch over `/git` without a bearer. `spine serve` refuses to start with it unless
@@ -866,6 +868,39 @@ The following limitations have been resolved:
   arrive. Such IDs can come only from a workflow whose identifiers break the identifier rule, which
   the standalone API refuses (`workflow-definition-format.md` §3.6) but a git push or a governed
   merge can still land, and core validation (shared with embedders) does not apply.
+
+### Session and Auth Hygiene (INIT-024 TASK-007)
+- **SSE revalidation window (N-14).** An open `/api/v1/events/stream` re-validates its bearer —
+  revocation, expiry, actor status and the `events.read` permission — on every heartbeat, 30 s
+  (owner question 1 default, pending the owner), and closes on failure. Events broadcast between
+  the revocation and the next heartbeat are still delivered: the window is at most one interval.
+  A token-store error or timeout during the check closes the stream too (fail closed); the client
+  reconnects. Proactive close through an event bus is out of scope.
+- **Pre-authentication builds (N-15).** In shared mode a request without a well-formed bearer never
+  builds a workspace's ServiceSet, and every refusal before the bearer is validated is the same
+  `401`. A well-formed but invalid bearer still builds a cold workspace's services (database pool,
+  bootstrap admin, secret sweep): the bearer can only be checked against that workspace's own
+  token store. Such builds are bounded by the per-IP rate limiter and the pool's idle eviction.
+  Response *timing* still differs between a missing workspace (no build, no query) and an existing
+  one; the refusals are not constant-time.
+- **Shared mode answers `401` for an unbuildable workspace (N-15).** A caller whose workspace's
+  services fail to build, or whose token store errors, gets the uniform `401` — even with a token
+  that is valid there — where it used to get `500`/`503`. The cause is logged at `Warn`/`Error`
+  with the workspace id; operators read outages from the logs, not from client status codes.
+- **Not closed here: the push-disabled `403`.** With `SPINE_GIT_RECEIVE_PACK_ENABLED` off, an
+  unauthenticated push to an existing workspace answers the operator-guidance `403` and one to a
+  missing workspace the uniform `401` (INIT-008 EPIC-004 TASK-031, by design). No ServiceSet is
+  built on that path.
+- **"Verified" evidence (N-17).** `run.status` marks each repository's evidence `verified: true`
+  only when it was read from the authoritative branch, and `false` with the run branch as
+  `source_ref` otherwise; `unverified_repositories` lists the latter. "Verified" means the record
+  passed the run's governed merge, not that the server produced or signed it: a run's own evidence
+  directory is excused from the governance-path approval ("Governance-Path Guard" above), so its content
+  is still the producer's, reviewed with the run. The merge gate never read this display path.
+- **`SPINE_ENV` is required (N-16).** `spine serve` and `spine secrets reencrypt` refuse to start
+  unless it is `production`, `staging` or `development` (owner question 2 default: refuse rather
+  than treat unset as production, pending the owner). `staging` and `development` still turn every
+  production gate off; choosing them is now explicit, not a fallback.
 
 ### Code Repositories Authenticate Only With `credentials_ref`
 - Since INIT-023 TASK-015 a code repository with no `credentials_ref` clones and pushes with no

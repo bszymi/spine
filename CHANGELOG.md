@@ -6,6 +6,64 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-003 TASK-007: session and auth hygiene)
+
+Closes review findings N-14, N-15, N-16 and N-17 (all P3, standalone `spine serve`). No runtime
+schema change. SMP embeds none of the changed server packages; `core/evidence` gains additive
+fields only.
+
+### Security
+
+- **Open event streams re-validate their bearer (N-14).** `GET /api/v1/events/stream` checked the
+  bearer once, at connect, so a stream kept delivering a workspace's events after its token was
+  revoked or expired, its actor suspended, or its `events.read` role lost. Every heartbeat (30 s)
+  now re-runs those checks against the stream's own bearer and closes the stream with a
+  `: reauthentication required` comment frame when one fails — or when the check cannot complete
+  (fail closed). The reconnect gets the normal `401`.
+- **No workspace is built for an unauthenticated request (N-15).** In shared mode
+  (`WORKSPACE_RESOLVER=db` or `platform-binding`) the workspace middleware built the workspace's
+  ServiceSet — database pool, bootstrap admin, secret sweep — before the bearer was looked at, and a
+  build failure answered `500` where a missing workspace answered `401`. The ServiceSet is now built
+  only for a request with a well-formed bearer (it is needed to validate it), and every refusal
+  before the bearer is validated — missing or malformed header, unresolved, inactive or unbuildable
+  workspace, missing auth service, unknown, expired or revoked token, suspended actor, token-store
+  error — is one `401` with one body. The same holds on `/git` in shared mode, where a build failure
+  or a missing auth service answered `503` and a token-store error `500`. Causes are logged.
+- **`SPINE_ENV` is required (N-16).** `spine serve` and `spine secrets reencrypt` refuse to start
+  unless `SPINE_ENV` is `production`, `staging` or `development` (case and surrounding whitespace
+  ignored). An unset or mistyped value used to run every production gate — secret key required,
+  `SPINE_CODE_REPO_BASE` required, weak `SMP_ADMIN_TOKEN` refused, `SPINE_DEV_MODE` refused — on its
+  lenient branch.
+- **Run-branch evidence is labelled unverified (N-17).** `run.status` showed evidence read from the
+  author-writable run branch as fact. Each repository entry now says where it was read from and
+  whether that is the authoritative branch, and `spine run inspect` marks the rest `UNVERIFIED`.
+
+### Changed (standalone)
+
+- **Boot:** `SPINE_ENV` must be set. The shipped `docker-compose.yaml` sets
+  `SPINE_ENV=development`; set your deployment's value explicitly (owner question 2 default:
+  refuse rather than treat unset as production, pending the owner).
+- **Wire, shared mode:** pre-authentication `401`s on `/api/v1` are all `authentication required`
+  (they used to carry `authorization header required`, `invalid authorization header format`,
+  `invalid token`, `token expired`, `token revoked` or `actor suspended`). A caller whose workspace
+  cannot be built, or whose token store errors, gets that `401` instead of `500`/`503`. Single
+  mode is unchanged.
+- **Wire, `run.status`:** each `evidence.repositories[]` entry gains `source_ref` and `verified`
+  (always serialized), and `evidence` gains `unverified_repositories` (omitted when empty).
+- **SSE:** a stream whose bearer stops validating closes at the next heartbeat; clients reconnect.
+
+### Changed (embedders)
+
+- `evidence.RepositorySummary` gains `SourceRef string` (`source_ref,omitempty`) and `Verified bool`
+  (`verified`, always serialized); `evidence.RunSummary` gains `UnverifiedRepositories []string`
+  (`unverified_repositories,omitempty`). `Querier.SummarizeForRun` marks a record verified only when
+  it was read from its authoritative branch (`main`, or `WithPrimaryBranch`) and that is not the
+  run's own branch; `BuildSummary` does the same against `main`, so a direct caller passing `HEAD`
+  gets unverified records. Ref selection, `Status` and every other field are unchanged. SMP does not
+  import `core/evidence`.
+
+---
+
 ## INIT-023 — Security Audit Remediation: wave 4 follow-up
 
 Fixes found after the wave 4 integration (a TASK-003 residual SMP INIT-027/EPIC-004/TASK-008 measured
