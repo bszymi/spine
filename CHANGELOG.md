@@ -28,7 +28,9 @@ fields only.
   before the bearer is validated — missing or malformed header, unresolved, inactive or unbuildable
   workspace, missing auth service, unknown, expired or revoked token, suspended actor, token-store
   error — is one `401` with one body. The same holds on `/git` in shared mode, where a build failure
-  or a missing auth service answered `503` and a token-store error `500`. Causes are logged.
+  or a missing auth service answered `503` and a token-store error `500`. Causes are logged at
+  `Warn`/`Error`; a connection-string parse error, whose text can quote the workspace database's
+  password, is logged as withheld.
 - **`SPINE_ENV` is required (N-16).** `spine serve` and `spine secrets reencrypt` refuse to start
   unless `SPINE_ENV` is `production`, `staging` or `development` (case and surrounding whitespace
   ignored). An unset or mistyped value used to run every production gate — secret key required,

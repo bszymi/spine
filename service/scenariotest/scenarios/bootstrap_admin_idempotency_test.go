@@ -697,9 +697,11 @@ func setupPooledBootstrapAdminEnv(initialToken string) scenarioEngine.Step {
 // auth-protected /api/v1/system/metrics endpoint with both an
 // X-Workspace-ID header and a Bearer token. A 200 here proves the
 // entire chain succeeded: workspaceMiddleware resolved the workspace,
-// servicePool.Get triggered the builder, the builder bootstrapped
-// smp-admin into ss.Store, and authMiddleware validated the bearer
-// against ss.Auth (the per-workspace auth.Service the pool installed).
+// authMiddleware saw a well-formed bearer and called servicePool.Get
+// (INIT-024 TASK-007: never before), which triggered the builder, the
+// builder bootstrapped smp-admin into ss.Store, and authMiddleware
+// validated the bearer against ss.Auth (the per-workspace auth.Service
+// the pool installed).
 //
 // Compared to driveAuthenticatedRequestExpectingOK in the direct
 // scenario, this helper sets the X-Workspace-ID header — without it,
@@ -796,8 +798,9 @@ func drivePooledAuthenticatedRequestExpectingUnauthorized(bearer, phase string) 
 // pool.Evict is a no-op when refCount > 0 (the entry is just marked
 // evicting and freed on the last Release). The previous step's
 // http.DefaultClient.Do blocks until the response is read, so by the
-// time control returns here, workspaceMiddleware's deferred release
-// has fired and refCount is 0 — Evict frees the entry immediately.
+// time control returns here, authMiddleware's deferred release (it
+// took the reference since INIT-024 TASK-007) has fired and refCount is
+// 0 — Evict frees the entry immediately.
 func resetPooledLogBufAndEvictWorkspace() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "reset-log-buf-and-evict-pooled-workspace",

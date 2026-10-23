@@ -172,7 +172,7 @@ Neither undoes a plant that a `migrate` sweep already converted: that row is a v
 
 ### Runbooks
 
-Every `spine secrets reencrypt` run below uses the same `SPINE_SECRET_ENCRYPTION_KEY`, `SPINE_SECRET_PREVIOUS_KEYS` and **`SPINE_SECRET_ENVELOPE_MODE`** as `spine serve`, and in file mode the same **`SPINE_WORKSPACE_ID`** (the command refuses to run with the mode unset, or in file mode with the workspace id unset and no `--workspace`).
+Every `spine secrets reencrypt` run below uses the same `SPINE_SECRET_ENCRYPTION_KEY`, `SPINE_SECRET_PREVIOUS_KEYS`, **`SPINE_SECRET_ENVELOPE_MODE`** and **`SPINE_ENV`** as `spine serve`, and in file mode the same **`SPINE_WORKSPACE_ID`** (the command refuses to run with the mode or `SPINE_ENV` unset, or in file mode with the workspace id unset and no `--workspace`).
 
 **Verifying every workspace** (used by the steps below). Verify only once the rollout of the change being verified has **completed** — no process with the previous setting remains. While processes with the old and new setting overlap, an old-setting process that first loads a workspace after a new-setting process swept it sweeps it back: to `enc:v1` (a `downgrade` process during the switch to `migrate`), to the old primary key (a step-2 process during a key promotion), or to `enc:v2` (a `migrate` process during a rollback's switch to `downgrade`). Nothing fails while both settings run, but nothing sweeps that workspace again until some process rebuilds it.
 

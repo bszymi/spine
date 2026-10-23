@@ -533,7 +533,7 @@ func (s *Server) validatePooledGitAuth(r *http.Request, workspaceID, token strin
 	ss, err := s.servicePool.Get(r.Context(), workspaceID)
 	if err != nil {
 		log.Warn("workspace services could not be built for a git request that is not yet authenticated; answering the uniform 401",
-			"workspace_id", workspaceID, "error", err)
+			"workspace_id", workspaceID, "error", describePreauthErr(err))
 		return nil, uniform
 	}
 	defer s.servicePool.Release(workspaceID)
@@ -547,7 +547,7 @@ func (s *Server) validatePooledGitAuth(r *http.Request, workspaceID, token strin
 		var se *domain.SpineError
 		if !errors.As(err, &se) || se.Code != domain.ErrUnauthorized {
 			log.Warn("git bearer validation failed on the workspace token store; answering the uniform 401",
-				"workspace_id", workspaceID, "error", err)
+				"workspace_id", workspaceID, "error", describePreauthErr(err))
 		}
 		return nil, uniform
 	}

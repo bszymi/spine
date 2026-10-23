@@ -21,6 +21,7 @@ spine init-repo my-project
 # Start the runtime server (requires PostgreSQL)
 export SPINE_DATABASE_URL=postgres://localhost:5432/spine?sslmode=disable
 export SPINE_INSECURE_LOCAL=1   # acknowledges sslmode=disable for local use
+export SPINE_ENV=development    # required: production, staging or development
 spine migrate
 spine serve
 

@@ -9,11 +9,15 @@ package gateway_test
 // well-formed bearer never reaches servicePool.Get.
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,6 +29,7 @@ import (
 	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/service/internal/workspace"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // countingResolver is a workspace.Resolver over a fixed table. The pool's
@@ -91,6 +96,7 @@ const (
 	wsFlaky    = "ws-flaky"    // build fails until the test repairs it
 	wsNoAuth   = "ws-noauth"   // builds, but with no auth service
 	wsStoreErr = "ws-storeerr" // builds; every token lookup errors
+	wsBadDSN   = "ws-baddsn"   // the build fails on a connection string carrying a password
 	wsMissing  = "ws-missing"  // not in the registry
 	wsInactive = "ws-inactive" // in the registry, inactive
 )
@@ -127,7 +133,7 @@ func newPreauthEnv(t *testing.T) *preauthEnv {
 
 	table := func() *countingResolver {
 		known := map[string]workspace.Config{}
-		for _, id := range []string{wsOK, wsBroken, wsFlaky, wsNoAuth, wsStoreErr} {
+		for _, id := range []string{wsOK, wsBroken, wsFlaky, wsNoAuth, wsStoreErr, wsBadDSN} {
 			known[id] = workspace.Config{ID: id, RepoPath: t.TempDir(), Status: workspace.StatusActive}
 		}
 		return &countingResolver{
@@ -145,6 +151,12 @@ func newPreauthEnv(t *testing.T) *preauthEnv {
 			env.builds.Add(1)
 			if _, bad := env.broken.Load(ss.Config.ID); bad {
 				return errors.New("connect to workspace database: connection refused")
+			}
+			if ss.Config.ID == wsBadDSN {
+				// The real parse error buildServiceSet wraps: pgconn quotes
+				// the connection string, query-parameter password included.
+				_, perr := pgconn.ParseConfig(badDSN)
+				return fmt.Errorf("connect to workspace database: parse database URL: %w", perr)
 			}
 			switch ss.Config.ID {
 			case wsNoAuth:
@@ -353,3 +365,64 @@ func TestGitAuth_SharedModeNoPreAuthOracle(t *testing.T) {
 }
 
 var _ store.Store = tokenStoreErrStore{}
+
+// badDSN is a workspace connection string whose password pgconn's parse
+// error repeats verbatim.
+const badDSN = "postgres://u@127.0.0.1:1/db?password=TOPSECRET-N15&connect_timeout=no"
+
+// syncBuffer is an io.Writer safe for the handler goroutines' log writes.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// The pre-authentication Warn that replaced the 500 (adversarial review):
+// it is written for a caller nobody authenticated, so it logs the cause of
+// a build failure but withholds a connection-string parse error, whose text
+// carries the workspace database's password.
+func TestPreauthLog_WithholdsConnectionString(t *testing.T) {
+	if _, err := pgconn.ParseConfig(badDSN); err == nil || !strings.Contains(err.Error(), "TOPSECRET-N15") {
+		t.Fatalf("precondition: pgconn's parse error no longer repeats the password (%v); the test would be vacuous", err)
+	}
+	buf := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	env := newPreauthEnv(t)
+	for _, path := range []string{"/api/v1/system/metrics", "/git/" + wsBadDSN + "/info/refs?service=git-upload-pack"} {
+		ws := wsBadDSN
+		if strings.HasPrefix(path, "/git/") {
+			ws = ""
+		}
+		if got := env.do(t, path, ws, "Bearer junk-token-0123456789"); got.status != http.StatusUnauthorized {
+			t.Fatalf("%s: status %d, want the uniform 401", path, got.status)
+		}
+	}
+	out := buf.String()
+	if strings.Contains(out, "TOPSECRET-N15") {
+		t.Fatalf("a pre-authentication log line carries the workspace database password:\n%s", out)
+	}
+	if n := strings.Count(out, "details withheld"); n < 2 {
+		t.Fatalf("want the withheld-cause Warn on both the API and the git path, got %d:\n%s", n, out)
+	}
+	// Other causes are still logged as they are.
+	if got := env.do(t, "/api/v1/system/metrics", wsBroken, "Bearer junk-token-0123456789"); got.status != http.StatusUnauthorized {
+		t.Fatalf("ws-broken: %d", got.status)
+	}
+	if !strings.Contains(buf.String(), "connection refused") {
+		t.Errorf("a non-credential build error should be logged as is:\n%s", buf.String())
+	}
+}

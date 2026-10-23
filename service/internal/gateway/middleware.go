@@ -15,6 +15,7 @@ import (
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/service/internal/workspace"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Context keys are empty structs so they collide only with themselves and
@@ -158,6 +159,24 @@ const uniformUnauthorizedMessage = "authentication required"
 // auth service, or whether its token was unknown, expired or revoked.
 func writeUniformUnauthorized(w http.ResponseWriter) {
 	WriteError(w, domain.NewError(domain.ErrUnauthorized, uniformUnauthorizedMessage))
+}
+
+// describePreauthErr renders a pre-authentication failure for the server
+// log (authenticatePooled, validatePooledGitAuth). These lines are written
+// for requests nobody has authenticated, so they must not carry what the
+// caller may not see: a ServiceSet build error can wrap pgconn's
+// ParseConfigError, whose text quotes the workspace's connection string —
+// with a password given as a query parameter, which pgconn does not
+// redact. Such an error is withheld, as `spine secrets reencrypt` does
+// (describeDBError); every other build or token-store error (connect and
+// ping failures name host, user and database, never a password) is kept,
+// so an outage stays diagnosable.
+func describePreauthErr(err error) string {
+	var parseErr *pgconn.ParseConfigError
+	if errors.As(err, &parseErr) {
+		return "invalid database connection string (details withheld: it may carry credentials)"
+	}
+	return err.Error()
 }
 
 // bearerFromRequest extracts the bearer token from the Authorization header
@@ -344,7 +363,7 @@ func (s *Server) authenticatePooled(w http.ResponseWriter, r *http.Request, next
 	ctx, release, err := s.acquireServiceSet(ctx, cfg.ID)
 	if err != nil {
 		log.Warn("workspace services could not be built for a request that is not yet authenticated; answering the uniform 401",
-			"workspace_id", cfg.ID, "error", err)
+			"workspace_id", cfg.ID, "error", describePreauthErr(err))
 		writeUniformUnauthorized(w)
 		return
 	}
@@ -366,7 +385,7 @@ func (s *Server) authenticatePooled(w http.ResponseWriter, r *http.Request, next
 		var se *domain.SpineError
 		if !errors.As(err, &se) || se.Code != domain.ErrUnauthorized {
 			log.Warn("bearer validation failed on the workspace token store; answering the uniform 401",
-				"workspace_id", cfg.ID, "error", err)
+				"workspace_id", cfg.ID, "error", describePreauthErr(err))
 		}
 		writeUniformUnauthorized(w)
 		return
