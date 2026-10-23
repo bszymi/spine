@@ -51,7 +51,8 @@ var allowed = map[string]bool{
 	"adapters/git/branchwrite.go:removeAddedWorktree":   true,
 	// INIT-024 TASK-003: Clone's Lstat existence check of its own target
 	// (never followed), and the RemoveAll of a clone the checkout budget
-	// refused — the clone directory Clone itself made, or its .git.
+	// refused or whose checkout failed — the clone directory Clone itself
+	// made, or the entries of the empty directory it cloned into.
 	"adapters/git/cli.go:CLIClient.Clone":         true,
 	"adapters/git/cli.go:CLIClient.checkoutClone": true,
 	// MkdirTemp/RemoveAll of the private GIT_INDEX_FILE directory in

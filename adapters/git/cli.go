@@ -634,14 +634,20 @@ func (c *CLIClient) checkoutClone(ctx context.Context, path string, created bool
 	cc := &CLIClient{repoPath: path, maxBlobBytes: c.maxBlobBytes, maxOutputBytes: c.maxOutputBytes,
 		maxGitAllocBytes: c.maxGitAllocBytes, treeBudget: limits.Budget, mutateTimeout: limits.MutateTimeout}
 	// A refused or failed clone is removed: all of it when Clone created
-	// the directory; otherwise its .git (a --no-checkout clone writes
-	// nothing else), so the directory no longer looks like a clone.
+	// the directory; otherwise everything in it — git clones only into an
+	// empty directory, so all of it is the clone's, including whatever a
+	// stopped or failed `reset --hard` had already written (codex round
+	// 2) — so the directory is empty again and a retry can clone into it.
 	// RemoveAll never follows a link inside what it removes.
 	discard := func(err error) error {
 		if created {
 			_ = os.RemoveAll(path)
-		} else {
-			_ = os.RemoveAll(filepath.Join(path, ".git"))
+			return err
+		}
+		if ents, rerr := os.ReadDir(path); rerr == nil {
+			for _, e := range ents {
+				_ = os.RemoveAll(filepath.Join(path, e.Name()))
+			}
 		}
 		return err
 	}

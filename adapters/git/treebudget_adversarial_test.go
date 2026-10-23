@@ -359,3 +359,31 @@ func TestClone_MutateTimeoutBoundsTheCheckout(t *testing.T) {
 		t.Fatalf("the stopped clone was left behind: %v", err)
 	}
 }
+
+// TestClone_FailedCheckoutLeavesTheDirectoryEmpty (codex round 2, P2):
+// cloning into an existing empty directory, a checkout that fails half
+// way — here a required smudge filter that fails on the second file —
+// leaves the directory empty again, not holding the files the reset had
+// already written, so a retry can clone into it.
+func TestClone_FailedCheckoutLeavesTheDirectoryEmpty(t *testing.T) {
+	ctx := context.Background()
+	src := testutil.NewTempRepo(t)
+	testutil.WriteFile(t, src, ".gitattributes", "z.md filter=broken\n")
+	testutil.WriteFile(t, src, "a.md", "first\n")
+	testutil.WriteFile(t, src, "z.md", "last\n")
+	tbGit(t, src, nil, "add", "-A")
+	tbGit(t, src, nil, "commit", "-q", "-m", "files")
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[filter \"broken\"]\n\tsmudge = false\n\tclean = cat\n\trequired = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	dst := t.TempDir()
+	c := git.NewCLIClient("", git.WithTreeBudget(smallBudget))
+	if err := c.Clone(ctx, "file://"+src, dst); err == nil {
+		t.Fatal("a clone whose checkout failed reported success")
+	}
+	if names := dirEntries(t, dst); len(names) != 0 {
+		t.Fatalf("the failed clone left %v in the directory", names)
+	}
+}
