@@ -429,5 +429,7 @@ this commit (notes):
 
 **Codex (round 1 fixes)**: `codex review --base init/INIT-024-scaffold` at `bb2ab597`, review session
 `01a169ea-2396-78c2-ad1b-c66004f228be` (`source: {"subagent":"review"}`, this worktree), model
-`gpt-6.1-sol`: 0 findings, "patch is correct" (confidence 0.90). Pass 2 at the final head is below.
+`gpt-6.1-sol`: 0 findings, "patch is correct" (confidence 0.90). Pass 2 at `f0e61fe4` (after the
+`e1e63acf` test nit and the notes): review session `01a16a30-7c82-7021-babe-5bb2ad3d58f2`,
+`gpt-6.1-sol`, 0 findings, "patch is correct" (confidence 0.89). Status left In Progress.
 
