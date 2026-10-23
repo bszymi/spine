@@ -150,8 +150,8 @@ A policy or admission rejection (every row above except `malformed push`) also i
 
 | HTTP response | Cause |
 |---|---|
-| `401 Unauthorized` with body `authorization required for external git access` | No `Authorization: Bearer <token>` header, and the caller is not inside a trusted CIDR (and trusted CIDRs don't help for push anyway). |
-| `403 Forbidden` with body `git push is disabled — enable via git.receive_pack_enabled (SPINE_GIT_RECEIVE_PACK_ENABLED=true); see ADR-009` | `SPINE_GIT_RECEIVE_PACK_ENABLED` is not set (or not `true`) on the server. |
+| `401 Unauthorized` with body `authorization required for external git access` | The request is not authenticated for the workspace: no `Authorization: Bearer <token>` header, a header that is not a bearer, a malformed, unknown, expired or revoked token, another workspace's token, or a workspace that does not exist or is inactive or unavailable — all give this same answer. Trusted CIDRs never apply to a push. Check the URL's workspace ID and that the token belongs to that workspace. |
+| `403 Forbidden` with body `git push is disabled — enable via git.receive_pack_enabled (SPINE_GIT_RECEIVE_PACK_ENABLED=true); see ADR-009` | `SPINE_GIT_RECEIVE_PACK_ENABLED` is not set (or not `true`) on the server. Only a caller authenticated for the workspace sees this; any other caller gets the `401` above. |
 | `403 Forbidden` with body `unsupported git operation` | Unrecognised request against the git endpoint (neither clone/fetch nor push). |
 | `400 Bad Request` with body `Chunked request bodies are not supported by CGI.` (the client prints `error: RPC failed; HTTP 400`) | The push body was larger than the client's `http.postBuffer` (1 MiB by default), so git sent it chunked, and the server's CGI bridge refuses chunked bodies (`KNOWN-LIMITATIONS.md`). Raise the buffer above the push size (`git config http.postBuffer 157286400`) and push again. |
 

@@ -851,7 +851,14 @@ The following limitations have been resolved:
   (`ws-a=172.28.1.10/32;ws-b=172.28.1.11/32`), and the trust is looked up under the workspace the
   request resolved to. In shared mode (`db`, `platform-binding`) the bare list refuses to start
   (owner question 1 default, pending the owner); in single mode it is bound to the one workspace.
-  Any other workspace, and any workspace that does not resolve, answers the uniform `401`.
+  Any other workspace, and any workspace that does not resolve, answers the uniform `401`. CIDRs
+  bound to different workspaces that overlap are accepted (one runner may serve two workspaces)
+  with a startup warning.
+- A caller without a valid token for the workspace — none, a junk or non-bearer header, an expired
+  or revoked token, another workspace's token — gets that same uniform `401` for every `/git`
+  request, read or push, with push on or off, whatever the workspace's state (INIT-024 TASK-006;
+  with push off the `403` naming `SPINE_GIT_RECEIVE_PACK_ENABLED` is shown only to an
+  authenticated caller).
 - **Residual: the binding is per address, not per job.** A runner address bound to a workspace
   reads that workspace's whole repository — every branch, not only the run branch of the job it is
   executing — and any process or job on that host can do the same. Two tenants that share a runner
@@ -860,10 +867,10 @@ The following limitations have been resolved:
   (TASK-006 owner question 2).
 - **Residual: `SPINE_GIT_HTTP_DEV_NO_AUTH` is not workspace-scoped.** The development flag (accepted
   only with `SPINE_ENV=development`) lets every client read every workspace, in every mode.
-- **Residual: a server without any auth service tells workspaces apart.** Every `401` on `/git` is
-  the uniform one, but a resolved workspace whose process and workspace auth services are both
-  missing still answers `503` "authentication not configured" to a caller presenting a bearer,
-  where a missing workspace answers `401` — a misconfiguration signal kept on purpose for operators.
+- **Residual: a server without any auth service tells workspaces apart.** The one known exception
+  to the uniform `401` above: a resolved workspace whose process and workspace auth services are
+  both missing answers `503` "authentication not configured" to a caller presenting a bearer, where
+  a missing workspace answers `401` — a misconfiguration signal kept on purpose for operators.
 - **Residual: TCP-level proxies are invisible.** A proxy that relays connections without adding a
   header — Docker's userland proxy for a published port, which connects from the bridge gateway
   (`x.y.z.1`), or an L4 load balancer — looks like a direct peer. Never put such an address in
