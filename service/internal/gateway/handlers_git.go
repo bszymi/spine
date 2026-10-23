@@ -519,8 +519,13 @@ func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) (*domai
 //   - an unknown, expired or revoked token or an inactive actor, whose
 //     distinct messages ("invalid token", "token expired", ...) answered
 //     only for a workspace that resolved. (INIT-024 TASK-006 also makes
-//     handleGit answer every /git 401 with the uniform message; the two
-//     compose.)
+//     handleGit answer every /git 401 with the uniform message, which
+//     covers the missing and malformed headers this function refuses
+//     before any build.)
+//
+// There is no fallback to the server-level auth service in shared mode,
+// whatever is configured: a test server that sets one on a pooled server
+// must give the workspaces' ServiceSets their auth instead.
 func (s *Server) validatePooledGitAuth(r *http.Request, workspaceID, token string) (*domain.Actor, error) {
 	log := observe.Logger(r.Context())
 	uniform := domain.NewError(domain.ErrUnauthorized, "authorization required for external git access")
