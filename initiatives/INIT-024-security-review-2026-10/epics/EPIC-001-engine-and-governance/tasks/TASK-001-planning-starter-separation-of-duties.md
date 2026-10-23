@@ -525,6 +525,77 @@ override.
   carry-over (Deviation 3) before round 1. The commit that follows round 2 changes only this
   artifact.
 
+### Review round 1 (independent reviewer at `b1a1548c`; fixes in `8fe04d62`)
+
+Report: `tmp/init027-orchestration/i24/t001-rev/REVIEW.md` (SMP working tree, git-ignored). It found
+no P1 or P2.
+
+- **P3, fixed: the recorded starter was never checked against the step-entry resolver.**
+  - The flaw: an embedder that recorded the wrong identifier (its platform user id instead of
+    the workspace handle) silently reopened N-3. The reviewer's
+    `TestRevPoC_WrongIdentifierSilentlyReopensN3` showed it: the record is `11111111-plat-uuid`, and
+    the same person's handle `starter` claims and accepts, so the run completes and the artifact
+    reaches `main`.
+  - The fix: with `StepEntryPolicy.Actors` installed, `requirePlanningStarter` resolves the
+    context's actor through `entryActor`, which is the bind lookup including its echo check.
+    - An id the resolver does not resolve, or a resolver that answers for another id, is
+      `ErrUnauthorized`.
+    - Any other resolver error keeps its code (`ErrUnavailable` stays 503; untyped errors become
+      `ErrInternal`).
+    - All of this happens before any row, branch, git read or content write.
+    - Without a resolver nothing changes: standalone ids are `auth.actors` rows, the same ones
+      the binds look up.
+    - Without separation of duties the resolver is not consulted.
+  - Regression `TestSoD_PlanningStarterMustResolveThroughEntryResolver` (real git, strict policy;
+    ids `11111111-plat-uuid`, `Starter` and `starter␠`):
+    - Red at the scaffold base and at `b1a1548c`: "N-3 reopened: started as
+      "11111111-plat-uuid" (recorded "11111111-plat-uuid"), the same person's handle "starter"
+      claimed and accepted its own content (accept err=<nil>, run completed, main has the
+      artifact: true)". At the base the record was `""`.
+    - Green after the fix: `ErrUnauthorized`, no run, no content write, no `spine/plan/*` branch.
+    - Logs: `t001/rr1-red-*.log`.
+  - Also `TestSoD_PlanningStarterResolverOutcomes`, run for all three starters: known id,
+    unknown id, an echo mismatch, `ErrUnavailable`, an untyped error, and separation of duties
+    off. Red at both revisions for the four refusal cases.
+  - Docs updated: `StepEntryPolicy.Actors` and `SeparationOfDuties` field docs,
+    `security-model.md`, `KNOWN-LIMITATIONS.md` and `CHANGELOG.md` (embedders).
+- **P3 (SMP-facing): the engine's early 401 surfaces as `CreateEntryError{RunStarted:true}`.**
+  This is SMP code (`artifacts_createentry.go:186-188`), so it is not fixed here. It is recorded
+  as SMP obligation 1: resolve the handle before the call.
+- **P4, fixed: warning text.** The guard-only record-failure WARN now reads "governance guard:
+  the planning run's starter was not recorded; if it is a workflow-lifecycle run, its workflow
+  edit will need an operator approval" (CHANGELOG).
+- **P4, fixed: AC 4 sub-cases.** `TestSoD_ZeroPolicyWritesNoStarter` now covers three
+  configurations, each with all three starters and with and without an actor, and asserts 0
+  commit_meta writes and no record in every case. They pass at the base too, as pins:
+  - the zero value;
+  - the guard on with the lifecycle exemption off (TASK-010's configuration);
+  - a policy with every switch but separation of duties, plus a resolver.
+- **False claim, corrected.** The "SMP impact" section said the refusal was "visible in SMP's
+  tests". It is not. That section now says so, and lists the SMP obligations 1-5 for EPIC-004
+  TASK-012's closing bump.
+- **Gates re-run at `8fe04d62`** (logs in `t001/rr1/`, `t001/rr1-gates.out`, `t001/smp-rr1.out`):
+  - `go vet` plain, `integration` and `scenario` `./...`: rc=0.
+  - `go test -p 4 ./core/... ./service/...`: rc=0.
+  - `go test -race -p 4 ./core/engine/ ./service/scenariotest/engine/`: rc=0.
+  - **Scenario suite** (`t001/scen.sh … rr1full`): 31 failures and 1788 passes, with no top-level
+    or subtest failure outside the base set (`scen-basefull.*`). The `-race` scenario subset is
+    rc=0.
+  - golangci-lint `--new-from-rev 12376b55`, plain, `integration` and `scenario`: 0 issues.
+    gosec on the touched packages: 0. `gofmt -l` on the changed files: clean.
+  - **SMP compatibility** (`../spine` = `8fe04d62`, clean):
+    - `go build ./...` and `go vet` in all four variants: rc=0.
+    - Both migrations applied.
+    - `dev/testgate -race` on `spinecore`, `spineembedded`, `runner` and `executionreadiness`
+      with `TEST_SPINE_DB`, `TEST_PLATFORM_DB` and `TEST_PROVISIONING_DSN`: PASS, 2143 passed and
+      0 failed, with 3 allowed Linux-only `ru_maxrss` skips.
+    - No `ws_*` database was left behind.
+    - SMP calls neither `WithStepEntryPolicy` nor `WithGovernanceGuard`, so the resolver check is
+      unreachable there.
+- **Codex round 3** (at `8fe04d62`): `codex review --base init/INIT-024-scaffold`, run plain. Review
+  sub-session `01a16768-72ba-76b3-a9af-17541e51ef56`, model **gpt-6.1-sol**. Result:
+  `findings: []`, "patch is correct", confidence 0.88. Nothing to fix.
+
 ### Not run
 
 Nothing in the gate list was skipped.
