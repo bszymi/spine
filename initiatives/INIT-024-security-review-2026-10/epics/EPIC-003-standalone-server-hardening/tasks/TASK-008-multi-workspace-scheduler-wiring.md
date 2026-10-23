@@ -2,7 +2,7 @@
 id: TASK-008
 type: Task
 title: "Wire the multi-workspace scheduler into shared-mode spine serve"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
@@ -144,3 +144,205 @@ an operator intervenes. The task is standalone-only.
 - `service/cmd/spine/serve_wiring.go`: this task changes the scheduler block (`:460`); TASK-006
   changes the git-handler config (`:515`). Different blocks.
 - `service/cmd/spine/serve_lifecycle.go` and the scheduler adapters: this task only.
+
+---
+
+## Implementation Notes
+
+Implemented on branch `init/INIT-024-TASK-008-multi-workspace-scheduler-wiring`, cut from
+`init/INIT-024-scaffold` `12376b55` (= Spine local `main` `a560c210` + the INIT-024 artifacts; no code
+difference). Diff base: `git diff init/INIT-024-scaffold...HEAD`. Implementation commit `59a49ca3`;
+this notes commit follows it. Status In Progress; the orchestrator closes it after merge. Not pushed.
+
+### Owner questions (defaults taken, all pending the owner)
+
+- **OQ1** (keep P3-27 here): default — kept, labelled functional (INIT-024 owner question 5).
+- **OQ2** (default concurrency): default — `MaxConcurrentWorkspaces` 4 (the existing default), not
+  scaled with the pool size; operators override it with `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES`.
+- **OQ3** (new; raised by this task): *run startup crash recovery (`RecoverOnStartup`) per workspace
+  in the shared modes?* Default — **no** (out of this task's wiring scope; recorded as a remaining
+  gap in `KNOWN-LIMITATIONS.md`, item 9). Alternative: a `MultiScheduler.RecoverOnStartup` over every
+  listed workspace before `ListenAndServe` (db mode only; `platform-binding` cannot enumerate), with
+  the multi-replica caveat that it resets `assigned` steps a live replica may have just assigned.
+- **OQ4** (new): *an invalid `SPINE_SCHEDULER_*` value* — default: refuse to start, in every mode
+  (no silent fallback; the direction TASK-007 takes for `SPINE_ENV`). Alternative: Warn and keep the
+  default.
+
+### What was built
+
+- **`service/cmd/spine/serve_scheduler.go`** (new; this task only): `multiSchedulerConfigFromEnv`
+  (retry budget `defaultCommitMaxRetries` = 3, `deps.OrphanThreshold`, the two new overrides:
+  `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES` 1–256, `SPINE_SCHEDULER_WORKSPACE_BUDGET` a positive
+  duration; anything else refuses to start); `buildMultiScheduler` (nil without a ServicePool, i.e.
+  single mode; an Info line prints the effective bounds); `schedulerWorkspacePool` (adapts
+  `workspace.ServicePool`; refuses — and releases under the id it was taken under — a set whose
+  `Config.ID` is not the id asked for); `schedulerServiceSet` (maps the pooled set's store, events
+  and the five engine callbacks; a nil router stays a nil interface); `schedulerWorkspaceResolver`
+  (adapts `workspace.Resolver.List`; only `StatusActive` configs whose id passes
+  `workspace.ValidateID`); `waitMultiScheduler` (Stop + bounded Wait).
+- **`serve_wiring.go`** (scheduler block only): `serveRuntime.MultiScheduler`; `buildServerConfig`
+  calls `buildMultiScheduler` right after the untouched `buildScheduler` block.
+- **`serve_lifecycle.go`** (this task only): `runServer` split into `startBackgroundServices` (single
+  mode exactly as before: `RecoverOnStartup` then `Scheduler.Start`; plus `MultiScheduler.Start`
+  beside `MultiProjSync.Start`), `stopBackgroundServices` and `drainBackgroundServices` (waits for
+  the shared-mode scheduler's scans within the existing 10 s shutdown deadline, after
+  `srv.Shutdown`, so serveCmd's deferred `workspaces.Close()` does not close the pool under a merge).
+- **`adapters/scheduler/multi.go`** (deviation 1): per-workspace claim (one scan per workspace at a
+  time, any kind; a skipped workspace logs a Warn); progress-based tick wait (`TickWait`, default
+  `WorkspaceBudget + TimeoutInterval` = 60 s: a tick stops waiting only after that long with no slot
+  freed and no scan ended; stalled scans keep running, stay claimed, are named in an Error and do
+  not count against later ticks' slots); panic recovery in `runWorkspace` (Error with `scan`,
+  `workspace_id`, `panic`, `stack`; the pool reference released first); exported one-tick
+  `ScanTimeouts` / `ScanOrphans` / `RunCommitRetry` (Start's ticker branches call them), `Wait(ctx)`,
+  `Config()`; idempotent `Stop`. `scheduler.Scheduler` is unchanged.
+- `serve_resolver.go`: one stale comment ("wiring it is a follow-up") updated.
+- Docs: `KNOWN-LIMITATIONS.md` "Shared Working Tree" item 9 (now "wired; a single leader is
+  assumed", with the remaining limits), `docs/integration-guide.md` (shared-mode bullet, the two env
+  rows, deactivation, sweep timing), `CHANGELOG.md` (Fixed / Changed (standalone) / Changed
+  (embedders)).
+- `.github/workflows/ci.yml`: a "must pass, never skip" step in the `scenario-git-http` job running
+  `TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces` (the only Postgres-backed evidence).
+
+### Per-AC evidence
+
+Red runs used a `git archive` of `init/INIT-024-scaffold` in the scratch dir
+(`tmp/init027-orchestration/i24/t008/base`), logs beside it (`red-base-*.log`).
+
+| AC | Test(s) | At the scaffold base | On the branch |
+|---|---|---|---|
+| 1 | `TestServe_SharedModeBuildsMultiScheduler` (defaults and overrides; the lifecycle starts it — `Wait` returns only once `Start` ran and returned), `TestServe_PlatformBindingModeBuildsMultiScheduler` (from the env via `buildServeWorkspaces`), `TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces` (integration, real db mode) | does not compile (`rt.MultiScheduler`, `schedulerMaxConcurrentEnv` undefined); behavioural probe `TestProbeT008_SharedModeRuntimeHoldsAScheduler` (scratch, reflection) **FAILS**: "shared-mode (platform-binding) runtime holds no scheduler; serveRuntime fields: [Config, Scheduler, ProjSync, MultiProjSync, DeliveryCancel]" | PASS (probe PASS too) |
+| 2 | `TestMultiScheduler_TimesOutRunsAcrossWorkspaces` (`service/cmd/spine`: real `ServicePool`, real pooled builder and per-workspace orchestrators, two workspaces; run cancelled and both live executions `skipped/run_terminated` via `TerminateLiveSteps`, refcount 0); integration: step timeout `failed/timeout` + run timeout cancelled + execution terminated in ws-a and ws-b on their own databases | does not compile | PASS |
+| 3 | `TestMultiScheduler_RetriesCommittingRun` (two workspaces; exactly 3 scheduler retries after the inline failure, then one `CommitExhaustedFn` with maxRetries 3, run routed off committing, no further retries); integration: each workspace's committing run retried by its own orchestrator and completed | does not compile | PASS |
+| 4 | `TestMultiScheduler_ReleasesPoolRefEachTick` (real `ServicePool.RefCount` 0 after each kind of tick, incl. a panicking and a failing-to-build workspace); refcount checks after every tick in the integration test and the AC 2/lifecycle tests | does not compile | PASS |
+| 5 | `TestMultiScheduler_RespectsConcurrencyAndBudget` (peak exactly 3 of 9 with cap 3; a 40-run workspace under a 35 ms budget leaves runs for the next tick, which resumes where it stopped); existing `TestMultiScheduler_BoundedConcurrency` / `_BudgetedScanResumesWhereItStopped` still pass | does not compile | PASS |
+| 6 | `TestServe_SingleModeSchedulerUnchanged` (file mode: `Scheduler` with budget 3 + handler, no `MultiScheduler`, same timeout/termination behaviour, also with the new env vars set); `buildScheduler` and its call are untouched in the diff | n/a (unchanged path) | PASS |
+| 7 | `go test ./...` (40 packages ok) incl. `./service/... ./adapters/scheduler/...` | — | PASS |
+| 8 | SMP compatibility gate (below) | — | PASS (inert) |
+| 9 | KNOWN-LIMITATIONS item 9, integration guide, CHANGELOG | — | done |
+
+Regression tests from the adversarial review (base-compatible API, so they run unchanged at the
+base):
+
+| Test | At the scaffold base | On the branch |
+|---|---|---|
+| `TestMultiScheduler_HungWorkspaceDoesNotStarveOthers` | **FAIL** (10.04 s): "b-victim's timed-out run is still "active" 10s after a-hung's merge retry hung: one tenant starved the others' timeouts" | PASS (0.18 s); a-hung's retry entered once |
+| `TestMultiScheduler_PanickingWorkspaceIsIsolated` | **FAIL**: `panic: isoStore: a scan of this workspace's data panicked` (test binary dies) | PASS |
+| `TestMultiScheduler_OneScanPerWorkspace` | **FAIL**: "2 scans of one workspace ran at once, want 1" | PASS |
+| `TestMultiScheduler_WorkspacesChangeAtRuntime` | PASS (coverage, not a regression) | PASS |
+
+Branch-only coverage: `TestMultiScheduler_SlowButProgressingTickScansEveryWorkspace` (a tick longer
+than TickWait but always progressing scans all 12 workspaces), `_HungWorkspacesCannotUseUpTheSlots`
+(as many hung workspaces as slots stall one tick; the next scans the rest), `_StopDrainsWithoutGoroutineLeak`
+(Stop idempotent; Wait reports the deadline while a scan runs, then nil; no pool reference held, no
+scan after Stop, goroutine count back to baseline), `_TwoReplicasOverOneDatabase` (Decision 3: the
+timeout cancel and termination apply once, the merge retry runs once per replica — pinned),
+`_ConfigDefaults`, `TestMultiSchedulerConfigFromEnv` (13 rows; an invalid value refuses also in single
+mode), `TestSchedulerWorkspacePool_RefusesAnotherWorkspacesServices`,
+`TestSchedulerServiceSet_MapsCallbacksAndNilEvents`, `TestSchedulerWorkspaceResolver_ListsOnlyActiveValidIDs`,
+`TestServeLifecycle_StartsAndDrainsMultiScheduler` (real tickers fire through the lifecycle; drain).
+The timing-based tests passed 10/10 under `-race -count=10`.
+
+### Adversarial self-review
+
+1. *Can one tenant make the shared scheduler spend its budget, or crash it, so other tenants'
+   timeouts never fire?* — **Yes at the base, now closed.** Budgets are per workspace (a tenant
+   cannot spend another's), but a tick waited for every workspace and all three kinds of scan share
+   one loop: a single item that never returns blocked every tenant forever. That item is reachable:
+   `WithWorkingTree` bounds a sequence (5 min) only on a home-branch tree, so a code repository's
+   merge + `git push` runs on the scheduler's never-cancelled context with no deadline — a remote
+   that accepts the connection and never answers holds it. Fixed by the claim + progress-based
+   TickWait (`_HungWorkspaceDoesNotStarveOthers`, red at base; `_HungWorkspacesCannotUseUpTheSlots`).
+   A panic in one tenant's scan (the engine slices stored values, e.g. `run.TraceID[:12]` in
+   `FailRun`) ended the process every tenant shares, on every tick reaching the data: now recovered
+   (`_PanickingWorkspaceIsIsolated`, red at base; `_ReleasesPoolRefEachTick`). Residuals documented
+   (item 9): a slow-but-progressing scan lengthens its tick by up to one budget + one wait (timeouts
+   late, never lost); a stalled scan keeps what it holds; as many stalled tenants as slots delay the
+   others by one wait.
+2. *Can a deactivated workspace keep being scheduled?* — Through the operator API, no: the next
+   tick skips it (integration: a timed-out run seeded after deactivation stays `active`; unit:
+   `_WorkspacesChangeAtRuntime`, the pool refuses an inactive workspace before taking a reference).
+   Deactivated any other way it is listed/resolved for up to the 60 s resolver cache TTL; a scan
+   already running finishes. Both documented.
+3. *Does the scheduler act with the right workspace's services and credentials?* — Yes: each scan
+   uses the pooled set's own store and the callbacks of that workspace's orchestrator (built over its
+   store, git pool and binding-scoped credential resolver); the adapter refuses a set for another id
+   (`TestSchedulerWorkspacePool_RefusesAnotherWorkspacesServices`); the integration test checks every
+   row moved on its own workspace database only.
+
+### Deviations (with reasons)
+
+1. **`MultiScheduler` behaviour changed** although the artifact scoped the task as "wiring only":
+   the adversarial review (step 5 of the brief) found the hang and panic paths above; the closest
+   safe alternative was to fix them where they live. Standalone-only: SMP constructs no
+   `MultiScheduler` (its package is compiled into SMP only through `core/engine`'s use of
+   `CalculateBackoff`); `scheduler.Scheduler` is unchanged.
+2. **New `MultiScheduler` API** (`ScanTimeouts`/`ScanOrphans`/`RunCommitRetry`, `Wait`, `Config`,
+   `MultiSchedulerConfig.TickWait`): needed for the shutdown drain and for deterministic tests from
+   `service/cmd/spine` (the per-tick function is unexported). `TickWait` has no env variable (the
+   artifact names only two); its default derives from the budget.
+3. **Lifecycle refactor and shutdown drain** (not in the design): split for testability; the drain
+   keeps the pool from being closed under an in-flight merge. Single-mode start/stop is unchanged.
+4. **Test placement**: AC 2 and AC 4 live in `service/cmd/spine` (real pool, real orchestrator
+   callbacks) rather than over a fake pool only; AC 3 and AC 5 in `adapters/scheduler`.
+5. **CI step added** (`ci.yml`, shared with TASK-009) so the db-mode evidence never silently skips.
+6. Line references in the artifact (`KNOWN-LIMITATIONS.md:1382`, `serve_wiring.go:460`) were correct
+   at the base; item 9 now spans more lines.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | OK |
+| `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; "engine constructed and exercised" |
+| `go vet ./...` plain / `-tags integration` / `-tags scenario` | clean ×3 |
+| `go test -p 4 ./...` | 40 packages ok, exit 0 |
+| `go test -race -p 4` touched packages (`adapters/scheduler`, `service/cmd/spine`), plain and `-tags integration` (`SPINE_TEST_DATABASE_URL` → `s24008_test`) | ok ×4; timing tests 10/10 |
+| scenario-git-http job, locally (`s24008_test`, registry `s24008_reg`): `TestGitHTTP_*` 20 pass, `TestBootstrapInternalAdmin_*` 2, `TestWorkflowLifecycle_*` 7, pooled workflow policy 1, TASK-008 store CAS 8 + scenarios 2, status lifecycle 3 + validator 1, governance guard 1 + store 1, **new** `TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces` 1 | all rc 0, 0 fail, 0 skip; no `ws_*` databases left |
+| git-floor in `golang:1.26-bookworm` (`--pull=never`, read-only mounts, tmpfs caches): git 2.39.5; ref-grammar filter, `./adapters/git/... ./core/artifact/ ./core/workflow/`, plus `./adapters/scheduler/` | ok |
+| golangci-lint (bundled binary) on `./adapters/scheduler/... ./service/cmd/spine/...` vs base | 9 = 9 plain, 9 = 9 integration (the one new gocritic `rangeValCopy` fixed before commit): **0 new**; `--enable-only=gosec` 0 / 0 |
+| `gofmt -l` on changed files | clean |
+
+### SMP compatibility gate
+
+Checkout `i23/s24-T008/smp` (SMP `main` `3addd44b`, `../spine` = this worktree, tree identical to
+`59a49ca3`), `GOFLAGS=-mod=readonly`: `go build ./...` ok; `go vet ./...` plain, `-tags integration`,
+`-tags scenario ./scenariotest/...`, `-tags faultinject` all clean. `go test -race -p 4` on
+`cmd/customer-app`, `internal/customer/{githttp,gitread,projectionwriter,spinecore,spineembedded,stepevents,workspace}/...`,
+`internal/customer/run/...`, `internal/engine/...`: 11 packages ok, `gitread` FAIL only on the two
+by-design contract tests (`TestClient_ErrorContractEqualsCLIClient/{batch,one-shot}/dangling_gitlink`,
+`TestClient_SpineReadFileRendersTheGitlinksPatch`) — **proven pre-existing**: the same two fail with
+SMP `main` against the scaffold base (= `a560c210` code) through a scratch `-modfile`. `dev/testgate`
+Spine-runtime leg (`spinecore`, `spineembedded`, `runner`, `executionreadiness`; platform DB
+`s24008_smp_it`, runtime `s24008_spine_rt`): PASS, 2143 passed, 3 allowed skips (darwin
+`ru_maxrss`); githttp leg (`-tags integration`): PASS, 588 passed, 1 allowed skip. No `ws_*`
+databases or roles left. SMP references neither `MultiScheduler` nor `adapters/scheduler`
+directly: **inert**.
+
+### Codex
+
+| Round | Review sub-session | Model | Result |
+|---|---|---|---|
+| 1 (on `59a49ca3`) | `01a169f8-4b37-7fe3-8ff4-11170919008a` | `gpt-6.1-sol` | `findings: []`, "patch is correct" (confidence 0.85) — clean; nothing to dispose |
+
+(The final round on the notes commit is recorded in the orchestrator report.)
+
+### Not run
+
+- GitHub CI (not pushed; INIT-024 owner question 1).
+- The rest of `make test-scenario` (known ~31 pre-existing failures; only the CI job's filters were
+  run): `SPINE_TEST_DATABASE_URL=… SPINE_REGISTRY_TEST_DATABASE_URL=… go test -tags scenario ./service/scenariotest/...`.
+- A live `spine serve` in db mode with real tickers (covered by the lifecycle unit test and the
+  db-mode integration test driving one tick of each loop):
+  `WORKSPACE_RESOLVER=db SPINE_REGISTRY_DATABASE_URL=… SPINE_INSECURE_LOCAL=1 ./bin/spine serve`.
+
+### Files shared with other INIT-024 tasks (for integration)
+
+- `service/cmd/spine/serve_wiring.go` (TASK-006): this task adds the `MultiScheduler` field to
+  `serveRuntime`, the `buildMultiScheduler` call after the `buildScheduler` block, and the field in
+  the returned struct — no other block touched.
+- `.github/workflows/ci.yml` (TASK-009 pins images and actions): one new step appended to the
+  `scenario-git-http` job after the governance-guard step.
+- `KNOWN-LIMITATIONS.md`, `CHANGELOG.md`, `docs/integration-guide.md` (all tasks): own section / item
+  9 / two env rows and the shared-mode bullet.
+- `serve_lifecycle.go`, `serve_scheduler*.go`, `adapters/scheduler/*`: this task only;
+  `serve_resolver.go`: one comment.

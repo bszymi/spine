@@ -43,8 +43,10 @@ The management platform owns:
   scanned with its own store, git clients and credentials; at most
   `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES` at once, each under `SPINE_SCHEDULER_WORKSPACE_BUDGET`
   per tick. A workspace whose scan hangs is skipped by later ticks until it ends and does not hold
-  up the others. It assumes a single leader: every replica scans every workspace (see
-  `KNOWN-LIMITATIONS.md`, "Shared Working Tree", item 9).
+  up the others. Like the projection sync, each tick takes a pool reference per workspace, so an
+  active workspace's services stay resident (`SPINE_WS_POOL_IDLE_TIMEOUT` does not evict it). It
+  assumes a single leader: every replica scans every workspace (see `KNOWN-LIMITATIONS.md`,
+  "Shared Working Tree", item 9).
 
 ---
 
@@ -143,7 +145,7 @@ The value is case-insensitive; anything else refuses to start. Without a key the
 Rows written before a key existed are **not** re-encrypted by later writes (the bootstrap and the update paths skip unchanged secrets — audit finding P3-1). Instead, every time Spine opens a workspace store it runs a sweep:
 
 - **File mode**: at startup, before the internal subscription bootstrap.
-- **Shared mode** (`WORKSPACE_RESOLVER=db|platform-binding`): when a process builds a workspace's services — on the first request for it after the process starts, and again after the workspace is evicted (idle for `SPINE_WS_POOL_IDLE_TIMEOUT`, default 10 minutes, or, in `platform-binding` mode, a binding invalidation, which reaches only the replica that receives it). A request to a workspace the process already holds does **not** sweep it and logs nothing.
+- **Shared mode** (`WORKSPACE_RESOLVER=db|platform-binding`): when a process builds a workspace's services — on the first request for it, or the first background tick that scans it (the projection sync and, since INIT-024 TASK-008, the scheduler), after the process starts, and again after the workspace is evicted (idle for `SPINE_WS_POOL_IDLE_TIMEOUT`, default 10 minutes, or, in `platform-binding` mode, a binding invalidation, which reaches only the replica that receives it). A request to a workspace the process already holds does **not** sweep it and logs nothing.
 - **On demand**: `spine secrets reencrypt` (file mode) or `spine secrets reencrypt --all-workspaces` (`WORKSPACE_RESOLVER=db` only: every workspace in the registry, `SPINE_REGISTRY_DATABASE_URL` — **active and inactive**, unlike `spine migrate --all-workspaces`, because an inactive workspace's rows still need the key that sealed them). The command prints one line of counters per workspace and one line per refused row (subscription ids and reasons are printed quoted, so a value planted in a workspace database cannot forge or erase an output line), and exits non-zero unless every workspace is clean.
   - **`SPINE_SECRET_ENVELOPE_MODE` must be set explicitly for the command, to the mode `spine serve` runs with.** The command writes every workspace database and cannot see serve's mode; it refuses to run with the variable unset rather than assume `migrate` (which would convert — and so launder — legacy rows a `strict` deployment refuses) or inherit a stray `downgrade` (which would rewrite every `enc:v2` row to `enc:v1`, which `strict` then refuses).
   - **In file mode the workspace id must be stated too:** set `SPINE_WORKSPACE_ID` to the value `spine serve` runs with, or pass `--workspace default` for a deployment that leaves it unset. The id is part of every `enc:v2` value's associated data, so the command refuses to fall back to `default` (an ops job whose environment was copied from `spine migrate`, which needs no workspace id, would otherwise seal every legacy row under `default`, report the workspace clean, and leave a serve bound to its real id refusing every row). The command prints the id it binds in its first line (`workspace_id=`).
