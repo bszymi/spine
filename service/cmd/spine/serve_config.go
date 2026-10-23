@@ -159,8 +159,9 @@ func (g gitTrustedCIDRs) all() []string {
 
 // gitTrustedCIDRsPerWorkspaceHint is the per-workspace form, named by
 // every parse and mode error.
+// The example is quoted: an unquoted ';' ends a shell assignment.
 const gitTrustedCIDRsPerWorkspaceHint = "the per-workspace form <workspace-id>=<cidr>[,<cidr>...] with entries separated by ';', " +
-	"e.g. SPINE_GIT_HTTP_TRUSTED_CIDRS=ws-a=172.28.1.10/32;ws-b=172.28.1.11/32"
+	"e.g. SPINE_GIT_HTTP_TRUSTED_CIDRS='ws-a=172.28.1.10/32;ws-b=172.28.1.11/32'"
 
 // parseGitHTTPTrustedCIDRs parses SPINE_GIT_HTTP_TRUSTED_CIDRS into one of
 // the two forms gitTrustedCIDRs describes. A value with an '=' anywhere is
@@ -258,6 +259,47 @@ func (g gitTrustedCIDRs) bind(shared bool, singleWorkspaceID string) (map[string
 		return map[string][]string{singleWorkspaceID: g.Unbound}, nil
 	}
 	return g.ByWorkspace, nil
+}
+
+// crossWorkspaceCIDROverlaps returns, sorted, every pair of CIDRs bound
+// to different workspaces that overlap (`ws-a=172.28.1.0/24 overlaps
+// ws-b=172.28.1.11/32`). An address in the overlap is trusted for both
+// workspaces, which a per-workspace binding is meant to prevent (a range
+// typo, or two tenants sharing a runner address), so serve warns at
+// startup. It is not refused: one runner may legitimately serve two
+// workspaces. Entries are already validated by parseGitHTTPTrustedCIDRs.
+func crossWorkspaceCIDROverlaps(byWorkspace map[string][]string) []string {
+	type bound struct {
+		ws, raw string
+		n       *net.IPNet
+	}
+	var all []bound
+	for ws, cidrs := range byWorkspace {
+		for _, raw := range cidrs {
+			if _, n, err := net.ParseCIDR(raw); err == nil {
+				all = append(all, bound{ws, raw, n})
+			}
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].ws != all[j].ws {
+			return all[i].ws < all[j].ws
+		}
+		return all[i].raw < all[j].raw
+	})
+	var out []string
+	for i := range all {
+		for j := i + 1; j < len(all); j++ {
+			a, b := all[i], all[j]
+			if a.ws == b.ws {
+				continue
+			}
+			if a.n.Contains(b.n.IP) || b.n.Contains(a.n.IP) {
+				out = append(out, a.ws+"="+a.raw+" overlaps "+b.ws+"="+b.raw)
+			}
+		}
+	}
+	return out
 }
 
 // unservedTrustedWorkspaces returns, sorted, the workspaces a

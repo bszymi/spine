@@ -199,3 +199,32 @@ func TestServe_MalformedTrustedCIDRsRefuseStartup(t *testing.T) {
 		}
 	}
 }
+
+// Review round 1 (P3): CIDRs bound to different workspaces that overlap
+// trust the overlap for each of them; serve warns once, listing every
+// pair. Overlap inside one workspace, and disjoint bindings, are silent.
+func TestCrossWorkspaceCIDROverlaps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		by   map[string][]string
+		want []string
+	}{
+		{"disjoint", map[string][]string{"ws-a": {"172.28.1.10/32"}, "ws-b": {"172.28.1.11/32"}}, nil},
+		{"same workspace", map[string][]string{"ws-a": {"172.28.1.0/24", "172.28.1.10/32"}}, nil},
+		{
+			"range typo covers another workspace's runner",
+			map[string][]string{"ws-a": {"172.28.1.0/24"}, "ws-b": {"172.28.1.11/32"}},
+			[]string{"ws-a=172.28.1.0/24 overlaps ws-b=172.28.1.11/32"},
+		},
+		{
+			"shared runner address, and an IPv6 overlap",
+			map[string][]string{"ws-a": {"172.28.1.10/32", "fd00:28::/64"}, "ws-b": {"172.28.1.10/32"}, "ws-c": {"fd00:28::c/128"}},
+			[]string{"ws-a=172.28.1.10/32 overlaps ws-b=172.28.1.10/32", "ws-a=fd00:28::/64 overlaps ws-c=fd00:28::c/128"},
+		},
+		{"none", nil, nil},
+	} {
+		if got := crossWorkspaceCIDROverlaps(tc.by); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: crossWorkspaceCIDROverlaps = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

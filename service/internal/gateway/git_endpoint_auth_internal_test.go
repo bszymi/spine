@@ -506,13 +506,18 @@ func TestWave3_NonCanonicalInfoRefsIsNoWorkspaceOracle(t *testing.T) {
 			t.Errorf("%s, authenticated: status %d, want 400", q, w.Code)
 		}
 	}
-	// Guard: the canonical push advertisement with push off is unchanged —
-	// 403 naming the flag for an existing workspace, 401 for a missing one.
-	if w := wave3GitResponse(s, "ws-1", t015PushInfoRefs, peer); w.Code != http.StatusForbidden ||
-		!strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
-		t.Errorf("canonical push advertisement, push off, existing workspace: status %d (%q), want 403 naming the flag", w.Code, w.Body.String())
+	// The canonical push advertisement with push off (INIT-024 TASK-006):
+	// the uniform 401 for an unauthenticated caller whether or not the
+	// workspace exists, and the 403 naming the flag for an authenticated
+	// one.
+	existing := wave3GitResponse(s, "ws-1", t015PushInfoRefs, peer)
+	missing := wave3GitResponse(s, "no-such-ws", t015PushInfoRefs, peer)
+	if existing.Code != http.StatusUnauthorized || existing.Body.String() != missing.Body.String() || missing.Code != existing.Code {
+		t.Errorf("canonical push advertisement, push off, unauthenticated: existing %d %q, missing %d %q; want the same 401",
+			existing.Code, existing.Body.String(), missing.Code, missing.Body.String())
 	}
-	if w := wave3GitResponse(s, "no-such-ws", t015PushInfoRefs, peer); w.Code != http.StatusUnauthorized {
-		t.Errorf("canonical push advertisement, push off, missing workspace: status %d, want 401", w.Code)
+	if w := wave3GitResponse(s, "ws-1", t015PushInfoRefs, peer, "Authorization", "Bearer "+bearer); w.Code != http.StatusForbidden ||
+		!strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
+		t.Errorf("canonical push advertisement, push off, authenticated: status %d (%q), want 403 naming the flag", w.Code, w.Body.String())
 	}
 }

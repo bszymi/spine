@@ -4,14 +4,15 @@ package gateway
 // review's scratch/standalone/sa2 PoC): the SPINE_GIT_HTTP_TRUSTED_CIDRS
 // token-less read was decided from the peer address alone, so in shared
 // mode a runner host trusted for one tenant — or any job it ran — cloned
-// every tenant's repository without a token, and a missing workspace
-// (404) could be told from a present one (200). Trust is now bound to the
+// every tenant's repository without a token, and the answer differed for
+// missing and present workspaces. Trust is now bound to the
 // workspace the request resolves to. Real git-http-backend behind bare
 // repositories laid out side by side under one root, as a shared-mode
 // repository directory is.
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
@@ -301,13 +303,114 @@ func TestHandleGit_PushNeverTakesWorkspaceBypass(t *testing.T) {
 		t.Errorf("ws-a's runner with a bearer, push advertisement: status %d (%s); want 200 %s", w.Code, w.Header().Get("Content-Type"), t015ReceivePackAdvertisement)
 	}
 
-	// With receive-pack off a push from the bound runner is the
-	// operator-facing 403 naming the flag (the push-disabled
-	// short-circuit), never a token-less push.
+	// With receive-pack off a token-less push from the bound runner is
+	// the uniform 401; with a bearer it is the 403 naming the flag.
 	off := t006Server(t, t006Bindings, true, false)
-	if w := off.do(http.MethodGet, "/git/ws-a/info/refs?service=git-receive-pack", runnerA); w.Code != http.StatusForbidden ||
+	off.srv.auth = authSvc
+	if w := off.do(http.MethodGet, "/git/ws-a/info/refs?service=git-receive-pack", runnerA); w.Code != http.StatusUnauthorized {
+		t.Errorf("ws-a's runner, push off, no token: status %d %q; want 401", w.Code, w.Body.String())
+	}
+	if w := off.do(http.MethodGet, "/git/ws-a/info/refs?service=git-receive-pack", runnerA, "Authorization", "Bearer "+bearer); w.Code != http.StatusForbidden ||
 		!strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
-		t.Errorf("ws-a's runner, push off: status %d %q; want 403 naming the flag", w.Code, w.Body.String())
+		t.Errorf("ws-a's runner, push off, bearer: status %d %q; want 403 naming the flag", w.Code, w.Body.String())
+	}
+}
+
+// t006SameResponse reports whether two responses are the same answer:
+// status, body and every header.
+func t006SameResponse(a, b *httptest.ResponseRecorder) bool {
+	if a.Code != b.Code || a.Body.String() != b.Body.String() || len(a.Header()) != len(b.Header()) {
+		return false
+	}
+	for k, v := range a.Header() {
+		if strings.Join(v, "\x00") != strings.Join(b.Header()[k], "\x00") {
+			return false
+		}
+	}
+	return true
+}
+
+// Review round 1 (P3, pre-existing since EPIC-004 TASK-031): with push
+// off (the default) a push request used to skip the auth gate whenever
+// the workspace resolved, to show the 403 naming
+// SPINE_GIT_RECEIVE_PACK_ENABLED, so its answer depended on whether the
+// workspace exists. Now a caller not authenticated for the workspace —
+// no token, a junk or non-bearer header, or (shared mode) another
+// workspace's token — gets the same uniform 401 for an existing, a
+// missing, an inactive and an unavailable workspace, status, body and
+// headers; a caller authenticated for the workspace still gets the 403.
+func TestHandleGit_PushDisabledIsNoWorkspaceOracle(t *testing.T) {
+	authA, tokenA := gitBearerAuth(t, "runner-a", domain.RoleContributor)
+	authB, tokenB := gitBearerAuth(t, "runner-b", domain.RoleContributor)
+	for _, mode := range []struct {
+		name   string
+		shared bool
+	}{
+		{"shared mode, per-workspace auth", true},
+		{"no ServicePool, process auth", false},
+	} {
+		f := t006Server(t, t006Bindings, false, false)
+		if mode.shared {
+			// Each workspace's ServiceSet authenticates against its own
+			// tokens, as a workspace store does in spine serve.
+			wsAuth := map[string]*auth.Service{"ws-a": authA, "ws-b": authB}
+			f.pool = workspace.NewServicePool(context.Background(), f.resolver, workspace.PoolConfig{
+				IdleCheckInterval: -1,
+				Builder: func(_ context.Context, ss *workspace.ServiceSet) error {
+					ss.Auth = wsAuth[ss.Config.ID]
+					return nil
+				},
+			})
+			t.Cleanup(f.pool.Close)
+			f.srv.servicePool = f.pool
+		} else {
+			f.srv.auth = authA
+		}
+
+		callers := []struct{ name, header string }{
+			{"no token", ""},
+			{"junk bearer", "Bearer junk"},
+			{"basic", "Basic eDp5"},
+			{"bare scheme", "bearer"},
+		}
+		if mode.shared {
+			callers = append(callers, struct{ name, header string }{"another workspace's token", "Bearer " + tokenB})
+		}
+		requests := []struct{ method, path string }{
+			{http.MethodGet, "info/refs?service=git-receive-pack"},
+			{http.MethodPost, "git-receive-pack"},
+		}
+		for _, peer := range []string{t006Outsider, t006RunnerA} {
+			for _, c := range callers {
+				for _, rq := range requests {
+					var headers []string
+					if c.header != "" {
+						headers = []string{"Authorization", c.header}
+					}
+					ref := f.do(rq.method, "/git/ws-missing/"+rq.path, peer+":40000", headers...)
+					if ref.Code != http.StatusUnauthorized ||
+						!strings.Contains(ref.Body.String(), "authorization required for external git access") {
+						t.Fatalf("%s, %s, %s, %s %s, missing workspace: %d %q; want the uniform 401",
+							mode.name, peer, c.name, rq.method, rq.path, ref.Code, ref.Body.String())
+					}
+					for _, ws := range []string{"ws-a", "ws-gone", "ws-down"} {
+						if w := f.do(rq.method, "/git/"+ws+"/"+rq.path, peer+":40000", headers...); !t006SameResponse(w, ref) {
+							t.Errorf("%s, %s, %s, %s /git/%s/%s: %d %q %v; the missing workspace answers %d %q %v",
+								mode.name, peer, c.name, rq.method, ws, rq.path, w.Code, w.Body.String(), w.Header(),
+								ref.Code, ref.Body.String(), ref.Header())
+						}
+					}
+				}
+			}
+		}
+
+		// Authenticated for ws-a: the flag's 403, for both requests.
+		for _, rq := range requests {
+			w := f.do(rq.method, "/git/ws-a/"+rq.path, t006Outsider+":40000", "Authorization", "Bearer "+tokenA)
+			if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
+				t.Errorf("%s, ws-a's token, %s %s: %d %q; want 403 naming the flag", mode.name, rq.method, rq.path, w.Code, w.Body.String())
+			}
+		}
 	}
 }
 
@@ -399,5 +502,36 @@ func TestHandleGit_InvalidBearerIsNoWorkspaceOracle(t *testing.T) {
 			!strings.Contains(w.Body.String(), t006MarkerB) {
 			t.Errorf("shared=%v: valid bearer, ws-b: status %d; want 200 with ws-b's refs", shared, w.Code)
 		}
+	}
+}
+
+// Review round 1 (P3): a peer trusted for the workspace its URL names,
+// whose workspace does not resolve, gets the uniform 401 like any caller;
+// an Info line records why, so an operator can see why a configured
+// runner stopped cloning. The response is unchanged, and nothing is
+// logged for an untrusted peer or a workspace the peer is not bound to.
+func TestHandleGit_TrustedPeerResolveFailureIsLogged(t *testing.T) {
+	buf := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	trusted := map[string][]string{"ws-a": {t006RunnerA + "/32"}, "ws-gone": {t006RunnerA + "/32"}}
+	f := t006Server(t, trusted, true, false)
+	ref := f.do(http.MethodGet, "/git/ws-gone/"+t006UploadInfoRefs, t006Outsider+":40000")
+	w := f.do(http.MethodGet, "/git/ws-gone/"+t006UploadInfoRefs, t006RunnerA+":40000")
+	if !t006SameResponse(w, ref) || w.Code != http.StatusUnauthorized {
+		t.Fatalf("bound runner, inactive workspace: %d %q; want the untrusted caller's %d %q", w.Code, w.Body.String(), ref.Code, ref.Body.String())
+	}
+	const line = "token-less access refused for a trusted-CIDR peer because its workspace did not resolve"
+	out := buf.String()
+	if n := strings.Count(out, line); n != 1 || !strings.Contains(out, "workspace_id=ws-gone") {
+		t.Fatalf("log for the bound runner: %d lines, want 1 naming ws-gone:\n%s", n, out)
+	}
+	// Not for a workspace the runner is not bound to, nor for an
+	// untrusted peer (the reference request above).
+	_ = f.do(http.MethodGet, "/git/ws-missing/"+t006UploadInfoRefs, t006RunnerA+":40000")
+	if n := strings.Count(buf.String(), line); n != 1 {
+		t.Fatalf("log after an unbound workspace: %d lines, want still 1:\n%s", n, buf.String())
 	}
 }

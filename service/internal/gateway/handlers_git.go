@@ -104,12 +104,14 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	//    Every push carries a bearer, validated and attached as the
 	//    actor for ref admission (TASK-016), branch protection and
 	//    audit.
-	//  - Push with the flag OFF: skip the auth gate so the handler
-	//    can return its documented 403 with `SPINE_GIT_RECEIVE_PACK_ENABLED`
-	//    guidance. Authenticating a request we are about to reject
-	//    adds no security value and hides the flag name from
-	//    unauthenticated callers who are exactly the ones most likely
-	//    to hit it.
+	//  - Push with the flag OFF: the auth gate applies as well
+	//    (INIT-024 TASK-006). A caller authenticated for the workspace
+	//    gets the handler's 403 naming `SPINE_GIT_RECEIVE_PACK_ENABLED`;
+	//    any other caller (no token, a junk or non-bearer header, a
+	//    token of another workspace) gets the uniform 401, whatever the
+	//    workspace's state. The flag's 403 used to skip the gate when
+	//    the workspace resolved, so it answered only for workspaces
+	//    that exist.
 	//  - SPINE_DEV_MODE has no effect here (it used to drop git auth for
 	//    clone AND push whenever SPINE_ENV was not production). Only the
 	//    dedicated SPINE_GIT_HTTP_DEV_NO_AUTH flag, which cmd/spine
@@ -123,29 +125,20 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// request never takes a token-less read path, and the handler then
 	// refuses it with 400 (INIT-023 TASK-015 review round 2).
 	push := githttp.IsReceivePack(r)
-	// pushDisabledShortCircuit only bypasses auth when the workspace
-	// actually resolved. Otherwise an untrusted unauthenticated client
-	// could probe `/git/{id}/git-receive-pack` with the flag off and
-	// distinguish missing/inactive/unavailable workspaces by the leaked
-	// error code. With this guard, missing-workspace probes go through
-	// the auth gate and collapse to a uniform 401, while a flag-off
-	// request against a real workspace still surfaces the operator-
-	// friendly 403 with `SPINE_GIT_RECEIVE_PACK_ENABLED` guidance.
-	//
-	// A non-canonical info/refs query never takes it (wave 3 review): the
-	// handler answers it 400, not the flag's 403, so through the bypass an
-	// unauthenticated caller got 400 for an existing workspace and the
-	// gate's uniform 401 for a missing one — the TASK-031 enumeration
-	// oracle again. It meets the auth gate like a read; an authenticated
-	// caller still gets the 400.
-	pushDisabledShortCircuit := push && !githttp.IsNonCanonicalInfoRefs(r) &&
-		!s.gitHTTP.ReceivePackEnabled() && resolveErr == nil
+	// pushDisabled marks a canonical push request with the flag off: the
+	// handler refuses it with the flag's 403 before touching any
+	// repository. It is not an auth bypass (above); it only keeps the
+	// repository lookup below out of the way, so an authenticated caller
+	// gets that 403 rather than a repository error. A non-canonical
+	// info/refs query is not one: the handler answers it 400 (wave 3
+	// review), after the auth gate like any other request.
+	pushDisabled := push && !githttp.IsNonCanonicalInfoRefs(r) && !s.gitHTTP.ReceivePackEnabled()
 	// The trusted-CIDR read bypass is scoped to the workspace the request
 	// resolved to (INIT-024 TASK-006, review finding N-2). It used to be
 	// decided from the peer address alone, so in shared mode a runner
-	// host trusted for one tenant — or any job running on it — cloned
-	// every tenant's repository token-less, and a missing workspace
-	// (its 404) could be told from a present one (200). Now:
+	// host trusted for one tenant — or any job running on it — read
+	// every tenant's repository token-less, and the answer differed for
+	// missing and present workspaces. Now:
 	//
 	//  - The trust is looked up under cfg.ID, the workspace whose
 	//    repository (cfg.RepoPath, or a code repo of cfg's own pool) is
@@ -171,7 +164,7 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	devBypass := !push && s.gitDevNoAuth
-	authBypass := pushDisabledShortCircuit || trustedBypass || devBypass
+	authBypass := trustedBypass || devBypass
 	var actor *domain.Actor
 	if !authBypass {
 		// validateGitAuth tolerates a nil cfg — when workspace
@@ -194,10 +187,13 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 		//    (INIT-024 TASK-006 adversarial review): its message
 		//    ("invalid token", "invalid authorization header format",
 		//    "token expired", ...) answered only for a workspace that
-		//    resolved, so a junk bearer told present workspaces from
-		//    absent ones — for any caller, trusted or not.
+		//    resolved, so the answer to a junk bearer depended on the
+		//    workspace's state.
 		a, err := s.validateGitAuth(r, cfg)
 		if err != nil {
+			if resolveErr != nil {
+				s.logTrustedPeerResolveFailure(r, workspaceID, resolveErr)
+			}
 			if resolveErr != nil || isUnauthorizedError(err) {
 				WriteError(w, domain.NewError(domain.ErrUnauthorized, "authorization required for external git access"))
 			} else {
@@ -241,15 +237,13 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// unbound) — this is past the auth gate, so distinct codes are
 	// safe and operators get an actionable error.
 	//
-	// The push-disabled short-circuit deliberately skipped the auth
-	// gate so the inner handler can emit the uniform 403 with
-	// `SPINE_GIT_RECEIVE_PACK_ENABLED` guidance. Resolving the
-	// repository here would replace that 403 with a 404/412 carrying
-	// the repository ID — leaking repository state to a caller we
-	// chose not to authenticate. Use the workspace primary path; the
-	// inner handler will refuse before touching it.
+	// A push with the flag off is refused by the inner handler with
+	// the 403 naming `SPINE_GIT_RECEIVE_PACK_ENABLED` before it touches
+	// any repository. Resolving the repository here would replace that
+	// 403 with a 404/412 about the repository ID. Use the workspace
+	// primary path; the inner handler will refuse before touching it.
 	var repoPath string
-	if pushDisabledShortCircuit {
+	if pushDisabled {
 		repoPath = cfg.RepoPath
 	} else {
 		var repoErr error
@@ -533,6 +527,27 @@ func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) (*domai
 	}
 
 	return authSvc.ValidateToken(r.Context(), token)
+}
+
+// logTrustedPeerResolveFailure records, at Info, a request from a peer
+// trusted for the workspace its URL names whose resolution failed
+// (missing, inactive, unavailable): the peer gets the uniform 401 like
+// any caller (INIT-024 TASK-006), so this line is the operator's only
+// trace of why a configured runner stopped cloning. Log only; it
+// decides nothing. The URL's workspace segment is used here because
+// no workspace resolved; it is logged only when it equals a configured
+// binding (IsTrustedIPForWorkspace matches exactly), so no
+// client-chosen string reaches the log.
+func (s *Server) logTrustedPeerResolveFailure(r *http.Request, workspaceID string, resolveErr error) {
+	if workspaceID == "" {
+		return
+	}
+	ip := gitPeerIP(r, s.trustedProxyCIDRs)
+	if ip == nil || !s.gitHTTP.IsTrustedIPForWorkspace(workspaceID, ip.String()) {
+		return
+	}
+	observe.Logger(r.Context()).Info("git: token-less access refused for a trusted-CIDR peer because its workspace did not resolve; it gets the uniform 401",
+		"workspace_id", workspaceID, "remote_addr", r.RemoteAddr, "error", resolveErr)
 }
 
 // isUnauthorizedError reports whether err is a SpineError with code

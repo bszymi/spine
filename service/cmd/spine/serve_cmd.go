@@ -168,6 +168,10 @@ func serveCmd() *cobra.Command {
 				log.Warn("SPINE_GIT_HTTP_TRUSTED_CIDRS overlaps SPINE_TRUSTED_PROXY_CIDRS: a request from a declared proxy is never given token-less git access, so token-less clones from the overlap will be refused",
 					"overlap", overlap)
 			}
+			if overlap := crossWorkspaceCIDROverlaps(gitTrusted.ByWorkspace); len(overlap) > 0 {
+				log.Warn("SPINE_GIT_HTTP_TRUSTED_CIDRS binds overlapping CIDRs to different workspaces: an address in the overlap clones each of those workspaces token-less; give each workspace its own runner addresses",
+					"overlap", overlap)
+			}
 
 			orphanThreshold := time.Duration(0)
 			if v := os.Getenv("SPINE_ORPHAN_THRESHOLD"); v != "" {
