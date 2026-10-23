@@ -94,9 +94,9 @@ type GovernanceGuard struct {
 	// leaves those directories open: every decision also guards
 	// <ArtifactsDir()>/workflows/ when the orchestrator has an artifacts
 	// directory (WithArtifactsDir, in either call order), and the
-	// structural backstop branchprotect.WorkflowDefinitionDirs holds a
+	// structural backstop branchprotect.WorkflowDefinitionPaths holds a
 	// *.yaml / *.yml file directly inside any directory named "workflows"
-	// (see governedPathsFor). Passing the projection's directories is still
+	// — that file only, not its directory (see governedPathsFor). Passing the projection's directories is still
 	// the documented wiring: it is the only source that also guards nested
 	// files of <artifacts_dir>/workflows/ when the orchestrator was never
 	// told the artifacts directory.
@@ -549,27 +549,30 @@ func (o *Orchestrator) buildGovernanceCheck(ctx context.Context, run *domain.Run
 //	    directory — read here, not in WithGovernanceGuard, so the order
 //	    of WithArtifactsDir and WithGovernanceGuard does not matter; the
 //	    entry also covers nested files (workflows/steps/x.yaml);
-//	(c) the structural backstop: the parent of every changed path that
-//	    looks like a workflow definition — a *.yaml / *.yml leaf directly
-//	    inside a directory named "workflows" at any depth, case-folded
-//	    (branchprotect.WorkflowDefinitionDirs). This over-approximates
-//	    the projection's set for every possible artifacts_dir, so a merge
-//	    is held even when neither the guard nor the orchestrator knows
-//	    the projection's directory.
+//	(c) the structural backstop: every changed path that looks like a
+//	    workflow definition — a *.yaml / *.yml leaf directly inside a
+//	    directory named "workflows" at any depth, case-folded
+//	    (branchprotect.WorkflowDefinitionPaths) — as an entry of its own.
+//	    This over-approximates the projection's set for every possible
+//	    artifacts_dir, so a merge is held even when neither the guard nor
+//	    the orchestrator knows the projection's directory. Only those
+//	    files are added, never their directory: what else the merge
+//	    changes beside them (".github/workflows/scripts/build.sh") is
+//	    judged by (a) and (b) alone.
 //
-// (b) and (c) are added as literal prefix entries
-// (GovernancePaths.WithDirs); Match is unchanged. With the guard off none
+// (b) and (c) are added as literal entries
+// (GovernancePaths.WithLiteralEntries); Match decides as before. With the guard off none
 // of this runs (the zero value holds nothing). The post-merge assertion
 // applies (c) to the paths the merge actually changed as well
 // (checkGovernedMerge), so rename following into such a directory is
 // refused like rename following into workflows/.
 func (o *Orchestrator) governedPathsFor(changed []string) branchprotect.GovernancePaths {
-	var dirs []string
+	var extra []string
 	if d := o.ArtifactsDir(); d != "" {
-		dirs = append(dirs, d+"/workflows")
+		extra = append(extra, d+"/workflows")
 	}
-	dirs = append(dirs, branchprotect.WorkflowDefinitionDirs(changed)...)
-	return o.governance.paths.WithDirs(dirs...)
+	extra = append(extra, branchprotect.WorkflowDefinitionPaths(changed)...)
+	return o.governance.paths.WithLiteralEntries(extra...)
 }
 
 // changedPathsFrom is the union of Path and OldPath of Diff(B, to) over
@@ -1215,7 +1218,7 @@ func (o *Orchestrator) checkGovernedMerge(ctx context.Context, run *domain.Run, 
 			// actually changed (INIT-024 TASK-002): rename following can
 			// land a definition in a "workflows" directory the
 			// pre-merge diff never named.
-			Paths:        gc.Paths.WithDirs(branchprotect.WorkflowDefinitionDirs(actual)...),
+			Paths:        gc.Paths.WithLiteralEntries(branchprotect.WorkflowDefinitionPaths(actual)...),
 			ChangedPaths: actual,
 			ExemptPaths:  append(append([]string(nil), exempt...), o.ownEvidenceExemptions(run, actual)...),
 		}

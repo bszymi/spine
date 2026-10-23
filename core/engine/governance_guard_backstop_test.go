@@ -187,3 +187,34 @@ func TestGovernanceGuard_BackstopCoversPostMergeRenameFollowing(t *testing.T) {
 		t.Fatalf("primary outcome = %+v, want a refusal", out)
 	}
 }
+
+// TestGovernanceGuard_BackstopHoldsOnlyTheDefinitionFiles: the backstop's
+// entries are the matched files, not their directory. A merge that changes
+// ci.yml together with a script, a README and a nested file under
+// .github/workflows/ is held for ci.yml alone; the same siblings without a
+// definition file merge.
+func TestGovernanceGuard_BackstopHoldsOnlyTheDefinitionFiles(t *testing.T) {
+	siblings := map[string]string{
+		".github/workflows/scripts/build.sh":  "#!/bin/sh\n",
+		".github/workflows/README.md":         "# CI\n",
+		".github/workflows/matrix/linux.json": "{}\n",
+		".github/workflows/nested/x.yaml":     "id: x\n",
+	}
+	t.Run("with a definition file", func(t *testing.T) {
+		files := map[string]string{".github/workflows/ci.yml": "on: push\n"}
+		for p, c := range siblings {
+			files[p] = c
+		}
+		g := newGovRepo(t, govRepoOpts{runFiles: files, guard: &GovernanceGuard{Enabled: true}})
+		g.toMerge()
+		g.requireHeld("ci.yml with siblings")
+		if paths := g.heldPaths(); len(paths) != 1 || paths[0] != ".github/workflows/ci.yml" {
+			t.Fatalf("held paths = %v, want only .github/workflows/ci.yml", paths)
+		}
+	})
+	t.Run("siblings alone", func(t *testing.T) {
+		g := newGovRepo(t, govRepoOpts{runFiles: siblings, guard: &GovernanceGuard{Enabled: true}})
+		g.toMerge()
+		g.requireMerged("siblings without a definition file")
+	})
+}

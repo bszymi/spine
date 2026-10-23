@@ -988,8 +988,8 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    ```
    It errors, and leaves the guard off, without binding or `MergeBaseLister`, or for an invalid
    path entry. At each decision the guard also adds `<ArtifactsDir()>/workflows/` (when
-   `WithArtifactsDir` was called, before or after this call) and a backstop: the parent directory
-   of every changed `*.yaml` / `*.yml` file directly inside a directory named `workflows`
+   `WithArtifactsDir` was called, before or after this call) and a backstop: every changed
+   `*.yaml` / `*.yml` file directly inside a directory named `workflows`, as an entry of its own
    (INIT-024 TASK-002). Passing `WorkflowDirs` is still recommended: it is the only source that
    guards nested files of a projection directory the orchestrator was not told about.
 3. **Handle holds.** `MergeRunBranch` returns a `precondition_failed` `*domain.SpineError`

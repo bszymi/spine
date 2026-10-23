@@ -42,7 +42,7 @@ func TestGovernancePaths_IndexedMatchEqualsScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g = g.WithDirs("x//workflows", "app/[id]/workflows", "wor\u212aflows/deep/workflows")
+	g = g.WithLiteralEntries("x//workflows", "app/[id]/workflows", "wor\u212aflows/deep/workflows")
 	fixed := []string{
 		"", "/", "//", "a", "a/", "a/b", "a/b/", "a/bc", "a//b", "a/b/c", "A/B/c", "ab/c",
 		"workflows", "workflows/", "workflowsx", "Workflows/a.yaml", "/workflows/a.yaml", "//workflows/a",
@@ -73,8 +73,8 @@ func TestGovernancePaths_IndexedMatchEqualsScan(t *testing.T) {
 }
 
 // TestGovernanceCheck_TouchedLinearInDerivedEntries: a run that changes a
-// YAML file in each of many distinct "workflows" directories adds one
-// entry per directory; evaluating it must stay fast. With the scan, 80,000
+// YAML file in each of many "workflows" directories adds one entry per
+// file; evaluating it must stay fast. With the scan, 80,000
 // such paths took about 40 s on an idle machine (each Match walked every entry).
 func TestGovernanceCheck_TouchedLinearInDerivedEntries(t *testing.T) {
 	const n = 80000
@@ -83,7 +83,7 @@ func TestGovernanceCheck_TouchedLinearInDerivedEntries(t *testing.T) {
 		changed[i] = fmt.Sprintf("d%06d/workflows/x.yaml", i)
 	}
 	start := time.Now()
-	c := &GovernanceCheck{Paths: defaultGovernancePaths().WithDirs(WorkflowDefinitionDirs(changed)...), ChangedPaths: changed}
+	c := &GovernanceCheck{Paths: defaultGovernancePaths().WithLiteralEntries(WorkflowDefinitionPaths(changed)...), ChangedPaths: changed}
 	touched := c.Touched()
 	elapsed := time.Since(start)
 	if len(touched) != n {
