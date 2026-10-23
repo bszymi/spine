@@ -199,7 +199,6 @@ type metaCallStore struct {
 	sets, merges int
 	setErr       error
 	mergeErr     error
-	noMerger     bool // hide MergeCommitMeta behind metaFallbackStore
 }
 
 func (s *metaCallStore) SetCommitMeta(ctx context.Context, runID string, meta map[string]string) error {
