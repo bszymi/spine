@@ -1,5 +1,11 @@
 # ── Build stage ──
-FROM golang:1.26-bookworm AS builder
+# Pinned by digest (INIT-024 TASK-009, SC-09): golang:1.26.10-bookworm, the
+# image index of 2026-10-21. The image sets GOTOOLCHAIN=local, so its own
+# GOLANG_VERSION is the compiler — it must equal go.mod's `toolchain` line,
+# and `go run ./dev/pincheck` (CI job toolchain-parity) fails when they
+# drift. Move the tag, the digest, go.mod, the ci.yml git-floor container and
+# the Makefile's DOCKER_GO together.
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -15,7 +21,10 @@ COPY testutil/ testutil/
 RUN CGO_ENABLED=0 go build -o spine ./service/cmd/spine
 
 # ── Runtime stage ──
-FROM debian:bookworm-slim
+# Pinned by digest: debian:bookworm-slim, the image index of 2026-10-20.
+# Dependabot (docker ecosystem) proposes the next digest; take it for the
+# Debian security updates it carries (git, ca-certificates).
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 
 # git is required at runtime: the artifact service shells out to
 # `git worktree add`, `git push`, etc. ca-certificates is needed for
