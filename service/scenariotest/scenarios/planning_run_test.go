@@ -46,7 +46,7 @@ steps:
         name: Validation Failed
         next_step: draft
     timeout: "5m"
-    timeout_outcome: valid
+    timeout_outcome: invalid
 
   - id: review
     name: Review Artifact

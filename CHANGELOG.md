@@ -6,6 +6,67 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-001 TASK-002: workflow definition strictness)
+
+Three P3 findings of the 2026-10-22 review (N-4, N-5, N-7): places where a workflow definition,
+or the guard over it, was less strict than the rest of the system. No runtime schema change.
+
+### Security
+
+- **Shipped validate steps fail closed on timeout (N-4).** The `validate` steps of
+  `workflows/adr-creation.yaml`, `artifact-creation.yaml` and `document-creation.yaml` set
+  `timeout_outcome: valid`, so a validator that was missing, hung or starved for 5 minutes passed
+  the run on to review. They now time out as `invalid`, back to `draft` (the files are at version
+  `1.1`). **Operators who copied these files into their repositories should change
+  `timeout_outcome: valid` to `timeout_outcome: invalid` on the `validate` step there**: Spine
+  does not rewrite workspace repositories. A corpus test pins that no shipped automated step's
+  timeout outcome routes into a review step.
+- **One YAML document per workflow file (N-7).** `workflow.Parse` (through
+  `yamlsafe.DecodeIntoStrict`) read the first document of a file and ignored anything after a
+  `---` separator. A second document with content is now refused: `invalid YAML: unexpected
+  second document (only one document per file)`, or `invalid YAML: trailing content: …` when the
+  trailing content does not parse. An empty trailing document (a bare `---`) and an explicit
+  document end (`...`) are still accepted. The workflow API refuses such a body at create and
+  update; the projection treats the file as refused (INIT-023 TASK-011): its last verified row is
+  kept, quarantined, no new run binds the workflow, and the sync advances. Each process's first
+  sync re-checks every installed workflow row against the file at head, so a file that already
+  carries a second document is quarantined then. Neither Spine's nor SMP's shipped corpus has a
+  document separator.
+- **The governance guard covers every directory the projection could install workflows from
+  (N-5).** The guarded set was fixed when `WithGovernanceGuard` ran: `Paths` (or the defaults)
+  plus `WorkflowDirs`. An embedder that set `artifacts_dir` on the projection but passed no
+  `WorkflowDirs` left `<artifacts_dir>/workflows/` unguarded while the projection installed its
+  definitions. With the guard on, each decision now also guards `<ArtifactsDir()>/workflows/`
+  when the orchestrator has an artifacts directory (`WithArtifactsDir`, called before or after
+  `WithGovernanceGuard`), and, as a backstop, the parent directory of every changed `*.yaml` /
+  `*.yml` file that sits directly in a directory named `workflows` at any depth (case-folded).
+  The post-merge assertion applies the backstop to the paths the merge actually changed.
+
+### Changed (standalone)
+
+- With the guard on (the `spine serve` default), a governed merge that changes a YAML file
+  directly inside any directory named `workflows` — `.github/workflows/ci.yml` included — now
+  waits for an operator approval like a change to `workflows/`.
+- A timed-out `validate` step of the three shipped creation workflows routes to `draft`.
+
+### Changed (embedders)
+
+- **Shared behaviour (no opt-in):** `workflow.Parse` and `yamlsafe.DecodeIntoStrict` refuse a
+  second non-empty YAML document, so the projection quarantines such a workflow file and
+  `ProjectionDefinition` and the workflow writers refuse it.
+- With the guard on, more merges are held: `<ArtifactsDir()>/workflows/**` and the backstop's
+  directories are added to the configured set at every decision (and to the post-merge
+  assertion). `GovernanceGuard.WorkflowDirs` is still the documented wiring; it is the only
+  source that also guards nested files of a projection directory the orchestrator was never told
+  about. `GovernanceGuardConfig()` still returns the configuration, not the per-decision set. The
+  zero value (guard off) is unchanged.
+- New in `core/branchprotect`: `GovernancePaths.WithDirs(dirs ...string)` (adds literal,
+  case-folded prefix entries; unlike `NewGovernancePaths` it does not refuse glob or quoting
+  characters, which are legal in git paths) and `WorkflowDefinitionDirs(paths)` (the backstop).
+  `GovernancePaths.Match` is unchanged.
+
+---
+
 ## INIT-023 — Security Audit Remediation: wave 4 follow-up
 
 Fixes found after the wave 4 integration (a TASK-003 residual SMP INIT-027/EPIC-004/TASK-008 measured
