@@ -63,7 +63,9 @@ or the guard over it, was less strict than the rest of the system. No runtime sc
 - New in `core/branchprotect`: `GovernancePaths.WithDirs(dirs ...string)` (adds literal,
   case-folded prefix entries; unlike `NewGovernancePaths` it does not refuse glob or quoting
   characters, which are legal in git paths) and `WorkflowDefinitionDirs(paths)` (the backstop).
-  `GovernancePaths.Match` is unchanged.
+  `GovernancePaths.Match` decides exactly as before; it now looks the folded path and each of its
+  `/`-ancestors up in an index instead of scanning every entry, so an evaluation stays linear when
+  a run's diff adds many derived entries.
 
 ---
 
