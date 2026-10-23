@@ -315,9 +315,10 @@ func WithTreeBudget(b TreeBudget) CLIOption {
 // WithMutateTimeout gives every local mutating git command the client
 // runs (checkout, merge, commit, add, branch, config; read-tree, reset,
 // switch and the other plumbing of the merge binding and the shared
-// tree's restore) a wall-clock deadline of d; push and clone, which
-// depend on a network, are not deadlined by it. d <= 0 keeps the
-// default: the process default (SetDefaultCheckoutLimits), else none.
+// tree's restore; a clone's checkout, which Clone then runs as its own
+// `reset --hard`) a wall-clock deadline of d. Push and the fetch of a
+// clone, which depend on a network, are not deadlined by it. d <= 0 keeps
+// the default: the process default (SetDefaultCheckoutLimits), else none.
 func WithMutateTimeout(d time.Duration) CLIOption {
 	return func(c *CLIClient) {
 		if d > 0 {

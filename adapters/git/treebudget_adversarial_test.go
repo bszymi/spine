@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/testutil"
@@ -283,5 +284,78 @@ func TestClone_RefusesOverBudgetTree(t *testing.T) {
 	emptyClone := filepath.Join(t.TempDir(), "empty")
 	if err := c.Clone(ctx, "file://"+bare, emptyClone); err != nil {
 		t.Fatalf("clone of an empty repository: %v", err)
+	}
+}
+
+// TestClone_CheckoutKeepsTheCloneEnvironment (codex round 1, P2): the
+// separate `reset --hard` that writes a budgeted clone runs with the
+// clone's own environment. A client without ambient credentials keeps
+// the host's global git config — here a smudge filter that leaves a
+// marker — out of the checkout, as the single `git clone` did; a client
+// with ambient credentials still gets it (the control proves the test
+// can see the filter run).
+func TestClone_CheckoutKeepsTheCloneEnvironment(t *testing.T) {
+	ctx := context.Background()
+	src := testutil.NewTempRepo(t)
+	testutil.WriteFile(t, src, ".gitattributes", "*.md filter=leak\n")
+	testutil.WriteFile(t, src, "a.md", "content\n")
+	tbGit(t, src, nil, "add", "-A")
+	tbGit(t, src, nil, "commit", "-q", "-m", "filtered")
+	marker := filepath.Join(t.TempDir(), "smudged")
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	// Quoted: an unquoted ";" starts a comment in a git config file.
+	cfg := fmt.Sprintf("[filter \"leak\"]\n\tsmudge = \"touch '%s'; cat\"\n\tclean = cat\n", marker)
+	if err := os.WriteFile(global, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+
+	isolated := git.NewCLIClient("", git.WithTreeBudget(smallBudget), git.WithoutAmbientCredentials())
+	if err := isolated.Clone(ctx, "file://"+src, filepath.Join(t.TempDir(), "iso")); err != nil {
+		t.Fatalf("isolated clone: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the host's smudge filter ran in an isolated clone's checkout: %v", err)
+	}
+
+	ambient := git.NewCLIClient("", git.WithTreeBudget(smallBudget))
+	amb := filepath.Join(t.TempDir(), "amb")
+	if err := ambient.Clone(ctx, "file://"+src, amb); err != nil {
+		t.Fatalf("ambient clone: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(amb, "a.md")); err != nil || string(b) != "content\n" {
+		t.Fatalf("ambient clone a.md = %q, %v", b, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("control: the host's smudge filter did not run for an ambient clone: %v", err)
+	}
+}
+
+// TestClone_MutateTimeoutBoundsTheCheckout (codex round 1, P2): a client
+// with only a mutate deadline also clones --no-checkout and writes the
+// tree under the deadline — a slow checkout is stopped and the clone
+// removed — while the network part of the clone stays undeadlined.
+func TestClone_MutateTimeoutBoundsTheCheckout(t *testing.T) {
+	ctx := context.Background()
+	src := testutil.NewTempRepo(t)
+	testutil.WriteFile(t, src, ".gitattributes", "*.slow filter=slow\n")
+	testutil.WriteFile(t, src, "b.slow", "slow\n")
+	tbGit(t, src, nil, "add", "-A")
+	tbGit(t, src, nil, "commit", "-q", "-m", "slow")
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[filter \"slow\"]\n\tsmudge = \"exec 2>/dev/null; sleep 5; cat\"\n\tclean = cat\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	c := git.NewCLIClient("", git.WithMutateTimeout(300*time.Millisecond))
+	dst := filepath.Join(t.TempDir(), "clone")
+	start := time.Now()
+	err := c.Clone(ctx, "file://"+src, dst)
+	var mt *git.MutateTimeoutError
+	if !errors.As(err, &mt) || time.Since(start) > 4*time.Second {
+		t.Fatalf("Clone = %v after %s, want a *MutateTimeoutError well before the filter ends", err, time.Since(start))
+	}
+	if _, err := os.Stat(dst); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the stopped clone was left behind: %v", err)
 	}
 }

@@ -557,14 +557,21 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 	// Branch arguments never resolve through tags anyway (exact lookup);
 	// this keeps upstream-controlled names out of rev resolution too.
 	//
-	// With a checkout budget (INIT-024 TASK-003, adversarial review) the
-	// clone does not check out: a code repository's default branch is
-	// whatever its remote holds, and `git clone` would write it before
-	// anything could measure it. The clone runs with --no-checkout, its
-	// HEAD tree is measured, and only then written (checkoutClone).
+	// With a checkout budget or a mutate deadline (INIT-024 TASK-003,
+	// adversarial review; codex round 1) the clone does not check out: a
+	// code repository's default branch is whatever its remote holds, and
+	// `git clone` would write it before anything could measure it, inside
+	// a command whose time is the network's. The clone runs with
+	// --no-checkout; its HEAD tree is then measured (with a budget) and
+	// written by a separate, deadlined `reset --hard` (checkoutClone)
+	// that runs with exactly the clone's -c arguments and environment, so
+	// a client without ambient credentials keeps the host's git config —
+	// and any smudge filter it configures — out of the checkout too.
 	limits := c.CheckoutLimits()
+	split := limits.Budget != nil || limits.MutateTimeout > 0
+	cfgArgs := append([]string{}, args...)
 	args = append(args, "clone", "--no-tags")
-	if limits.Budget != nil {
+	if split {
 		args = append(args, "--no-checkout")
 	}
 	args = append(args, "--", url, path)
@@ -609,19 +616,21 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 		gitErr.Err = err
 		return gitErr
 	}
-	if limits.Budget != nil {
-		return c.checkoutClone(ctx, path, created, limits)
+	if split {
+		return c.checkoutClone(ctx, path, created, limits, cfgArgs, cmd.Env)
 	}
 	return nil
 }
 
 // checkoutClone writes the HEAD tree of a clone made with --no-checkout,
-// after measuring it against limits' budget (INIT-024 TASK-003). An
-// empty repository (unborn HEAD) has nothing to write. Over the budget,
-// or on any failure, the clone is removed (see discard) so no half-made
-// clone is later taken for a usable one; the error is returned. The write is `git reset --hard`,
-// run under the mutate deadline.
-func (c *CLIClient) checkoutClone(ctx context.Context, path string, created bool, limits CheckoutLimits) error {
+// after measuring it against limits' budget when there is one (INIT-024
+// TASK-003). An empty repository (unborn HEAD) has nothing to write. Over
+// the budget, or on any failure, the clone is removed (see discard) so no
+// half-made clone is later taken for a usable one; the error is returned.
+// The write is `git <cfgArgs> reset --hard` with the clone's own
+// environment (env; nil inherits, as the clone did), under the mutate
+// deadline.
+func (c *CLIClient) checkoutClone(ctx context.Context, path string, created bool, limits CheckoutLimits, cfgArgs, env []string) error {
 	cc := &CLIClient{repoPath: path, maxBlobBytes: c.maxBlobBytes, maxOutputBytes: c.maxOutputBytes,
 		maxGitAllocBytes: c.maxGitAllocBytes, treeBudget: limits.Budget, mutateTimeout: limits.MutateTimeout}
 	// A refused or failed clone is removed: all of it when Clone created
@@ -648,8 +657,20 @@ func (c *CLIClient) checkoutClone(ctx context.Context, path string, created bool
 	if err := cc.checkTrees(ctx, "clone", head); err != nil {
 		return discard(err)
 	}
-	if _, _, err := cc.runWith(ctx, "clone", runOpts{}, "reset", "--hard", "-q"); err != nil {
-		return discard(err)
+	rctx, cancel := withMutateDeadline(ctx, limits.MutateTimeout)
+	defer cancel()
+	reset := newGitCmd(rctx, append(append([]string{}, cfgArgs...), "reset", "--hard", "-q")...)
+	reset.Dir = path
+	reset.Env = env
+	stderr := &stderrSink{}
+	reset.Stderr = stderr
+	if err := reset.Run(); err != nil {
+		if mutateDeadlineHit(ctx, rctx, limits.MutateTimeout) {
+			return discard(mutateTimeout("clone", limits.MutateTimeout, err))
+		}
+		gitErr := classifyGitError("clone", strings.TrimSpace(stderr.String()))
+		gitErr.Err = err
+		return discard(gitErr)
 	}
 	return nil
 }
