@@ -204,6 +204,14 @@ prefix `s24002_` and were dropped.
 
 - **OQ1 — N-7 default:** default taken, **on** for every reader (Design 2). No option was added.
 - **OQ2 — backstop scope:** default taken, **any depth** (`a/b/c/workflows/x.yml` is held).
+- **OQ3 — when the backstop applies** (added at review round 1; orchestrator ruling, pending the
+  owner). *Default:* **always on** while the guard is on, narrowed to literal file entries (review
+  round 1 fix 1): holding CI-workflow YAML in the primary repository for an operator approval is a
+  reasonable fail-safe, and code repositories are not gated. *Alternatives:* (a) apply the backstop
+  only when `WorkflowDirs` is empty and the orchestrator has no artifacts directory (N-5's
+  precondition) — SMP passes `WorkflowDirs` from the projection constant, so the backstop adds
+  cost there but no coverage; (b) an embedder opt-out field on `GovernanceGuard` whose zero value
+  keeps it on. Not implemented.
 
 ### What was built
 
@@ -223,13 +231,15 @@ prefix `s24002_` and were dropped.
 - **N-5 — `core/engine/governance_guard.go`.** `buildGovernanceCheck` takes its `Paths` from the new
   `governedPathsFor(changed)`: the configured set (`g.paths`, built by `WithGovernanceGuard` as
   before), plus `<o.ArtifactsDir()>/workflows` read at decision time, plus
-  `branchprotect.WorkflowDefinitionDirs(changed)`. `checkGovernedMerge` (the post-merge assertion)
+  `branchprotect.WorkflowDefinitionPaths(changed)` (the matched files themselves, since review
+  round 1). `checkGovernedMerge` (the post-merge assertion)
   adds the backstop over the merge's actual diff (`Diff(BaseSHA, M)`), so rename following into a
   `workflows` directory no configured entry names is refused like rename following into
   `workflows/`. `WithGovernanceGuard` itself is unchanged apart from the `WorkflowDirs` doc comment.
   TASK-001's `recordLifecycleStarter` is untouched.
-- **`core/branchprotect/governance.go`.** New `GovernancePaths.WithDirs(dirs ...string)` and
-  `WorkflowDefinitionDirs(paths []string) []string`; `Match` now decides by lookup (below).
+- **`core/branchprotect/governance.go`.** New `GovernancePaths.WithLiteralEntries(entries ...string)`
+  and `WorkflowDefinitionPaths(paths []string) []string` (named `WithDirs` / `WorkflowDefinitionDirs`
+  before review round 1); `Match` now decides by lookup (below).
 
 ### Deviations (with reasons)
 
@@ -237,11 +247,11 @@ prefix `s24002_` and were dropped.
    "validated by `NewGovernancePaths`"). `NewGovernancePaths` refuses `* ? [ \ "` and empty or dot
    segments — a hygiene rule against operators writing patterns — but those are legal in git paths
    (`app/[id]/workflows/x.yaml`), and a refused backstop entry would leave nothing to add: the merge
-   would go through unheld, or need a permanent refusal. `WithDirs` therefore folds the dir and trims
+   would go through unheld, or need a permanent refusal. `WithLiteralEntries` therefore folds the entry and trims
    leading/trailing `/` only (an empty result is skipped). Matching is still `Match`'s literal folded
    prefix compare, so a derived entry can never act as a pattern. Pinned by
    `TestGovernanceGuard_BackstopIgnoresNonWorkflowYAML/app_[id]_workflows_x.yaml` and
-   `TestGovernancePaths_WithDirs`.
+   `TestGovernancePaths_WithLiteralEntries`.
 2. **`Match` is reimplemented as a lookup** (Design 3: "`Match` is unchanged"). Codex round 1 (P2):
    one entry per changed workflow directory made `Touched()` quadratic in run-controlled input
    (80,000 paths: 39.9 s per evaluation, and the gate evaluates more than once). `Match` now looks the
@@ -264,7 +274,7 @@ prefix `s24002_` and were dropped.
    `invalid` too; explicit nulls, tags and anchors in a trailing document (`--- ~`, `--- !!null`,
    `--- &x`) are refused as content, comment-only trailers are accepted; extra tests
    `TestGovernanceGuard_BackstopWithCustomPaths`, `TestIncrementalSync_EmptyTrailingDocumentWorkflowInstalled`,
-   `TestWorkflowDefinitionDirs`, `TestGovernancePaths_WithDirs`,
+   `TestWorkflowDefinitionPaths`, `TestGovernancePaths_WithLiteralEntries`,
    `TestGovernanceCheck_TouchedLinearInDerivedEntries`.
 
 ### Acceptance criteria
@@ -340,7 +350,7 @@ change only Markdown) unless noted.
   `.github/workflows/*.yml`), and SMP's own `workflows/steps/*.yaml` stay covered by the default
   `workflows/` entry. SMP TASK-010's suites should be re-run against this task at its bump.
 - **N-4.** Inert: SMP seeds its own corpus, already `invalid`.
-- **New API (additive):** `branchprotect.GovernancePaths.WithDirs`, `branchprotect.WorkflowDefinitionDirs`.
+- **New API (additive):** `branchprotect.GovernancePaths.WithLiteralEntries`, `branchprotect.WorkflowDefinitionPaths`.
   No interface SMP implements changed.
 
 ### Codex
@@ -355,6 +365,53 @@ sub-session (`source: {"subagent":"review"}`, `cwd` = the worktree), model confi
 - **Round 2** (session `01a16922-1c75-7972-b24b-3f5e3b47e5ab`, over `c6361d97`): no findings.
 - **Round 3** (session `01a16998-7cd8-7633-84ab-b6d195bb0471`, over `568a2892`, the final code): no
   findings.
+
+### Review round 1 (no P1/P2; three P3s fixed)
+
+Report: SMP `tmp/init027-orchestration/i24/t002-reviews/REVIEW.md`, over `f6c81316`.
+
+1. **The backstop governed the whole directory** (`422cb162`). It added each matched file's parent
+   as a prefix entry, so a script, README or nested file the same merge changed beside a
+   definition (`.github/workflows/scripts/build.sh`) was held too, against what the docs promised.
+   It now adds the matched files themselves as literal entries; the post-merge pass over the actual
+   diff still catches rename following (`TestGovernanceGuard_BackstopCoversPostMergeRenameFollowing`
+   green). Renamed the unreleased API: `WithDirs` → `WithLiteralEntries`, `WorkflowDefinitionDirs`
+   → `WorkflowDefinitionPaths`. New tests: `TestGovernanceGuard_BackstopHoldsOnlyTheDefinitionFiles`
+   (ci.yml held alone beside a script, README, JSON and nested YAML; the siblings alone merge) —
+   it fails with the `f6c81316` guard (all five paths held) and passes now — and
+   `TestWorkflowDefinitionPaths_GovernsOnlyTheFiles`.
+2. **Upgrade note** (`6dc50d90`, CHANGELOG "Changed (standalone)" and KNOWN-LIMITATIONS "Projection
+   Sync"). `spine serve` loads a run's workflow with `GitWorkflowLoader`, which re-parses the file at
+   the pinned commit on every action that needs it, so a run bound before the upgrade to a
+   two-document file fails those actions. Remedy: remove the second document on `main`, cancel the
+   run (`CancelRun` does not load the workflow; not from `committing`) and start it again. Checked
+   that the projection-backed paths are unaffected, in Spine and in SMP: the scheduler's timeout and
+   recovery scans (`adapters/scheduler/timeout.go`, `recovery.go`) and SMP's
+   `ProjectionWorkflowLoader` read the stored row by path with no status filter, and the projection
+   keeps a refused file's verified row (quarantined) at its old `source_commit`; binding lists Active
+   rows only, so no new run binds.
+3. **CLI** (`d94e65fc`). `spine workflow list/show/resolve` now read each file with
+   `workflow.ProjectionDefinition`, the projection's own acceptance (strict keys, one document, the
+   round trip). `list` and `resolve` skip a refused file with a stderr warning naming it and the
+   reason; `show` returns the error. New tests `TestWorkflowCLI_SecondDocumentRefusedLikeTheServer`
+   (fails with the old CLI: the two-document workflow is listed) and `TestWorkflowCLI_ShowDetail`
+   (the detail output is unchanged).
+- Nit (`--- !` accepted as an empty trailer): left as is; harmless, as the review says.
+- OQ3 recorded above (orchestrator ruling; default always on, file entries only).
+
+Gates after the fixes (head `6dc50d90`; the notes commit after it is Markdown only):
+
+| Gate | Result |
+|---|---|
+| `go build ./...`; `go vet` on the touched packages (plain, integration, scenario) | ok |
+| `go test -p 4 ./core/engine/ ./core/branchprotect/... ./core/yamlsafe/ ./core/workflow/ ./adapters/projection/ ./workflows/ ./service/internal/cli/` | rc 0 |
+| the same with `-race` | rc 0 |
+| `go test ./service/cmd/...`; `./dev/lint-boundaries.sh` | ok; rc 0 |
+| golangci-lint `--new-from-rev 12376b55` (plain, integration, scenario) on those packages | 0 new (a `rangeValCopy` in the new CLI code was fixed before commit) |
+| gosec only, branch vs base | 0 / 0 |
+| gofmt on the changed `.go` files | clean |
+| SMP gate in `smp` (`../spine` = `6dc50d90`, the notes edit uncommitted): build, vet plain / integration / scenario / faultinject; testgate Spine-runtime leg; testgate githttp | all rc 0; 2143 passed (3 allowed skips); 588 passed (1 allowed skip); `ws_*` 0 / 0 |
+| codex (session `01a169d9-f1f1-72e3-b69f-abfd0235e96a`, `gpt-6.1-sol`, over `6dc50d90`) | no findings |
 
 ### Not run
 
