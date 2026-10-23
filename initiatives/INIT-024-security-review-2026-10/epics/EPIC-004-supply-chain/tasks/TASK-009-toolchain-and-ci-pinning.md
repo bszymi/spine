@@ -338,3 +338,4 @@ Also informational: `govulncheck -tags integration,scenario -test ./...` on the 
 | Round | Head | Review sub-session (model) | Findings | Disposition |
 |---|---|---|---|---|
 | 1 | `66cd0915` | `01a16831-92d1-7e93-9594-fd0067c77f41` (`gpt-6.1-sol`, `source: {"subagent":"review"}`, cwd = this worktree) | none. "patch is correct", confidence 0.82. Its sandbox had no network, so it could not run `-resolve`. | nothing to fix |
+| 2 | `5cf302c6` (final code; adds only these notes) | `01a1684a-6ade-7671-9706-51fd21e6ac39` (`gpt-6.1-sol`, review sub-session, cwd = this worktree) | none. "patch is correct", confidence 0.85. It did not verify registry resolution or image builds. | nothing to fix |
