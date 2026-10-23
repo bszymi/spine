@@ -197,6 +197,8 @@ No digest needed a pull, so the artifact has no digest TODO left.
    it installs go1.26.0. The go command then switches to the `toolchain` line under the default
    `GOTOOLCHAIN=auto`. The `vuln` job asserts `go env GOVERSION` equals the toolchain before it
    scans, so a silent mismatch cannot pass. Dependabot will propose the newer majors.
+   *Superseded in review round 1 (below):* every setup-go step now sets `go-version: '1.26.10'`,
+   and pincheck enforces it.
 5. **Additions beyond the design**, each small and inside the task's files or adjacent to them:
    - The Makefile's `DOCKER_GO` image is pinned to the same golang digest. It was a third
      floating `golang:1.26-bookworm` that ran `make docker-test` on whatever that tag named.
@@ -320,9 +322,9 @@ Also informational: `govulncheck -tags integration,scenario -test ./...` on the 
    `image-build` CI job, plus `make test-db-up` on a machine that may pull, are the evidence
    still to collect.
 2. **CI itself has not run** (nothing is pushed). The first run on the PR is the first proof of
-   four things: setup-go plus the toolchain switch (`vuln`'s GOVERSION assertion),
-   `pincheck -resolve` on a GitHub runner (needs `docker buildx`, present on `ubuntu-latest`),
-   `image-build`, and the git-floor job on the pinned 1.26.10 image.
+   four things: setup-go installing go1.26.10 (`vuln`'s GOVERSION assertion),
+   `pincheck -resolve` on a GitHub runner (needs `docker buildx` and `git`, both present on
+   `ubuntu-24.04`), `image-build`, and the git-floor job on the pinned 1.26.10 image.
 3. **Repository settings (INIT-024 §7d owner actions; AC 10 cross-reference):** a `main` ruleset
    that requires PRs and these CI jobs and forbids force pushes; approval for all outside
    contributors; "allowed actions: selected" with SHA pinning required. Every `uses:` is now
@@ -339,3 +341,103 @@ Also informational: `govulncheck -tags integration,scenario -test ./...` on the 
 |---|---|---|---|---|
 | 1 | `66cd0915` | `01a16831-92d1-7e93-9594-fd0067c77f41` (`gpt-6.1-sol`, `source: {"subagent":"review"}`, cwd = this worktree) | none. "patch is correct", confidence 0.82. Its sandbox had no network, so it could not run `-resolve`. | nothing to fix |
 | 2 | `5cf302c6` (final code; adds only these notes) | `01a1684a-6ade-7671-9706-51fd21e6ac39` (`gpt-6.1-sol`, review sub-session, cwd = this worktree) | none. "patch is correct", confidence 0.85. It did not verify registry resolution or image builds. | nothing to fix |
+
+### Review round 1 (2026-10-23, head `9e166eb2`): five P3s fixed
+
+The orchestrator saved the review at SMP repo `tmp/init027-orchestration/i24/t009-reviews/REVIEW.md`.
+It had no P1/P2 and five P3s, each fixed per the orchestrator's rulings. Commits:
+- `b2fff876`: pincheck rework, ci.yml, dependabot.yml comments;
+- `36465947`: docs;
+- `29489ef8`: codex round 3 fix;
+- then this notes commit.
+
+1. **setup-go cache collision (P3-1).** setup-go stays on v5.6.0 (no major bump).
+   - Every setup-go step sets `go-version: '1.26.10'`, replacing `go-version-file`, so no
+     toolchain download runs before the cache restore.
+   - pincheck refuses a setup-go step whose `with.go-version` is missing or differs from go.mod's
+     toolchain, and refuses `go-version-file`. Tests: "setup-go installs another Go", "setup-go
+     reads go-version-file", "setup-go without with", and the mismatched-toolchain fixture, which
+     now also refuses at `ci.yml:15`.
+   - **Follow-up:** setup-go v6, which reads the toolchain directive.
+2. **pincheck bypasses (P3-2).**
+   - Workflow, composite-action and compose files are parsed with yaml.v3 (`yamlscan.go`). Merge
+     keys are expanded, aliases are followed, and a file that does not parse is refused.
+   - The walk covers `jobs.*.steps[*].uses`, `jobs.*.uses`, `jobs.*.container` (string or
+     mapping), `jobs.*.services.*.image`, `runs.steps`, `runs.image: docker://…` and compose
+     `services.*.image`.
+   - Dockerfiles (`Dockerfile`, `Dockerfile.*`, `*.Dockerfile`), compose files, Makefiles and
+     `.github/actions/**/action.y*ml` are found with WalkDir, skipping `.git/`, `vendor/`,
+     `node_modules/` and `testdata/`.
+   - Dockerfile scan (`dockerfile.go`):
+     - `# syntax=` (parser-directive position only) and `RUN --mount=…,from=<ref>` are image
+       references;
+     - continuation lines are joined, honouring `# escape=`;
+     - `ONBUILD` instructions are scanned too.
+   - Any `<registry>/<path>/golang` repository is golang for parity, and `-resolve` inspects a
+     mirror path as written.
+   - The best-effort `docker run|create|pull` shell scan (`shell.go`) covers `run:` scripts and
+     Makefiles. Its residuals are documented in KNOWN-LIMITATIONS ("The scan of shell commands is
+     best-effort").
+   - Every bypass shape the reviewer listed has a TestCheck case: flow-style step, quoted key,
+     `uses :`, flow `container`, flow `services`, `run:` images, Makefile recipe image,
+     `RUN --mount from`, `# syntax=`, subdirectory Dockerfiles, composite and Docker actions,
+     continued `FROM`, golang mirror path. Two cases go beyond the list: a subdirectory compose
+     file, and a reusable workflow on a tag.
+   - The already fail-closed shapes stay refused, each with a test: folded `uses: >-`,
+     `@main # v4.4.0`, ARG-computed `FROM`, `${{ env }}` image, anchors, aliases and merge keys,
+     `FROM --platform`, unparseable YAML, non-literal image.
+   - `TestShellScan` covers the shell parser on its own, including an unknown boolean flag
+     failing closed.
+3. **Tag comment vs SHA (P3-3).** `-resolve` now runs
+   `git ls-remote -- https://github.com/<repo> refs/tags/<tag> refs/tags/<tag>^{}` for every
+   distinct (repo, comment tag). It requires the peeled commit to equal the pinned SHA, and
+   refuses a missing tag or an unreadable remote.
+   - Unit tests with a fake resolver (`TestResolveActions`) cover a match, a SHA under another
+     tag's comment, a missing tag, a remote error, and one lookup per distinct tag.
+     `TestParseLsRemote` covers lightweight, annotated (peeled) and absent tags.
+   - Live: the repository passes ("14 of 14 action pin(s) equal their tag's commit").
+   - A scratch fixture pinning v4.3.1's commit under `# v4.4.0` and a `# v4.9.9` comment was
+     refused twice ("is not v4.4.0: that tag is commit 11d5960a…", "has no tag v4.9.9").
+   - Network use is still only in `-resolve`.
+4. **Test gap (P3-4).** Added "one golang digest under two tags"
+   (`golang:1.26.10-bookworm@D` plus `golang:1.26.10-trixie@D`). It refuses through the `tag !=
+   firstTag` arm of `golangParity`, so that mutation is now killed.
+5. **Floating refs (P3-5).**
+   - Every job runs on `ubuntu-24.04`. pincheck refuses a `*-latest` label (scalar, list or
+     `labels:` mapping) and a computed one.
+   - pincheck requires every workflow or compose image to equal the compose stack's ref for the
+     same repository, with Docker Hub spellings folded together.
+   - The `ci.yml` postgres comment now says so. Tests cover a CI/compose mismatch, two compose
+     files disagreeing, and a `docker.io/library/` spelling.
+
+**AC 4 / AC 8 unchanged:** not run here, because no docker build or pull is allowed. The
+commands for the owner or CI are `docker build --tag spine:ci .` (the CI `image-build` job),
+`make docker-build`, and `make test-db-up` / `docker compose -f docker-compose.test.yaml up -d`
+followed by `docker compose -f docker-compose.test.yaml ps`, on a machine that may pull.
+
+**Gates for the round** (on `29489ef8`; logs in SMP repo `tmp/init027-orchestration/i24/t009/r1/`):
+
+| Gate | Result |
+|---|---|
+| `go test -count=1 ./dev/...` | ok |
+| `go test -race -count=1 ./dev/pincheck/` | ok |
+| `go run ./dev/pincheck` | rc=0: `OK — toolchain go1.26.10; 3 golang reference(s) on one digest; 10 image(s) and 14 action(s) pinned` (the Makefile's `DOCKER_GO` now counts as an image) |
+| `go run ./dev/pincheck -resolve` (network) | rc=0: golang digest `GOLANG_VERSION=1.26.10` on 5 platforms; 14 of 14 action pins equal their tag's commit |
+| `go mod tidy -diff` | no diff |
+| `./dev/lint-boundaries.sh` | OK |
+| `go vet ./dev/...` plain / `-tags integration` / `-tags scenario` | rc=0 |
+| golangci-lint v2.11.4 `--new-from-rev 12376b55 ./dev/...` and a full `./dev/...` run | 0 issues |
+| gosec-only `./dev/...` | 0 issues |
+| `gofmt -l dev/` | clean |
+| actionlint v1.7.12 on `ci.yml`; Dependabot schema validation | clean; VALID |
+| git-floor container (present `golang:1.26-bookworm`, `--pull=never`) incl. `./dev/pincheck/` on linux | all steps rc=0 |
+| SMP compat: `GOFLAGS=-mod=readonly go build ./...` in `smp`; `go list -m all` | rc=0; 480 modules, identical to the scaffold-base list; SMP untouched |
+| Red before green for the codex round 3 fix | With the committed `b2fff876` code and the new tests, the three new TestCheck cases and two TestShellScan cases FAIL (`red-codex-r3.log`). With the fix they pass. |
+
+**Codex** (plain `codex review --base init/INIT-024-scaffold`, model read from the review
+sub-session JSONL):
+
+| Round | Head | Review sub-session (model) | Findings | Disposition |
+|---|---|---|---|---|
+| 3 | `36465947` | `01a16a26-53ab-73f2-a395-2ebee3158b14` (`gpt-6.1-sol`) | **P2**: local-build exemptions were shared across a workflow's jobs. A tag built in one job exempted a `docker run` of that tag in another job, which runs on a separate runner and pulls it. | **Fixed** in `29489ef8`. The shell scope is now one job (or one action or Makefile). An exemption applies only after the build in text order, and never to `docker pull`. Tests: "a tag built in another job is pulled there", "run before the build, and a pull after it, in one job", and TestShellScan "a run before the build is not exempt" / "a pull of a built tag is not exempt". All are red before the fix. |
+| 4 | `29489ef8` | `01a16a29-4c87-7003-a2c7-1d8e359f8c0c` (`gpt-6.1-sol`) | none. "patch is correct". | nothing to fix |
