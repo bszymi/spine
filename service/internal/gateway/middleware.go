@@ -109,6 +109,27 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Shared mode: refuse a request without a well-formed bearer
+		// before Resolve (INIT-024 TASK-007 review round 1). Every route
+		// behind this middleware is behind authMiddleware too, whose
+		// shared-mode path (authenticatePooled) answers exactly this
+		// uniform 401 for such a request, so the response is unchanged;
+		// what is saved is the resolution itself: a registry query in
+		// db mode, and in platform-binding mode an outbound binding
+		// fetch (no negative cache) plus secret dereferences for an
+		// existing workspace — per distinct workspace id, for any
+		// anonymous caller. Routes that legitimately take no bearer do
+		// not pass through here: /api/v1/system/health, the operator
+		// routes (operator token), the binding-invalidation webhook
+		// (its own bearer) and /git (its own chain: trusted-CIDR and
+		// development reads are token-less, so it must resolve first).
+		if s.servicePool != nil {
+			if _, err := bearerFromRequest(r); err != nil {
+				writeUniformUnauthorized(w)
+				return
+			}
+		}
+
 		workspaceID := r.Header.Get(WorkspaceHeader)
 
 		cfg, err := s.wsResolver.Resolve(r.Context(), workspaceID)
