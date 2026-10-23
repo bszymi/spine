@@ -28,23 +28,33 @@ SC-09. Build and CI only: no Spine package changes, no runtime behaviour or sche
   `golang:1.26.10-bookworm@sha256:632dff73…` and runs on `debian:bookworm-slim@sha256:7ff6ba31…`
   (tag kept beside each digest). The golang image sets `GOTOOLCHAIN=local`, so its own Go is the
   compiler that ships.
-- **CI is pinned and read-only.** `ci.yml` has `permissions: contents: read` at the top. Every
-  action is a full commit SHA with a `# vX.Y.Z` comment (`actions/checkout` v4.4.0,
-  `actions/setup-go` v5.6.0), and checkouts no longer persist the token in `.git/config`. The
-  postgres service image and the git-floor container are digest-pinned, and the git-floor
-  container is the Dockerfile's builder image, so that job tests the shipped git and Go.
-- **New CI jobs.** `vuln` runs `govulncheck@v1.9.0 ./...` and fails on any reachable advisory,
-  after checking that the Go in use is go.mod's toolchain. `toolchain-parity` runs `dev/pincheck`,
-  which refuses a missing toolchain line, an unpinned image or action, and a golang image
-  reference (Dockerfile, git-floor container, Makefile `DOCKER_GO`) that names another Go version
-  than the toolchain or differs from the others. With `-resolve` it also reads the digest's
-  `GOLANG_VERSION` from the registry without pulling. Bumping go.mod alone would otherwise keep
-  shipping the old compiler with nothing red. `image-build` builds the standalone image from its
-  pinned bases.
+- **CI is pinned and read-only.** `ci.yml` has `permissions: contents: read` at the top.
+  - Every action is a full commit SHA with a `# vX.Y.Z` comment (`actions/checkout` v4.4.0,
+    `actions/setup-go` v5.6.0), and checkouts no longer persist the token in `.git/config`.
+  - Every job runs on `ubuntu-24.04` instead of the floating `ubuntu-latest`.
+  - Every setup-go step installs `go-version: '1.26.10'` (go.mod's toolchain) instead of reading
+    `go-version-file`. setup-go v5 reads only the `go` line, and the toolchain download that
+    followed collided with the module-cache restore.
+  - The postgres service image is the compose files' digest-pinned ref. The git-floor container
+    is the Dockerfile's builder image, so that job tests the shipped git and Go.
+- **New CI jobs.**
+  - `vuln` runs `govulncheck@v1.9.0 ./...` and fails on any reachable advisory, after checking
+    that the Go in use is go.mod's toolchain.
+  - `toolchain-parity` runs `dev/pincheck`. It refuses a missing toolchain line, and an unpinned
+    image or action anywhere it can find one: Dockerfiles at any depth (including `# syntax=` and
+    `RUN --mount=from=`), workflows and composite actions parsed as YAML, compose files, and
+    `docker run|pull|create` in `run:` scripts and the Makefile. It also refuses a golang
+    reference under any registry path, or a setup-go version, that differs from the toolchain; a
+    CI image that differs from the compose stack's image of the same repository; and a
+    `*-latest` runner. With `-resolve` it also reads the digest's `GOLANG_VERSION` from the
+    registry without pulling, and checks that each action's `# vX.Y.Z` tag is exactly its pinned
+    commit (`git ls-remote`). Without it, bumping go.mod alone would keep shipping the old
+    compiler with nothing red.
+  - `image-build` builds the standalone image from its pinned bases.
 - **Dependabot.** `.github/dependabot.yml` covers `gomod`, `github-actions`, `docker` (Dockerfile)
   and `docker-compose`, weekly, with minor and patch updates grouped and a 7-day cooldown. It
-  does not move go.mod's `toolchain` line or the images inside `ci.yml`; `toolchain-parity`
-  fails a half-done golang bump.
+  does not move go.mod's `toolchain` line, the setup-go version or the images inside `ci.yml`.
+  `toolchain-parity` fails a half-done golang or postgres bump.
 - **Compose.** The postgres and localstack images in `docker-compose.yaml` and
   `docker-compose.test.yaml` are digest-pinned with a tag comment.
 - **Not covered here (owner actions, INIT-024 §7d).** A `main` ruleset (PR and CI required, no
@@ -60,9 +70,9 @@ SC-09. Build and CI only: no Spine package changes, no runtime behaviour or sche
   (`go list -m all`) is identical before and after this change, so SMP builds unchanged with
   `-mod=readonly` and `go mod tidy` changes nothing in SMP. The `toolchain` line is not
   inherited: an embedder's own go.mod decides its compiler.
-- New dev-only package `dev/pincheck` (`package main`, standard library only). Nothing imports
-  it, and `go test ./...` now includes its tests (fixtures plus a check of this repository's own
-  pins).
+- New dev-only package `dev/pincheck` (`package main`; standard library plus `gopkg.in/yaml.v3`,
+  already a Spine dependency). Nothing imports it, and `go test ./...` now includes its tests
+  (fixtures plus a check of this repository's own pins).
 
 ## INIT-023 — Security Audit Remediation: wave 4 follow-up
 
