@@ -105,15 +105,7 @@ func (w *branchCommitWriter) Create(ctx context.Context, path, content string) (
 // the started run; its review execution is waiting.
 func startSoDPlanningRun(t *testing.T) *govRepo {
 	t.Helper()
-	wf := sodPlanningWF()
-	g := newGovRepo(t, govRepoOpts{wf: wf, merger: true})
-	// Only runs StartPlanningRun creates: drop the fixture's hand-built run.
-	g.store.runs = map[string]*domain.Run{}
-	g.store.createdSteps = nil
-	g.orch.workflows = &mockWorkflowResolver{result: &workflow.BindingResult{Workflow: wf, CommitSHA: "v1", VersionLabel: "1"}}
-	g.orch.artifactWriter = &branchCommitWriter{g: g}
-	installStrictSoD(g.orch)
-
+	g := newSoDPlanningRepo(t)
 	ctx := domain.WithActor(context.Background(), sodPlanningActors()[sodStarter])
 	res, err := g.orch.StartPlanningRun(ctx, sodPlanningPath, validArtifactContent)
 	if err != nil {
@@ -130,6 +122,22 @@ func startSoDPlanningRun(t *testing.T) *govRepo {
 	if e := g.latest("review"); e == nil || e.Status != domain.StepStatusWaiting {
 		t.Fatalf("review not waiting: %+v", e)
 	}
+	return g
+}
+
+// newSoDPlanningRepo is the real repository of startSoDPlanningRun, with
+// no run started: its orchestrator starts planning runs through
+// StartPlanningRun under the strict policy and the PoC actors' resolver.
+func newSoDPlanningRepo(t *testing.T) *govRepo {
+	t.Helper()
+	wf := sodPlanningWF()
+	g := newGovRepo(t, govRepoOpts{wf: wf, merger: true})
+	// Only runs StartPlanningRun creates: drop the fixture's hand-built run.
+	g.store.runs = map[string]*domain.Run{}
+	g.store.createdSteps = nil
+	g.orch.workflows = &mockWorkflowResolver{result: &workflow.BindingResult{Workflow: wf, CommitSHA: "v1", VersionLabel: "1"}}
+	g.orch.artifactWriter = &branchCommitWriter{g: g}
+	installStrictSoD(g.orch)
 	return g
 }
 
@@ -351,31 +359,53 @@ func TestSoD_PlanningStarterRecorded(t *testing.T) {
 // AC 4: with no policy and no guard nothing is recorded — no commit_meta
 // write of either kind during the start — and an actor-less start runs as
 // before.
+//
+// The same holds for the configurations where neither reader of the record
+// is on (review round 1): the governance guard on with the lifecycle
+// exemption off (SMP EPIC-004 TASK-010's configuration), and a step-entry
+// policy with every switch but SeparationOfDuties, with an actor resolver
+// that knows nobody (so no starter check runs either).
 func TestSoD_ZeroPolicyWritesNoStarter(t *testing.T) {
-	for _, k := range planningStarterKinds() {
-		for _, withActor := range []bool{false, true} {
-			k, withActor := k, withActor
-			t.Run(k.name+map[bool]string{false: "/no actor", true: "/actor"}[withActor], func(t *testing.T) {
-				ms := &metaCallStore{mockRunStore: &mockRunStore{}}
-				o, writes := k.orch(ms, sodGitFor(k.name))
-				ctx := context.Background()
-				if withActor {
-					ctx = starterCtx(sodStarter)
-				}
-				res, err := k.start(o, ctx)
-				if err != nil {
-					t.Fatalf("start: %v", err)
-				}
-				if ms.sets != 0 || ms.merges != 0 {
-					t.Fatalf("zero value wrote commit_meta: sets=%d merges=%d", ms.sets, ms.merges)
-				}
-				if _, ok := res.Run.CommitMeta[CommitMetaGovernanceStartedBy]; ok {
-					t.Fatalf("zero value recorded a starter: %v", res.Run.CommitMeta)
-				}
-				if res.Run.Status != domain.RunStatusActive || writes() != 1 {
-					t.Fatalf("run %s, content writes %d; want active, 1", res.Run.Status, writes())
-				}
-			})
+	everyButSoD := StrictStepEntryPolicy()
+	everyButSoD.SeparationOfDuties = false
+	everyButSoD.Actors = sodActorMap{}
+	configs := []struct {
+		name  string
+		apply func(o *Orchestrator)
+	}{
+		{"zero value", func(*Orchestrator) {}},
+		{"guard without the lifecycle exemption", func(o *Orchestrator) {
+			o.governance = &governanceGuard{cfg: GovernanceGuard{Enabled: true}}
+		}},
+		{"policy without separation of duties", func(o *Orchestrator) { o.WithStepEntryPolicy(everyButSoD) }},
+	}
+	for _, cfg := range configs {
+		for _, k := range planningStarterKinds() {
+			for _, withActor := range []bool{false, true} {
+				cfg, k, withActor := cfg, k, withActor
+				t.Run(cfg.name+"/"+k.name+map[bool]string{false: "/no actor", true: "/actor"}[withActor], func(t *testing.T) {
+					ms := &metaCallStore{mockRunStore: &mockRunStore{}}
+					o, writes := k.orch(ms, sodGitFor(k.name))
+					cfg.apply(o)
+					ctx := context.Background()
+					if withActor {
+						ctx = starterCtx(sodStarter)
+					}
+					res, err := k.start(o, ctx)
+					if err != nil {
+						t.Fatalf("start: %v", err)
+					}
+					if ms.sets != 0 || ms.merges != 0 {
+						t.Fatalf("%s wrote commit_meta: sets=%d merges=%d", cfg.name, ms.sets, ms.merges)
+					}
+					if _, ok := res.Run.CommitMeta[CommitMetaGovernanceStartedBy]; ok {
+						t.Fatalf("%s recorded a starter: %v", cfg.name, res.Run.CommitMeta)
+					}
+					if res.Run.Status != domain.RunStatusActive || writes() != 1 {
+						t.Fatalf("run %s, content writes %d; want active, 1", res.Run.Status, writes())
+					}
+				})
+			}
 		}
 	}
 }
@@ -829,5 +859,113 @@ func TestSoD_EveryPlanningStarterIsRefusedItsReview(t *testing.T) {
 				t.Fatalf("an independent reviewer was refused: %v", err)
 			}
 		})
+	}
+}
+
+// Review round 1 (regression; the committed form of the reviewer's
+// TestRevPoC_WrongIdentifierSilentlyReopensN3). With a step-entry resolver
+// installed, a starter recorded under an identifier the resolver does not
+// bind — an embedder's platform user id instead of the workspace handle the
+// same person claims with — never matches the bound reviewer, so that person
+// could claim and accept their own content. The start now refuses such an
+// id before anything exists. Before the fix (and at the scaffold base) the
+// start succeeded and the starter's own handle claimed the review, accepted
+// it, and the artifact reached main.
+func TestSoD_PlanningStarterMustResolveThroughEntryResolver(t *testing.T) {
+	for _, id := range []string{"11111111-plat-uuid", "Starter", "starter "} {
+		id := id
+		t.Run(id, func(t *testing.T) {
+			g := newSoDPlanningRepo(t)
+			ctx := domain.WithActor(context.Background(), &domain.Actor{ActorID: id, Type: domain.ActorTypeHuman})
+			res, err := g.orch.StartPlanningRun(ctx, sodPlanningPath, validArtifactContent)
+			if err == nil {
+				g.run, g.branch = res.Run, res.Run.BranchName
+				g.complete("execute", "bot", "completed")
+				review := g.latest("review")
+				bg := context.Background()
+				if _, cErr := g.orch.ClaimStep(bg, ClaimRequest{ActorID: sodStarter, ExecutionID: review.ExecutionID}); cErr == nil {
+					_, aErr := g.orch.IngestResult(bg, SubmitRequest{ExecutionID: review.ExecutionID, OutcomeID: "accepted", ActorID: sodStarter})
+					run, _ := g.store.GetRun(bg, g.run.RunID)
+					t.Fatalf("N-3 reopened: started as %q (recorded %q), the same person's handle %q claimed and accepted its own content (accept err=%v, run %s, main has the artifact: %v)",
+						id, run.CommitMeta[CommitMetaGovernanceStartedBy], sodStarter, aErr, run.Status, g.mainFile(sodPlanningPath) != "")
+				}
+				t.Fatalf("a starter the resolver does not know (%q) started a planning run", id)
+			}
+			requireCode(t, err, domain.ErrUnauthorized, "start by an id the step-entry resolver does not bind")
+			if len(g.store.runs) != 0 || g.orch.artifactWriter.(*branchCommitWriter).calls != 0 {
+				t.Fatalf("refused start left state: runs=%d content writes=%d", len(g.store.runs), g.orch.artifactWriter.(*branchCommitWriter).calls)
+			}
+			if out := g.git("branch", "--list", "spine/plan/*"); out != "" {
+				t.Fatalf("refused start created a planning branch: %q", out)
+			}
+		})
+	}
+}
+
+// errorResolver answers every lookup with err.
+type errorResolver struct{ err error }
+
+func (r errorResolver) ResolveEntryActor(context.Context, string) (*domain.Actor, error) {
+	return nil, r.err
+}
+
+// echoResolver answers for a different id than the one asked (the engine's
+// echo check refuses it).
+type echoResolver struct{}
+
+func (echoResolver) ResolveEntryActor(_ context.Context, id string) (*domain.Actor, error) {
+	return &domain.Actor{ActorID: strings.ToLower(id), Status: domain.ActorStatusActive}, nil
+}
+
+// Review round 1, every starter: under separation of duties with a resolver
+// installed, the starter must resolve through it before anything exists. An
+// unknown id (or a resolver answering for another id) is ErrUnauthorized; a
+// failing resolver keeps its code (fail closed); a known id starts and is
+// recorded. Without separation of duties the resolver is not consulted.
+func TestSoD_PlanningStarterResolverOutcomes(t *testing.T) {
+	known := sodActorMap{sodStarter: {ActorID: sodStarter, Type: domain.ActorTypeHuman, Status: domain.ActorStatusActive}}
+	cases := []struct {
+		name     string
+		resolver EntryActorResolver
+		sod      bool
+		actor    string
+		want     domain.ErrorCode // "" = starts
+	}{
+		{"known id starts", known, true, sodStarter, ""},
+		{"unknown id", known, true, "11111111-plat-uuid", domain.ErrUnauthorized},
+		{"resolver answers for another id", echoResolver{}, true, "Starter", domain.ErrUnauthorized},
+		{"resolver unavailable", errorResolver{domain.NewError(domain.ErrUnavailable, "actor directory down")}, true, sodStarter, domain.ErrUnavailable},
+		{"resolver untyped error", errorResolver{errors.New("boom")}, true, sodStarter, domain.ErrInternal},
+		{"separation of duties off: not consulted", errorResolver{errors.New("must not be called")}, false, "11111111-plat-uuid", ""},
+	}
+	for _, c := range cases {
+		for _, k := range planningStarterKinds() {
+			c, k := c, k
+			t.Run(c.name+"/"+k.name, func(t *testing.T) {
+				ms := &metaCallStore{mockRunStore: &mockRunStore{}}
+				gitOp := sodGitFor(k.name)
+				o, writes := k.orch(ms, gitOp)
+				o.WithStepEntryPolicy(StepEntryPolicy{SeparationOfDuties: c.sod, Actors: c.resolver})
+				res, err := k.start(o, starterCtx(c.actor))
+				if c.want == "" {
+					if err != nil {
+						t.Fatalf("start: %v", err)
+					}
+					want := ""
+					if c.sod {
+						want = c.actor
+					}
+					if got := ms.runs[res.Run.RunID].CommitMeta[CommitMetaGovernanceStartedBy]; got != want {
+						t.Fatalf("recorded starter %q, want %q", got, want)
+					}
+					return
+				}
+				requireCode(t, err, c.want, c.name)
+				if ms.createdRun != nil || len(gitOp.created) != 0 || len(gitOp.readRefs) != 0 || writes() != 0 {
+					t.Fatalf("refused start touched state: run=%v branches=%v reads=%v writes=%d",
+						ms.createdRun != nil, gitOp.created, gitOp.readRefs, writes())
+				}
+			})
+		}
 	}
 }

@@ -199,7 +199,9 @@ and the caller is bound to no execution. Under `SeparationOfDuties`:
 
 - every planning start needs an authenticated actor on the context (`domain.WithActor`; the
   gateway binds it for every authenticated request). Without one the start is refused with
-  `ErrUnauthorized` (401) before any run row, branch or git read exists;
+  `ErrUnauthorized` (401) before any run row, branch or git read exists. An embedder with an
+  `Actors` resolver must put the id it binds on the context: an id the resolver does not resolve
+  is refused the same way;
 - the engine records that actor in the run's `commit_meta` (`spine.governance.started_by`, the key
   the ADR-016 lifecycle exemption already reads) before it writes the content; a failed record
   aborts the start (branch deleted, run marked failed);

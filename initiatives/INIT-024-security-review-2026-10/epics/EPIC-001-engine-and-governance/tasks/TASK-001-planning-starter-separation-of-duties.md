@@ -119,10 +119,48 @@ This task closes **N-3** from the 2026-10-22 review.
 - **Inert at the bump** while SMP keeps separation of duties off. The zero value writes nothing
   and refuses nothing.
 - **When SMP turns it on** (SMP TASK-011 owner question 2), `CreateEntry` must attach
-  `domain.WithActor(ctx, &domain.Actor{ActorID: <member handle>})` before `StartPlanningRun`. The
-  handle must be the exact string SMP's step-entry resolver later binds (`human-<uuid>`), because
-  the comparison is exact. Without it every planning start is refused (fail closed, visible in
-  SMP's tests).
+  `domain.WithActor(ctx, &domain.Actor{ActorID: <member handle>})` before `StartPlanningRun`.
+  - The handle must be the exact string SMP's step-entry resolver later binds (`human-<uuid>`),
+    because the comparison is exact.
+  - Without it every planning start is refused with `ErrUnauthorized` (fail closed).
+  - Since review round 1, a handle that SMP's `StepEntryPolicy.Actors` resolver does not resolve
+    is refused too (`ErrUnauthorized`). Recording the platform user id would otherwise silently
+    reopen N-3.
+- *Correction (review round 1).* An earlier draft said this refusal was "visible in SMP's tests".
+  **It is not, today.** SMP TASK-011's only test with separation of duties on uses standard runs.
+  SMP's scenario harness always binds an actor. `CreateEntry` reaches `StartPlanningRun` with
+  separation of duties off. Nothing in SMP's suites would turn red if the wiring below were
+  missing, so SMP must add the test in obligation 4.
+- **SMP obligations** before `SMP_STEP_SEPARATION_OF_DUTIES` is turned on with this Spine. They are
+  for SMP EPIC-004 TASK-012's closing bump; detail is in the review record
+  `tmp/init027-orchestration/i24/t001-rev/REVIEW.md`.
+  1. **`embeddedArtifacts.CreateEntry` binds the workspace step-entry handle.**
+     - Before `resolveCreateEntryTarget` / `StartPlanningRun`, resolve
+       `ResolveSpineActorID(ctx, sc.WorkspaceID, auth.ActorIDFrom(ctx))`. That is
+       `platform.workspace_roles.spine_actor_id`, `human-<uuid>`, the same resolver as
+       `execution.Handler.resolveActorID` / `AutoAssignEntryStep`.
+     - Then set `ctx = domain.WithActor(ctx, &domain.Actor{ActorID: handle})`.
+     - Never use `auth.ActorIDFrom` or `observe.ActorID`: the platform UUID would reopen N-3. The
+       engine now refuses that, since it does not resolve.
+     - Leave `Role` at its zero value.
+     - A missing handle must fail **before** the call (403, like `ErrNoActorMapping`), so that
+       proposal promotion classifies it as pre-run. The engine's own early 401 comes back from
+       `starter.StartPlanningRun` and is wrapped as `CreateEntryError{RunStarted:true}`
+       (`artifacts_createentry.go:186-188`). Promotion would then mark the proposal
+       `failed_stranded` although no run row exists.
+  2. **Every orchestrator that starts planning runs carries the same separation-of-duties flag.**
+     TASK-011's `cache.Options()` does.
+  3. **In-flight SMP planning runs have no record.** With separation of duties on, nobody can
+     review them (Decision 2). Drain or cancel them before the switch, or backfill
+     `spine.governance.started_by` once with the exact handle.
+  4. **Add an SMP test with separation of duties on.** Run `CreateEntry`, then:
+     - the starter's assign or claim of the review returns 403;
+     - a colleague's assign or claim succeeds;
+     - an unmapped member's `CreateEntry` fails before the run, as pre-run.
+  5. **Residuals to record on the SMP side:**
+     - TASK-011 OQ9: a re-added member gets a new handle, and so is not the recorded starter.
+     - Admin overwrites through `WriteContent` / `AddToRun` need no binding, so an admin can write
+       and then review. This is SMP's version of Spine's operator residual.
 - SMP TASK-011 / TASK-012 record this task as "adopted here" in the closing bump's ledger.
 
 ## Decisions

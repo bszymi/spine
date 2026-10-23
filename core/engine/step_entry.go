@@ -72,7 +72,9 @@ type StepEntryPolicy struct {
 	// (INIT-024 TASK-001): it wrote the run's content at start. Every
 	// planning starter (StartPlanningRun, StartWorkflowPlanningRun,
 	// StartWorkflowUpdatePlanningRun) therefore needs an authenticated actor
-	// on the context (domain.WithActor; ErrUnauthorized otherwise) and
+	// on the context (domain.WithActor; ErrUnauthorized otherwise) — with an
+	// Actors resolver installed, an id that resolves through it, the
+	// identifier a bind of the same person uses — and
 	// records it in the run's commit_meta (CommitMetaGovernanceStartedBy)
 	// before it writes the content; a planning run with no record — started
 	// before the upgrade or while this was off — can be reviewed by nobody
@@ -149,6 +151,12 @@ type StepEntryPolicy struct {
 	// A *domain.SpineError keeps its code (ErrUnavailable stays 503); an
 	// untyped error becomes ErrInternal. The engine passes the requested
 	// ID to the resolver unmodified.
+	//
+	// Under SeparationOfDuties the resolver also vets a planning run's
+	// starter (INIT-024 TASK-001): the actor on the start's context must
+	// resolve through it, so the recorded starter is the same identifier a
+	// bind of that person uses; an unknown id refuses the start
+	// (ErrUnauthorized).
 	Actors EntryActorResolver
 }
 

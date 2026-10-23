@@ -825,13 +825,40 @@ func (o *Orchestrator) reviewerIsNotAuthor(ctx context.Context, run *domain.Run,
 // standalone gateway binds the authenticated actor for every request, so
 // only an unauthenticated (dev-mode) or misbuilt caller reaches this. With
 // the policy off it checks nothing (the zero value starts as before).
+//
+// With a step-entry resolver installed (StepEntryPolicy.Actors — an embedder
+// whose actors are not all rows in Spine's actor table) the starter must
+// also resolve through it, exactly as a bind would (entryActor: the
+// resolver's answer must echo the id). Separation of duties compares the
+// recorded starter with the actor later bound to the review byte for byte,
+// so a starter recorded under any other identifier for the same person (an
+// embedder's platform user id instead of its workspace step-entry handle)
+// would never match, and that person could review their own content: N-3
+// silently reopened, with no fail-closed signal (INIT-024 TASK-001 review
+// round 1). An id the resolver does not know is ErrUnauthorized; any other
+// resolver error keeps its code (ErrUnavailable stays 503), so the start
+// fails closed. Without a resolver the binding paths look actors up in
+// Spine's own actor table, where the gateway's authenticated actor already
+// lives, so nothing more is checked.
 func (o *Orchestrator) requirePlanningStarter(ctx context.Context) error {
 	if !o.entryPolicy.SeparationOfDuties {
 		return nil
 	}
-	if a := domain.ActorFromContext(ctx); a == nil || a.ActorID == "" {
+	a := domain.ActorFromContext(ctx)
+	if a == nil || a.ActorID == "" {
 		return domain.NewError(domain.ErrUnauthorized,
 			"a planning run under separation of duties needs an authenticated starter")
+	}
+	if o.entryPolicy.Actors == nil {
+		return nil
+	}
+	if _, err := o.entryActor(ctx, a.ActorID); err != nil {
+		var se *domain.SpineError
+		if errors.As(err, &se) && se.Code == domain.ErrNotFound {
+			return domain.NewError(domain.ErrUnauthorized,
+				"a planning run under separation of duties needs a starter the step-entry actor resolver binds; the context's actor id does not resolve")
+		}
+		return err
 	}
 	return nil
 }
@@ -875,7 +902,7 @@ func (o *Orchestrator) recordPlanningStarter(ctx context.Context, run *domain.Ru
 		if sod {
 			return fmt.Errorf("record the planning run's starter: %w", err)
 		}
-		observe.Logger(ctx).Warn("governance guard: the lifecycle run's starter was not recorded; its workflow edit will need an operator approval",
+		observe.Logger(ctx).Warn("governance guard: the planning run's starter was not recorded; if it is a workflow-lifecycle run, its workflow edit will need an operator approval",
 			"run_id", run.RunID, "error", err)
 		return nil
 	}

@@ -46,11 +46,17 @@ planning run, although that actor wrote the run's content. No runtime schema cha
   `StartWorkflowUpdatePlanningRun` return `ErrUnauthorized` unless the context carries
   `domain.WithActor` with a non-empty `ActorID`, which must be exactly the ID the step-entry
   resolver later binds for that person (SMP: the member's `human-<uuid>` handle in `CreateEntry`).
+  With `StepEntryPolicy.Actors` installed the starter is resolved through it first: an id it does
+  not know is `ErrUnauthorized`, any other resolver error keeps its code (`ErrUnavailable` stays
+  503). Resolve the handle before the call: the engine's refusal comes from inside
+  `StartPlanningRun`, after nothing was persisted.
   They record it with one `MergeCommitMeta` (or `GetRun` + `SetCommitMeta`) call before the content
   write; a failed write fails the start, deletes the branch and marks the pending run failed.
 - A workflow planning run whose start fails on the branch logs "planning run start failed; could
   not mark the run failed" (was "workflow planning run start failed; …") when it cannot be marked
-  failed.
+  failed. A guard-only starter-record failure logs "governance guard: the planning run's starter
+  was not recorded; if it is a workflow-lifecycle run, its workflow edit will need an operator
+  approval" (was "… the lifecycle run's starter …").
 - Merge binding off: a commit-carrying outcome's commit_meta write keeps
   `spine.governance.started_by` (every other reserved key is still dropped). The key is written
   only under separation of duties or the guard, so without either nothing changes.

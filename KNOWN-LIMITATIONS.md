@@ -243,7 +243,11 @@ This document tracks known gaps and deferred functionality.
     `StartWorkflowPlanningRun`, `StartWorkflowUpdatePlanningRun`) needs `domain.WithActor` on the
     context, under exactly the actor ID the step-entry resolver later binds (the compare is
     exact; SMP: the member's `human-<uuid>` handle in `CreateEntry`). Without it every planning
-    start is `ErrUnauthorized`.
+    start is `ErrUnauthorized`; with an `Actors` resolver installed, so is an id it does not
+    resolve (a platform user id recorded instead of the handle would otherwise never match the
+    bound reviewer and silently reopen the self-review). Without a resolver the engine cannot
+    check the id beyond its being non-empty: an embedder that binds actors by Spine's actor table
+    must put that table's id on the context.
 - **Separation-of-duties bind race across processes:** the SoD check reads state and the bind
   writes it later. Within one process the engine serialises a run's check-and-bind (an in-process
   lock shared by every orchestrator, held only while the check is re-run and the bind written), so
