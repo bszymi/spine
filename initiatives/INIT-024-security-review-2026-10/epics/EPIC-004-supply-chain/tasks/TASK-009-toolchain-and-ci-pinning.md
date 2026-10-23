@@ -2,7 +2,7 @@
 id: TASK-009
 type: Task
 title: "Toolchain and dependency bumps, Dockerfile and CI pinning, govulncheck, Dependabot"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-004-supply-chain/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
