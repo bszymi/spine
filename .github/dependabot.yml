@@ -9,16 +9,18 @@
 # tag; Dependabot moves both together.
 #
 # What Dependabot does not move, by design:
-#   - go.mod's `toolchain` line. A golang image bump in the Dockerfile
-#     arrives without it, and the toolchain-parity job (dev/pincheck) fails
-#     on that PR until go.mod's toolchain, the ci.yml git-floor container and
-#     the Makefile's DOCKER_GO name the same golang tag and digest. That red
-#     is the alarm working: under the image's GOTOOLCHAIN=local, a half-done
-#     bump silently ships the old compiler.
+#   - go.mod's `toolchain` line and the setup-go `go-version`s. A golang
+#     image bump in the Dockerfile arrives without them, and the
+#     toolchain-parity job (dev/pincheck) fails on that PR until go.mod's
+#     toolchain, every setup-go version, the ci.yml git-floor container and
+#     the Makefile's DOCKER_GO name the same version (and the images the same
+#     tag and digest). That red is the alarm working: under the image's
+#     GOTOOLCHAIN=local, a half-done bump silently ships the old compiler.
 #   - The image references inside .github/workflows/ci.yml (the git-floor
 #     container and the postgres service) and the govulncheck version
 #     (`go run ...@vX.Y.Z` in ci.yml and the Makefile). Move them by hand
-#     with the matching Dockerfile / compose update.
+#     with the matching Dockerfile / compose update; toolchain-parity refuses
+#     a CI postgres that is not the compose stack's.
 version: 2
 updates:
   - package-ecosystem: gomod

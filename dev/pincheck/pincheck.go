@@ -7,38 +7,47 @@ package main
 // the Go that compiles the standalone image is the image's own GOLANG_VERSION
 // — go.mod's `toolchain` line is ignored there. Bumping go.mod alone (say,
 // for a stdlib security release) would therefore keep shipping the old
-// compiler and its advisories while every host build and every setup-go CI
-// job (GOTOOLCHAIN=auto) used the new one, with nothing red anywhere. This
-// check makes that drift a failure: every golang image reference in the
-// repository must name the toolchain's exact patch version, and all of them
-// must be the same digest. With -resolve it also reads the digest's image
-// config from the registry (manifest and config only — nothing is pulled)
-// and refuses unless every platform's GOLANG_VERSION is the toolchain
-// version, so a tag that was edited without its digest cannot pass.
+// compiler and its advisories while host builds (GOTOOLCHAIN=auto) used the
+// new one, with nothing red anywhere. This check makes that drift a failure:
+// every golang image reference in the repository must name the toolchain's
+// exact patch version and all of them must be one tag and one digest, and
+// every actions/setup-go step must install exactly that version. With
+// -resolve it also reads the digest's image config from the registry
+// (manifest and config only — nothing is pulled) and refuses unless every
+// platform's GOLANG_VERSION is the toolchain version, so a tag edited without
+// its digest cannot pass.
 //
 // Why pins matter. Spine is a public repository: a moved action tag or base
-// image tag reaches every contributor's fork and CI run. Every Dockerfile
-// FROM, every workflow and compose image is name:tag@sha256:<digest> (the
-// tag stays for the reader and for Dependabot), and every workflow `uses:`
-// is a 40-hex commit SHA followed by a `# vX.Y.Z` comment.
+// image tag reaches every contributor's fork and CI run. Every image is
+// name:tag@sha256:<digest> (the tag stays for the reader and for
+// Dependabot), every `uses:` is a 40-hex commit SHA followed by a
+// `# vX.Y.Z` comment, and no job runs on a floating `*-latest` runner label.
+// With -resolve every action's `# vX.Y.Z` tag is looked up in its own
+// repository and must name exactly the pinned commit, so a SHA from another
+// release (or another repository's fork network) cannot hide behind a
+// truthful-looking comment.
 //
-// Files scanned, relative to -root: go.mod, Dockerfile, Dockerfile.*,
-// *.Dockerfile, .github/workflows/*.y{a,}ml, docker-compose*.y{a,}ml,
-// compose*.y{a,}ml, Makefile and *.mk. Comment lines are skipped.
+// Where it looks (see discover): go.mod; every Dockerfile, Dockerfile.* and
+// *.Dockerfile, every compose file, every Makefile and *.mk, and every
+// .github/actions/**/action.y{a,}ml anywhere in the tree (vendor/,
+// node_modules/, testdata/ and .git/ skipped); and .github/workflows/*.y{a,}ml.
+// Workflow, action and compose files are parsed as YAML (flow style, quoted
+// keys, anchors and merge keys included); a file that does not parse is a
+// refusal. Images named in `docker run|create|pull` commands inside workflow
+// `run:` scripts and Makefiles are found by a best-effort shell scan
+// (shell.go); KNOWN-LIMITATIONS.md lists what it cannot see.
 //
-// To move the toolchain: change go.mod's `toolchain` line, then every
-// golang:<version>-bookworm@sha256:<digest> reference (Dockerfile builder,
-// the ci.yml git-floor container, the Makefile's DOCKER_GO) to the new tag
-// and its index digest (`docker buildx imagetools inspect <tag>`), and run
-// `go run ./dev/pincheck -resolve`.
+// To move the toolchain: change go.mod's `toolchain` line, every
+// golang:<version>-bookworm@sha256:<digest> reference (the Dockerfile
+// builder, the ci.yml git-floor container, the Makefile's DOCKER_GO) to the
+// new tag and its index digest (`docker buildx imagetools inspect <tag>`),
+// and every setup-go `go-version`; then run `go run ./dev/pincheck -resolve`.
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -64,21 +73,40 @@ func (p problem) String() string {
 	}
 }
 
-// imageRef is one container image reference found in an image position
-// (Dockerfile FROM / COPY --from, workflow container or service image,
-// compose image) or, for golang, anywhere in a scanned file.
+// Where an image reference was found. Compose and workflow references of
+// one repository must agree (consistency rule).
+const (
+	originDockerfile = "dockerfile"
+	originWorkflow   = "workflow"
+	originAction     = "action"
+	originCompose    = "compose"
+	originMakefile   = "makefile"
+)
+
+// imageRef is one container image reference found in an image position.
 type imageRef struct {
-	file string
-	line int
-	ref  string
+	file   string
+	line   int
+	ref    string
+	origin string
 }
 
-// result is what a clean check found; main prints it.
+// actionPin is one SHA-pinned `uses:` with its version comment, kept for
+// -resolve's tag lookup.
+type actionPin struct {
+	file    string
+	line    int
+	repo    string // owner/repo
+	sha     string
+	version string // vX.Y.Z from the comment
+}
+
+// result is what a clean check found; main prints it and -resolve reads it.
 type result struct {
 	toolchain string     // "1.26.10" (no "go" prefix)
 	golang    []imageRef // every golang reference
-	images    int        // pinned image references in image positions
-	actions   int        // pinned `uses:` references
+	images    int        // image references checked
+	actions   []actionPin
 }
 
 var (
@@ -90,27 +118,20 @@ var (
 
 	// actionRef is owner/repo[/path]@<full commit SHA>. A short SHA is
 	// refused: it is ambiguous and GitHub resolves it like a branch name.
-	actionRef = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[^@\s]+)?@[0-9a-f]{40}$`)
+	actionRef = regexp.MustCompile(`^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:/[^@\s]+)?@([0-9a-f]{40})$`)
 
 	// versionComment is the `# vX.Y.Z` a reviewer reads instead of the SHA.
-	versionComment = regexp.MustCompile(`^#\s*v\d+\.\d+\.\d+(?:\s|$)`)
+	versionComment = regexp.MustCompile(`^#\s*(v\d+\.\d+\.\d+)(?:\s|$)`)
 
-	yamlImage     = regexp.MustCompile(`^\s*(?:-\s+)?image:\s*(.*)$`)
-	yamlContainer = regexp.MustCompile(`^\s*(?:-\s+)?container:\s*(.*)$`)
-	yamlUses      = regexp.MustCompile(`^\s*(?:-\s+)?uses:\s*(.*)$`)
-
-	// golangToken finds a golang image reference anywhere in a line (a
-	// Makefile `docker run`, a workflow `run:` script, an image position).
-	// golang.org/... module paths have no ':' after "golang" and never match.
-	golangToken = regexp.MustCompile(`(?:^|[\s"'=(:])((?:(?:index\.)?docker\.io/)?(?:library/)?golang:[^\s"'()]+)`)
+	composeName = regexp.MustCompile(`^(?:docker-)?compose(?:[.-][^/]*)?\.ya?ml$`)
 )
 
-// golangNames are the spellings of the official golang image repository.
-var golangNames = map[string]bool{
-	"golang":                         true,
-	"library/golang":                 true,
-	"docker.io/library/golang":       true,
-	"index.docker.io/library/golang": true,
+// isGolangRepo reports whether an image repository is the official golang
+// image under any registry or mirror path (golang, library/golang,
+// docker.io/library/golang, mirror.gcr.io/library/golang, …). A mirror
+// spelling must not drop a reference out of the parity rule.
+func isGolangRepo(name string) bool {
+	return name == "golang" || strings.HasSuffix(name, "/golang")
 }
 
 // parseToolchain returns the release version ("1.26.10") of go.mod's single
@@ -130,7 +151,7 @@ func parseToolchain(gomod []byte) (string, error) {
 	}
 	switch len(found) {
 	case 0:
-		return "", errors.New("go.mod has no `toolchain goX.Y.Z` line: under GOTOOLCHAIN=local (the golang image's default) nothing then ties the shipped compiler to a version")
+		return "", fmt.Errorf("go.mod has no `toolchain goX.Y.Z` line: under GOTOOLCHAIN=local (the golang image's default) nothing then ties the shipped compiler to a version")
 	case 1:
 	default:
 		return "", fmt.Errorf("go.mod has %d toolchain lines; want exactly one", len(found))
@@ -186,181 +207,102 @@ func golangTagVersion(tag string) string {
 	return v
 }
 
-// splitTrailingComment splits `value # comment`. YAML and Makefiles start a
-// comment at a '#' preceded by whitespace; values here never contain one.
-func splitTrailingComment(s string) (value, comment string) {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '#' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t') {
-			return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i:])
-		}
-	}
-	return strings.TrimSpace(s), ""
-}
-
-func unquote(s string) string {
-	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
-		return s[1 : len(s)-1]
-	}
-	return s
-}
-
-func isCommentLine(line string) bool {
-	return strings.HasPrefix(strings.TrimSpace(line), "#")
-}
-
 // scanned collects what one pass over the repository found.
 type scanned struct {
-	images   []imageRef // image positions (pin rule)
-	golang   []imageRef // golang references anywhere (parity rule)
-	actions  int
-	problems []problem
+	toolchain string
+	images    []imageRef
+	actions   []actionPin
+	problems  []problem
 }
 
-// scanGolangTokens records every golang image reference on a non-comment line.
-func (s *scanned) scanGolangTokens(file string, content []byte) {
-	for i, raw := range strings.Split(string(content), "\n") {
-		if isCommentLine(raw) {
-			continue
-		}
-		line, _ := splitTrailingComment(raw)
-		for _, m := range golangToken.FindAllStringSubmatch(line, -1) {
-			s.golang = append(s.golang, imageRef{file: file, line: i + 1, ref: m[1]})
-		}
-	}
+func (s *scanned) refuse(file string, line int, format string, args ...any) {
+	s.problems = append(s.problems, problem{file: file, line: line, msg: fmt.Sprintf(format, args...)})
 }
 
-// scanDockerfile records FROM and COPY --from images that are not a build
-// stage, `scratch` or a stage index.
-func (s *scanned) scanDockerfile(file string, content []byte) {
-	stages := map[string]bool{}
-	for i, raw := range strings.Split(string(content), "\n") {
-		if isCommentLine(raw) {
-			continue
-		}
-		fields := strings.Fields(raw)
-		if len(fields) == 0 {
-			continue
-		}
-		switch strings.ToUpper(fields[0]) {
-		case "FROM":
-			rest := fields[1:]
-			for len(rest) > 0 && strings.HasPrefix(rest[0], "--") {
-				rest = rest[1:]
-			}
-			if len(rest) == 0 {
-				s.problems = append(s.problems, problem{file, i + 1, "FROM without an image"})
-				continue
-			}
-			image := rest[0]
-			// The stage this line declares is usable from the next line
-			// on, so it is checked against the earlier stages first.
-			if !strings.EqualFold(image, "scratch") && !stages[strings.ToLower(image)] {
-				s.images = append(s.images, imageRef{file: file, line: i + 1, ref: image})
-			}
-			if len(rest) >= 3 && strings.EqualFold(rest[1], "AS") {
-				stages[strings.ToLower(rest[2])] = true
-			}
-		case "COPY", "ADD":
-			for _, f := range fields[1:] {
-				from, ok := strings.CutPrefix(f, "--from=")
-				if !ok {
-					continue
-				}
-				if stages[strings.ToLower(from)] || isAllDigits(from) {
-					continue
-				}
-				s.images = append(s.images, imageRef{file: file, line: i + 1, ref: from})
-			}
-		}
-	}
+func (s *scanned) addImage(file string, line int, ref, origin string) {
+	s.images = append(s.images, imageRef{file: file, line: line, ref: ref, origin: origin})
 }
 
-func isAllDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// scanYAML records image (and, for workflows, container) values and checks
-// every workflow `uses:`.
-func (s *scanned) scanYAML(file string, content []byte, workflow bool) {
-	for i, raw := range strings.Split(string(content), "\n") {
-		if isCommentLine(raw) {
-			continue
-		}
-		if m := yamlImage.FindStringSubmatch(raw); m != nil {
-			if v, _ := splitTrailingComment(m[1]); v != "" {
-				s.images = append(s.images, imageRef{file: file, line: i + 1, ref: unquote(v)})
-			}
-			continue
-		}
-		if !workflow {
-			continue
-		}
-		if m := yamlContainer.FindStringSubmatch(raw); m != nil {
-			// `container:` followed by a mapping has no inline value; its
-			// `image:` is matched on its own line.
-			if v, _ := splitTrailingComment(m[1]); v != "" && !strings.HasPrefix(v, "{") {
-				s.images = append(s.images, imageRef{file: file, line: i + 1, ref: unquote(v)})
-			}
-			continue
-		}
-		if m := yamlUses.FindStringSubmatch(raw); m != nil {
-			v, comment := splitTrailingComment(m[1])
-			s.checkUses(file, i+1, unquote(v), comment)
-		}
-	}
-}
-
-func (s *scanned) checkUses(file string, line int, uses, comment string) {
+// checkUses applies the action pin rule to one `uses:` value.
+func (s *scanned) checkUses(file string, line int, uses, comment, origin string) {
 	switch {
 	case strings.HasPrefix(uses, "./"):
-		// A local action is this repository's own reviewed code.
+		// A local action or reusable workflow is this repository's own
+		// reviewed code (its own file is scanned when it is an action).
 		return
 	case strings.HasPrefix(uses, "docker://"):
-		s.images = append(s.images, imageRef{file: file, line: line, ref: strings.TrimPrefix(uses, "docker://")})
+		s.addImage(file, line, strings.TrimPrefix(uses, "docker://"), origin)
 		return
-	case !actionRef.MatchString(uses):
-		s.problems = append(s.problems, problem{file, line, fmt.Sprintf("action %q is not pinned to a full 40-hex commit SHA: a tag or branch can be moved under every run", uses)})
-	case !versionComment.MatchString(comment):
-		s.problems = append(s.problems, problem{file, line, fmt.Sprintf("action %q has no `# vX.Y.Z` comment naming the release its SHA is", uses)})
-	default:
-		s.actions++
 	}
+	m := actionRef.FindStringSubmatch(uses)
+	if m == nil {
+		s.refuse(file, line, "action %q is not pinned to a full 40-hex commit SHA: a tag or branch can be moved under every run", uses)
+		return
+	}
+	v := versionComment.FindStringSubmatch(comment)
+	if v == nil {
+		s.refuse(file, line, "action %q has no `# vX.Y.Z` comment naming the release its SHA is", uses)
+		return
+	}
+	s.actions = append(s.actions, actionPin{file: file, line: line, repo: m[1], sha: m[2], version: v[1]})
 }
 
-// globFiles returns the root-relative files matching each pattern, sorted
-// and de-duplicated.
-func globFiles(root string, patterns ...string) ([]string, error) {
-	seen := map[string]bool{}
-	var out []string
-	for _, p := range patterns {
-		matches, err := filepath.Glob(filepath.Join(root, p))
+// The kinds of file the check reads.
+type fileSet struct {
+	dockerfiles, workflows, actions, composes, makefiles []string
+}
+
+// skipDirs are never descended into: vendored or installed third-party
+// trees and test fixtures are not this repository's build inputs.
+var skipDirs = map[string]bool{".git": true, "vendor": true, "node_modules": true, "testdata": true}
+
+// discover walks the tree once and classifies every file the rules read.
+// Workflows are only .github/workflows/*.y{a,}ml (GitHub reads no
+// subdirectory); everything else is found at any depth. A symlinked file is
+// read through its link, as a builder or compose would.
+func discover(root string) (fileSet, error) {
+	var fsys fileSet
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil, err
+			return err
 		}
-		for _, m := range matches {
-			rel, err := filepath.Rel(root, m)
-			if err != nil {
-				return nil, err
-			}
-			if info, err := os.Stat(m); err == nil && info.Mode().IsRegular() && !seen[rel] {
-				seen[rel] = true
-				out = append(out, rel)
-			}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
 		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			if rel != "." && skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// A dangling link or a special file is not a build input.
+		if info, statErr := os.Stat(p); statErr != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		base := d.Name()
+		switch {
+		case base == "Dockerfile" || strings.HasPrefix(base, "Dockerfile.") || strings.HasSuffix(base, ".Dockerfile"):
+			fsys.dockerfiles = append(fsys.dockerfiles, rel)
+		case path.Dir(rel) == ".github/workflows" && (strings.HasSuffix(base, ".yml") || strings.HasSuffix(base, ".yaml")):
+			fsys.workflows = append(fsys.workflows, rel)
+		case strings.HasPrefix(rel, ".github/actions/") && (base == "action.yml" || base == "action.yaml"):
+			fsys.actions = append(fsys.actions, rel)
+		case composeName.MatchString(base):
+			fsys.composes = append(fsys.composes, rel)
+		case base == "Makefile" || base == "makefile" || base == "GNUmakefile" || strings.HasSuffix(base, ".mk"):
+			fsys.makefiles = append(fsys.makefiles, rel)
+		}
+		return nil
+	})
+	for _, l := range [][]string{fsys.dockerfiles, fsys.workflows, fsys.actions, fsys.composes, fsys.makefiles} {
+		sort.Strings(l)
 	}
-	sort.Strings(out)
-	return out, nil
+	return fsys, err
 }
 
-// check runs the static pin and parity rules over the repository at root.
+// check runs the static rules over the repository at root.
 func check(root string) (result, []problem) {
 	var s scanned
 	var res result
@@ -371,88 +313,88 @@ func check(root string) (result, []problem) {
 	}
 	toolchain, err := parseToolchain(gomod)
 	if err != nil {
-		s.problems = append(s.problems, problem{file: "go.mod", msg: err.Error()})
+		s.refuse("go.mod", 0, "%v", err)
 	}
+	s.toolchain = toolchain
 	res.toolchain = toolchain
 
-	read := func(rel string) []byte {
-		b, err := os.ReadFile(filepath.Join(root, rel))
+	files, err := discover(root)
+	if err != nil {
+		return res, []problem{{msg: "walking the repository: " + err.Error()}}
+	}
+	read := func(rel string) ([]byte, bool) {
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
-			s.problems = append(s.problems, problem{file: rel, msg: err.Error()})
-			return nil
+			s.refuse(rel, 0, "%v", err)
+			return nil, false
 		}
-		return b
+		return b, true
 	}
-
-	dockerfiles, err := globFiles(root, "Dockerfile", "Dockerfile.*", "*.Dockerfile")
-	if err != nil {
-		return res, []problem{{msg: err.Error()}}
+	for _, f := range files.dockerfiles {
+		if b, ok := read(f); ok {
+			s.scanDockerfile(f, b)
+		}
 	}
-	workflows, err := globFiles(root, ".github/workflows/*.yml", ".github/workflows/*.yaml")
-	if err != nil {
-		return res, []problem{{msg: err.Error()}}
+	for _, f := range files.workflows {
+		if b, ok := read(f); ok {
+			s.scanWorkflow(f, b)
+		}
 	}
-	composes, err := globFiles(root, "docker-compose*.yml", "docker-compose*.yaml", "compose*.yml", "compose*.yaml")
-	if err != nil {
-		return res, []problem{{msg: err.Error()}}
+	for _, f := range files.actions {
+		if b, ok := read(f); ok {
+			s.scanAction(f, b)
+		}
 	}
-	makefiles, err := globFiles(root, "Makefile", "*.mk")
-	if err != nil {
-		return res, []problem{{msg: err.Error()}}
+	for _, f := range files.composes {
+		if b, ok := read(f); ok {
+			s.scanCompose(f, b)
+		}
 	}
-
-	dockerGolang := 0
-	for _, f := range dockerfiles {
-		b := read(f)
-		s.scanDockerfile(f, b)
-		before := len(s.golang)
-		s.scanGolangTokens(f, b)
-		dockerGolang += len(s.golang) - before
-	}
-	for _, f := range workflows {
-		b := read(f)
-		s.scanYAML(f, b, true)
-		s.scanGolangTokens(f, b)
-	}
-	for _, f := range composes {
-		b := read(f)
-		s.scanYAML(f, b, false)
-		s.scanGolangTokens(f, b)
-	}
-	for _, f := range makefiles {
-		s.scanGolangTokens(f, read(f))
+	for _, f := range files.makefiles {
+		if b, ok := read(f); ok {
+			s.scanShellImages(f, 1, string(b), originMakefile)
+		}
 	}
 
 	for _, img := range s.images {
 		if msg := pinProblem(img.ref); msg != "" {
-			s.problems = append(s.problems, problem{img.file, img.line, msg})
+			s.refuse(img.file, img.line, "%s", msg)
 		}
 	}
 
+	var golang []imageRef
+	dockerGolang := 0
+	for _, img := range s.images {
+		if name, _, _ := splitImageRef(img.ref); isGolangRepo(name) {
+			golang = append(golang, img)
+			if img.origin == originDockerfile {
+				dockerGolang++
+			}
+		}
+	}
 	if dockerGolang == 0 {
-		s.problems = append(s.problems, problem{msg: "no golang image reference in any Dockerfile: the standalone image's compiler cannot be compared with go.mod's toolchain (was the builder stage moved off the official golang image?)"})
+		s.refuse("", 0, "no golang image reference in any Dockerfile: the standalone image's compiler cannot be compared with go.mod's toolchain (was the builder stage moved off the official golang image?)")
 	}
 	if toolchain != "" {
-		s.problems = append(s.problems, golangParity(toolchain, s.golang)...)
+		s.problems = append(s.problems, golangParity(toolchain, golang)...)
 	}
+	s.problems = append(s.problems, composeConsistency(s.images)...)
 
-	res.golang = s.golang
+	res.golang = golang
 	res.images = len(s.images)
 	res.actions = s.actions
 	return res, s.problems
 }
 
 // golangParity refuses a golang reference that is unpinned, names another
-// Go version than the toolchain, or is a different image than the others.
+// Go version than the toolchain, or is a different image than the others
+// (another digest, or the same digest under another tag).
 func golangParity(toolchain string, refs []imageRef) []problem {
 	var out []problem
 	var firstDigest, firstTag string
 	var first imageRef
 	for _, r := range refs {
-		name, tag, digest := splitImageRef(r.ref)
-		if !golangNames[name] {
-			continue
-		}
+		_, tag, digest := splitImageRef(r.ref)
 		if digest == "" || !digestPattern.MatchString(digest) || tag == "" {
 			out = append(out, problem{r.file, r.line, fmt.Sprintf("golang image %q is not pinned as golang:%s-<variant>@sha256:<digest>: under GOTOOLCHAIN=local a moving tag decides the compiler", r.ref, toolchain)})
 			continue
@@ -472,92 +414,32 @@ func golangParity(toolchain string, refs []imageRef) []problem {
 	return out
 }
 
-// inspector returns `docker buildx imagetools inspect --format '{{json .Image}}'`
-// output for ref.
-type inspector func(ctx context.Context, ref string) ([]byte, error)
-
-// resolveGolang reads every distinct golang digest's image config from the
-// registry and refuses unless each platform's GOLANG_VERSION is the
-// toolchain version. It inspects by digest alone (the tag is dropped), so
-// what is verified is exactly what a build pulls.
-func resolveGolang(ctx context.Context, res result, inspect inspector) ([]string, []problem) {
-	var report []string
+// composeConsistency refuses a workflow or compose image whose repository a
+// compose file also uses under another tag or digest. CI's postgres service
+// stands in for the compose stack's database; once Dependabot moves the
+// compose digest, a CI image left behind would test a database nobody runs.
+func composeConsistency(images []imageRef) []problem {
+	first := map[string]imageRef{}
+	for _, img := range images {
+		if img.origin != originCompose || pinProblem(img.ref) != "" {
+			continue
+		}
+		name, _, _ := splitImageRef(img.ref)
+		if _, ok := first[name]; !ok {
+			first[name] = img
+		}
+	}
 	var out []problem
-	done := map[string]bool{}
-	for _, r := range res.golang {
-		name, _, digest := splitImageRef(r.ref)
-		if !golangNames[name] || digest == "" || done[digest] {
+	for _, img := range images {
+		if img.origin != originCompose && img.origin != originWorkflow {
 			continue
 		}
-		done[digest] = true
-		byDigest := "docker.io/library/golang@" + digest
-		raw, err := inspect(ctx, byDigest)
-		if err != nil {
-			out = append(out, problem{r.file, r.line, fmt.Sprintf("cannot read %s from the registry: %v", byDigest, err)})
+		name, _, _ := splitImageRef(img.ref)
+		want, ok := first[name]
+		if !ok || img.ref == want.ref || pinProblem(img.ref) != "" {
 			continue
 		}
-		platforms, err := imageGoVersions(raw)
-		if err != nil {
-			out = append(out, problem{r.file, r.line, fmt.Sprintf("%s: %v", byDigest, err)})
-			continue
-		}
-		keys := make([]string, 0, len(platforms))
-		for k := range platforms {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, p := range keys {
-			if platforms[p] != res.toolchain {
-				out = append(out, problem{r.file, r.line, fmt.Sprintf("%s (%s) has GOLANG_VERSION=%q, not go.mod's toolchain %s: the digest is not the image its tag names", byDigest, p, platforms[p], res.toolchain)})
-			}
-		}
-		report = append(report, fmt.Sprintf("%s: GOLANG_VERSION=%s on %s", byDigest, res.toolchain, strings.Join(keys, ", ")))
+		out = append(out, problem{img.file, img.line, fmt.Sprintf("image %q differs from the compose stack's %q at %s:%d: one repository, one tag and digest across compose and workflow files", img.ref, want.ref, want.file, want.line)})
 	}
-	return report, out
-}
-
-// imageConfig is the part of an OCI image config this check reads.
-type imageConfig struct {
-	Config struct {
-		Env []string `json:"Env"`
-	} `json:"config"`
-}
-
-// imageGoVersions parses `{{json .Image}}` output — a platform-keyed map for
-// an image index, or one image config for a single manifest — into each
-// platform's GOLANG_VERSION. A platform without one is an error: it is not a
-// golang image, and nothing else can stand in for the version.
-func imageGoVersions(raw []byte) (map[string]string, error) {
-	raw = bytes.TrimSpace(raw)
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &top); err != nil {
-		return nil, fmt.Errorf("unparseable image config: %w", err)
-	}
-	images := map[string]json.RawMessage{}
-	if _, single := top["config"]; single {
-		images["(single manifest)"] = raw
-	} else {
-		images = top
-	}
-	if len(images) == 0 {
-		return nil, errors.New("the registry returned no image config")
-	}
-	out := map[string]string{}
-	for platform, msg := range images {
-		var img imageConfig
-		if err := json.Unmarshal(msg, &img); err != nil {
-			return nil, fmt.Errorf("%s: unparseable image config: %w", platform, err)
-		}
-		version := ""
-		for _, e := range img.Config.Env {
-			if v, ok := strings.CutPrefix(e, "GOLANG_VERSION="); ok {
-				version = v
-			}
-		}
-		if version == "" {
-			return nil, fmt.Errorf("%s: image config has no GOLANG_VERSION", platform)
-		}
-		out[platform] = version
-	}
-	return out, nil
+	return out
 }

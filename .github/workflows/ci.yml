@@ -25,17 +25,23 @@ permissions:
 # would fail to link, complementing the lint as a secondary guard.
 #
 # INIT-024 / EPIC-004 / TASK-009 (review SC-08): every action is pinned to
-# a full commit SHA with its release in a `# vX.Y.Z` comment, and every
-# image to a digest next to its tag — a moved tag must not change what this
+# a full commit SHA with its release in a `# vX.Y.Z` comment, every image to
+# a digest next to its tag, and every job to a versioned runner image
+# (ubuntu-24.04, not ubuntu-latest) — a moved tag must not change what this
 # public repository's CI runs. Checkouts do not persist the token in
-# .git/config. Dependabot (.github/dependabot.yml) proposes the next SHAs
-# and digests; the toolchain-parity job (dev/pincheck) refuses anything
-# unpinned and a golang image that is not go.mod's toolchain.
+# .git/config. Every setup-go step installs go.mod's toolchain by exact
+# version (`go-version`, not `go-version-file`: setup-go v5 reads only the
+# `go` line, and the go command would then download the toolchain before the
+# module cache is restored, colliding with it). Dependabot
+# (.github/dependabot.yml) proposes the next SHAs and digests; the
+# toolchain-parity job (dev/pincheck) refuses anything unpinned, a golang
+# image or setup-go version that is not go.mod's toolchain, and a postgres
+# service that is not the compose stack's.
 
 jobs:
   boundary-lint:
     name: ADR-017 boundary lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -43,14 +49,14 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
+          go-version: '1.26.10'
 
       - name: Dependency-direction guard
         run: ./dev/lint-boundaries.sh
 
   build:
     name: Build (service + embed-smoketest)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -59,7 +65,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
+          go-version: '1.26.10'
 
       - name: Build service binary
         run: make build
@@ -72,7 +78,7 @@ jobs:
 
   test:
     name: go test ./...
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -81,7 +87,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
+          go-version: '1.26.10'
 
       - name: Unit tests
         run: go test ./...
@@ -107,11 +113,12 @@ jobs:
   # never skip either.
   scenario-git-http:
     name: Git push scenarios (Postgres)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: boundary-lint
     services:
       postgres:
-        # PostgreSQL 18.6 (index of 2026-10-21), the compose files' image.
+        # PostgreSQL 18.6 (index of 2026-10-21). dev/pincheck requires this ref to
+        # equal the compose files' postgres ref, tag and digest.
         image: postgres:18-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc
         env:
           POSTGRES_USER: spine_test
@@ -133,7 +140,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
+          go-version: '1.26.10'
 
       - name: TestGitHTTP_* scenarios (must pass, never skip)
         shell: bash
@@ -302,7 +309,7 @@ jobs:
   # and the Go this job tests are reproducible and are the shipped ones.
   git-floor:
     name: Ref grammar on shipped git (2.39.x)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: boundary-lint
     container:
       image: golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af
@@ -327,13 +334,13 @@ jobs:
   # vulnerable symbol Spine's code can reach; package- and module-level
   # matches are printed but do not fail. It judges the standard library at
   # the Go it runs on, so the first step proves that Go is go.mod's
-  # toolchain (setup-go installs the `go` line's release and GOTOOLCHAIN=auto
-  # switches to the `toolchain` line). -mod=readonly keeps the scan from
-  # editing go.mod/go.sum. The scanner version is pinned; move it together
-  # with the Makefile's GOVULNCHECK_VERSION.
+  # toolchain (setup-go installs it by exact version; dev/pincheck keeps the
+  # two equal). -mod=readonly keeps the scan from editing go.mod/go.sum. The
+  # scanner version is pinned; move it together with the Makefile's
+  # GOVULNCHECK_VERSION.
   vuln:
     name: govulncheck (reachable advisories)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -342,7 +349,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
+          go-version: '1.26.10'
 
       - name: The Go in use is go.mod's toolchain
         shell: bash
@@ -364,18 +371,24 @@ jobs:
   # refuses a go.mod without a release `toolchain` line; a golang image
   # reference (the Dockerfile builder, the git-floor container, the
   # Makefile's DOCKER_GO) that is not golang:<toolchain>-<variant>@sha256:
-  # <digest>, or that differs from the others; any Dockerfile, workflow or
-  # compose image without a digest; and any action not on a full commit SHA
-  # with a `# vX.Y.Z` comment. -resolve then reads the golang digest's image
-  # config from Docker Hub (manifest and config only, nothing is pulled) and
-  # requires every platform's GOLANG_VERSION to equal the toolchain. The
-  # golang image sets GOTOOLCHAIN=local, so bumping go.mod alone would
-  # silently keep shipping the old compiler; this job is what turns that
-  # drift red. The unit tests run first: they hold the deliberately
-  # mismatched fixtures the check must refuse.
+  # <digest>, or that differs from the others; a setup-go step that does not
+  # install exactly the toolchain; any image without a digest (Dockerfiles,
+  # workflows, composite actions, compose files, and `docker run|pull`
+  # commands in run: scripts and the Makefile); a CI image that differs from
+  # the compose stack's image of the same repository; a `*-latest` runner;
+  # and any action not on a full commit SHA with a `# vX.Y.Z` comment.
+  # -resolve then reads the golang digest's image config from its registry
+  # (manifest and config only, nothing is pulled) and requires every
+  # platform's GOLANG_VERSION to equal the toolchain, and looks every
+  # action's version tag up in its repository (git ls-remote) and requires
+  # it to be exactly the pinned commit. The golang image sets
+  # GOTOOLCHAIN=local, so bumping go.mod alone would silently keep shipping
+  # the old compiler; this job is what turns that drift red. The unit tests
+  # run first: they hold the deliberately mismatched fixtures the check
+  # must refuse.
   toolchain-parity:
     name: Toolchain parity and pins
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -384,7 +397,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
+          go-version: '1.26.10'
 
       - name: The checks refuse the mismatched fixtures
         run: go test -count=1 -v ./dev/pincheck/
@@ -398,7 +411,7 @@ jobs:
   # pushed.
   image-build:
     name: Standalone image build (pinned bases)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
