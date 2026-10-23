@@ -6,6 +6,67 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-003 TASK-008: the multi-workspace scheduler in shared-mode `spine serve`)
+
+Closes the open half of audit P3-27 (re-confirmed PARTIAL by the 2026-10-22 review). A functional
+gap more than a security finding (INIT-024 owner question 5). Standalone only: SMP constructs no
+`MultiScheduler` and embeds none of `service/cmd/spine`. No runtime schema change.
+
+### Fixed (standalone)
+
+- **The shared resolver modes run a scheduler.** With `WORKSPACE_RESOLVER=db` or
+  `platform-binding`, `spine serve` built no process-level store and therefore no scheduler: step
+  and run timeouts never fired, orphaned runs were never failed and a committing run whose governed
+  merge failed transiently was never retried. It now builds `MultiScheduler` over the workspace pool
+  (beside `MultiProjectionSync`), starts it with the server and stops it on shutdown. Each workspace
+  is scanned with its own store, event router and engine callbacks — the per-workspace orchestrator's
+  `MergeRunBranch` (governance-aware), `AbandonExhaustedMerge` under the standalone retry budget of
+  3, `RecoverCompletedStep`/`RetryStep`, `FailRun` and `TerminateLiveSteps` — so its git clients and
+  credentials are that workspace's. A pool entry whose id is not the one asked for is refused, and
+  every scan releases its pool reference. Single (`file`) mode is unchanged.
+- **One tenant cannot stop the others' scans** (adversarial review of the wiring). In the shared
+  modes one loop scans every tenant, and a tick waited for every workspace: one scan item that
+  never returned — a code repository's push has no deadline, so a remote that accepts the
+  connection and never answers holds it — stopped every tenant's timeouts, orphan scans and merge
+  retries for good, and a panic in one workspace's scan ended the process. Now a tick stops waiting
+  once it has made no progress for its wait (the workspace budget + the timeout interval, 60 s by
+  default), the stalled scan keeps running in the background and later ticks skip its workspace
+  until it ends; a workspace is never scanned twice at once; and a panic is recovered, logged at
+  Error with the workspace and the stack, and the workspace scanned again on the next tick.
+
+### Changed (standalone)
+
+- New variables, read only in the shared modes but validated in every mode (an invalid value refuses
+  to start): `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES` (default 4, 1–256) and
+  `SPINE_SCHEDULER_WORKSPACE_BUDGET` (default `30s`, a positive Go duration). The orphan threshold
+  is `SPINE_ORPHAN_THRESHOLD`, as in single mode. A startup Info line prints the effective bounds.
+- On SIGINT/SIGTERM `spine serve` now waits, within the 10 s shutdown deadline, for the shared-mode
+  scheduler's running scans before it closes the workspace pool, so a merge is not cut off by its
+  store closing under it.
+- Remaining limits (single leader across replicas, no startup crash recovery in the shared modes,
+  `platform-binding` scheduling only resolved workspaces): `KNOWN-LIMITATIONS.md`, "Shared Working
+  Tree", item 9.
+
+### Changed (embedders)
+
+- `adapters/scheduler.MultiScheduler` (SMP constructs none; `scheduler.Scheduler` is unchanged):
+  - A tick no longer waits without bound: `MultiSchedulerConfig.TickWait` (new; 0 means
+    `WorkspaceBudget + TimeoutInterval`) is how long a tick waits without progress — no slot coming
+    free, none of its scans ending — before it returns; the stalled scan keeps running and later
+    ticks skip its workspace until it ends. A tick that keeps making progress is never cut short.
+    A scan a tick stopped waiting for is not counted against a later tick's
+    `MaxConcurrentWorkspaces`.
+  - A workspace is scanned by one scan at a time: a tick skips (with a Warn) a workspace whose scan
+    of any kind is still running, including a workspace the resolver lists twice.
+  - A panic in a workspace's scan is recovered (Error log with `scan`, `workspace_id`, `panic` and
+    `stack`); its pool reference is still released.
+  - New methods: `ScanTimeouts`, `ScanOrphans` and `RunCommitRetry` run one tick of each loop
+    synchronously (`Start` calls them); `Wait(ctx)` waits for `Start` to return and every scan to
+    end; `Config()` reports the effective configuration. `Stop` is idempotent; `Start` must be called
+    once.
+
+---
+
 ## INIT-023 — Security Audit Remediation: wave 4 follow-up
 
 Fixes found after the wave 4 integration (a TASK-003 residual SMP INIT-027/EPIC-004/TASK-008 measured

@@ -2,6 +2,9 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 
@@ -24,9 +27,36 @@ import (
 // Bounded (INIT-023 TASK-012, audit P3-27): workspaces are scanned
 // concurrently, at most MaxConcurrentWorkspaces at a time, each under a
 // soft per-workspace time budget, and every per-workspace Scheduler gets
-// the commit retry budget. Not constructed by `spine serve` today (owner
-// question 3: wiring it into the shared modes is a follow-up); bounded so
-// that wiring inherits the limits.
+// the commit retry budget.
+//
+// `spine serve` runs it in the shared resolver modes (db and
+// platform-binding; INIT-024 TASK-008 closes the open half of P3-27), so
+// one process scans every tenant. One tenant must not be able to stop the
+// others' timeouts, orphan scans and merge retries (INIT-024 TASK-008
+// adversarial review), so a tick isolates its workspaces:
+//
+//   - One scan per workspace at a time. A workspace whose previous scan
+//     (of any kind) is still running is skipped by the tick, with a Warn,
+//     never scanned twice at once — the serialisation single-workspace
+//     mode has.
+//   - A tick stops waiting once it has made no progress (no slot came
+//     free, none of its scans ended) for TickWait. A scan still running
+//     then is not cancelled (see WorkspaceBudget: a cancelled git command
+//     can leave a lock file behind); it continues in the background, an
+//     Error names its workspace, and later ticks skip that workspace until
+//     it ends. Without this a single item that never returns — a code
+//     repository's push has no deadline, so a remote that accepts the
+//     connection and never answers holds it — blocked the tick, and with
+//     it the one loop every tenant's scans run on, for good.
+//   - A panic in one workspace's scan is recovered and logged with its
+//     stack (runWorkspace); it ends that workspace's share of the tick,
+//     not the process every tenant shares.
+//
+// The resulting bound: a tenant that hangs delays the other tenants' scans
+// by at most one TickWait, once, and holds at most one scan at a time. A
+// scan a tick stopped waiting for is not counted against a later tick's
+// MaxConcurrentWorkspaces (each such scan is its own workspace's single
+// scan), so tenants that hang cannot use up the other tenants' slots.
 type MultiScheduler struct {
 	pool             WorkspacePool
 	resolver         WorkspaceResolver
@@ -36,7 +66,22 @@ type MultiScheduler struct {
 	commitMaxRetries int
 	workspaceBudget  time.Duration
 	maxConcurrent    int
+	tickWait         time.Duration
 	done             chan struct{}
+	stopOnce         sync.Once
+
+	// exited is closed when Start returns (Wait).
+	exited   chan struct{}
+	exitOnce sync.Once
+
+	// scans counts the running per-workspace scan goroutines, including
+	// those a tick stopped waiting for (Wait).
+	scans sync.WaitGroup
+
+	// inflight is the set of workspaces with a scan running: a tick skips
+	// them (one scan per workspace at a time).
+	inflightMu sync.Mutex
+	inflight   map[string]struct{}
 
 	// resumes holds, per workspace, where each budgeted scan stopped.
 	resumeMu sync.Mutex
@@ -64,6 +109,15 @@ type MultiSchedulerConfig struct {
 	// timeouts, orphan scans and merge retries. 0 means
 	// DefaultMaxConcurrentWorkspaces.
 	MaxConcurrentWorkspaces int
+	// TickWait is how long one tick waits without progress — no slot
+	// coming free, none of its scans ending — before it stops waiting
+	// (INIT-024 TASK-008). A scan still running then continues in the
+	// background and later ticks skip its workspace until it ends; the
+	// workspaces not yet dispatched are left to the next tick. A tick that
+	// keeps making progress is never cut short. 0 means WorkspaceBudget +
+	// TimeoutInterval: a scan stops itself at its budget, and the extra
+	// interval covers one item that started just before the budget ran out.
+	TickWait time.Duration
 }
 
 // Defaults for MultiSchedulerConfig.
@@ -135,6 +189,9 @@ func NewMultiScheduler(pool WorkspacePool, resolver WorkspaceResolver, cfg Multi
 	if cfg.MaxConcurrentWorkspaces <= 0 {
 		cfg.MaxConcurrentWorkspaces = DefaultMaxConcurrentWorkspaces
 	}
+	if cfg.TickWait <= 0 {
+		cfg.TickWait = cfg.WorkspaceBudget + cfg.TimeoutInterval
+	}
 	return &MultiScheduler{
 		pool:             pool,
 		resolver:         resolver,
@@ -144,15 +201,40 @@ func NewMultiScheduler(pool WorkspacePool, resolver WorkspaceResolver, cfg Multi
 		commitMaxRetries: cfg.CommitMaxRetries,
 		workspaceBudget:  cfg.WorkspaceBudget,
 		maxConcurrent:    cfg.MaxConcurrentWorkspaces,
+		tickWait:         cfg.TickWait,
 		done:             make(chan struct{}),
+		exited:           make(chan struct{}),
 	}
 }
 
-// Start begins the multi-workspace scheduler polling loops.
+// Config reports the effective configuration, defaults applied (for
+// wiring checks and the start-up log).
+func (ms *MultiScheduler) Config() MultiSchedulerConfig {
+	return MultiSchedulerConfig{
+		TimeoutInterval:         ms.timeoutInterval,
+		OrphanInterval:          ms.orphanInterval,
+		OrphanThreshold:         ms.orphanThreshold,
+		CommitMaxRetries:        ms.commitMaxRetries,
+		WorkspaceBudget:         ms.workspaceBudget,
+		MaxConcurrentWorkspaces: ms.maxConcurrent,
+		TickWait:                ms.tickWait,
+	}
+}
+
+// Start begins the multi-workspace scheduler polling loops. It blocks
+// until ctx is cancelled or Stop is called, and must be called once. A
+// scan still running when it returns keeps running; Wait waits for it.
 func (ms *MultiScheduler) Start(ctx context.Context) {
+	defer ms.exitOnce.Do(func() { close(ms.exited) })
 	ctx = observe.WithComponent(ctx, "multi-scheduler")
 	log := observe.Logger(ctx)
-	log.Info("multi-workspace scheduler started")
+	log.Info("multi-workspace scheduler started",
+		"timeout_interval", ms.timeoutInterval,
+		"orphan_interval", ms.orphanInterval,
+		"max_concurrent_workspaces", ms.maxConcurrent,
+		"workspace_budget", ms.workspaceBudget,
+		"tick_wait", ms.tickWait,
+	)
 
 	timeoutTicker := time.NewTicker(ms.timeoutInterval)
 	defer timeoutTicker.Stop()
@@ -167,24 +249,11 @@ func (ms *MultiScheduler) Start(ctx context.Context) {
 	for {
 		select {
 		case <-timeoutTicker.C:
-			ms.forEachWorkspace(ctx, "timeout-scan", func(ctx context.Context, sched *Scheduler) {
-				if err := sched.ScanTimeouts(ctx); err != nil {
-					observe.Logger(ctx).Error("timeout scan failed", "error", err)
-				}
-				if err := sched.ScanRunTimeouts(ctx); err != nil {
-					observe.Logger(ctx).Error("run timeout scan failed", "error", err)
-				}
-			})
+			ms.ScanTimeouts(ctx)
 		case <-orphanTicker.C:
-			ms.forEachWorkspace(ctx, "orphan-scan", func(ctx context.Context, sched *Scheduler) {
-				if err := sched.ScanOrphans(ctx); err != nil {
-					observe.Logger(ctx).Error("orphan scan failed", "error", err)
-				}
-			})
+			ms.ScanOrphans(ctx)
 		case <-commitTicker.C:
-			ms.forEachWorkspace(ctx, "commit-retry", func(ctx context.Context, sched *Scheduler) {
-				sched.RunCommitRetry(ctx)
-			})
+			ms.RunCommitRetry(ctx)
 		case <-ctx.Done():
 			return
 		case <-ms.done:
@@ -193,19 +262,153 @@ func (ms *MultiScheduler) Start(ctx context.Context) {
 	}
 }
 
-// Stop signals the multi-workspace scheduler to shut down.
+// ScanTimeouts is one tick of the timeout loop: the step and run timeout
+// scans of every active workspace (Scheduler.ScanTimeouts and
+// ScanRunTimeouts). Start calls it every TimeoutInterval; it is exported
+// so a caller (an operator endpoint, a test) can drive one tick
+// synchronously. It returns once the tick's scans have ended, or once the
+// tick has stalled for TickWait (forEachWorkspace).
+func (ms *MultiScheduler) ScanTimeouts(ctx context.Context) {
+	ms.forEachWorkspace(ctx, "timeout-scan", func(ctx context.Context, sched *Scheduler) {
+		if err := sched.ScanTimeouts(ctx); err != nil {
+			observe.Logger(ctx).Error("timeout scan failed", "error", err)
+		}
+		if err := sched.ScanRunTimeouts(ctx); err != nil {
+			observe.Logger(ctx).Error("run timeout scan failed", "error", err)
+		}
+	})
+}
+
+// ScanOrphans is one tick of the orphan loop over every active workspace
+// (Scheduler.ScanOrphans); see ScanTimeouts.
+func (ms *MultiScheduler) ScanOrphans(ctx context.Context) {
+	ms.forEachWorkspace(ctx, "orphan-scan", func(ctx context.Context, sched *Scheduler) {
+		if err := sched.ScanOrphans(ctx); err != nil {
+			observe.Logger(ctx).Error("orphan scan failed", "error", err)
+		}
+	})
+}
+
+// RunCommitRetry is one tick of the commit-retry loop over every active
+// workspace (Scheduler.RunCommitRetry: committing and partially-merged
+// runs, under the retry budget); see ScanTimeouts.
+func (ms *MultiScheduler) RunCommitRetry(ctx context.Context) {
+	ms.forEachWorkspace(ctx, "commit-retry", func(ctx context.Context, sched *Scheduler) {
+		sched.RunCommitRetry(ctx)
+	})
+}
+
+// Stop signals the multi-workspace scheduler to shut down: Start returns,
+// a tick in progress stops dispatching and stops waiting, and no new scan
+// starts. Scans already running are not cancelled; Wait waits for them.
+// Safe to call more than once.
 func (ms *MultiScheduler) Stop() {
-	close(ms.done)
+	ms.stopOnce.Do(func() { close(ms.done) })
+}
+
+// Wait blocks until Start has returned and every workspace scan the
+// scheduler started — including one a tick stopped waiting for — has
+// ended, or until ctx is done (its error is returned). Call it after
+// Start, once Stop was called or Start's context cancelled, and not
+// concurrently with the one-tick methods. `spine serve` calls it on
+// shutdown, under its shutdown deadline, so the workspace pool is not
+// closed under a scan that is still writing.
+func (ms *MultiScheduler) Wait(ctx context.Context) error {
+	select {
+	case <-ms.exited:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	drained := make(chan struct{})
+	go func() {
+		ms.scans.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// stopped reports whether Stop was called.
+func (ms *MultiScheduler) stopped() bool {
+	select {
+	case <-ms.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// claim marks wsID as having a scan running; false when it already has one.
+func (ms *MultiScheduler) claim(wsID string) bool {
+	ms.inflightMu.Lock()
+	defer ms.inflightMu.Unlock()
+	if ms.inflight == nil {
+		ms.inflight = map[string]struct{}{}
+	}
+	if _, busy := ms.inflight[wsID]; busy {
+		return false
+	}
+	ms.inflight[wsID] = struct{}{}
+	return true
+}
+
+// unclaim ends wsID's running scan.
+func (ms *MultiScheduler) unclaim(wsID string) {
+	ms.inflightMu.Lock()
+	defer ms.inflightMu.Unlock()
+	delete(ms.inflight, wsID)
+}
+
+// tickPending is the set of one tick's scans that have not ended, for the
+// Error naming the workspaces a tick stopped waiting for.
+type tickPending struct {
+	mu  sync.Mutex
+	ids map[string]struct{}
+}
+
+func (t *tickPending) add(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ids[id] = struct{}{}
+}
+
+func (t *tickPending) remove(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.ids, id)
+}
+
+func (t *tickPending) list() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, 0, len(t.ids))
+	for id := range t.ids {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // forEachWorkspace runs fn with a per-workspace scheduler for every active
 // workspace. Errors in one workspace do not block others.
 //
-// Workspaces run concurrently, at most maxConcurrent at once, and the call
-// returns only after every one finished, so ticks never overlap. Each
+// Workspaces run concurrently, at most maxConcurrent at once. The call
+// returns once every scan it started has finished — a tick of healthy but
+// slow workspaces still scans every one of them, however long that takes —
+// unless the tick stalls: once TickWait passes with no slot coming free and
+// no scan of the tick ending, it stops waiting (the tenant isolation on
+// MultiScheduler). A scan still running then is left running and its
+// workspace stays claimed, so later ticks skip it; workspaces not yet
+// dispatched wait for the next tick, which no longer counts the stalled
+// scans against its slots. Stop and ctx's cancellation also end the wait.
+// A workspace whose previous scan is still running is skipped. Each
 // workspace's context carries a soft budget (withSoftBudget) that its scan
-// loops check between items; the context itself is never cancelled by the
-// budget.
+// loops check between items; neither the budget nor TickWait ever cancels
+// the context a scan runs with.
 func (ms *MultiScheduler) forEachWorkspace(ctx context.Context, scanName string, fn func(ctx context.Context, sched *Scheduler)) {
 	log := observe.Logger(ctx)
 
@@ -219,19 +422,80 @@ func (ms *MultiScheduler) forEachWorkspace(ctx context.Context, scanName string,
 	if limit <= 0 {
 		limit = DefaultMaxConcurrentWorkspaces
 	}
+	wait := ms.tickWait
+	if wait <= 0 {
+		wait = ms.workspaceBudget + ms.timeoutInterval
+	}
+	// stall fires once the tick has made no progress — no slot taken, no
+	// scan ended — for wait; every progress resets it (Go 1.23+ timers:
+	// Reset never leaves a stale tick behind).
+	stall := time.NewTimer(wait)
+	defer stall.Stop()
+
 	sem := make(chan struct{}, limit)
-	var wg sync.WaitGroup
-	for _, ws := range workspaces {
+	// Buffered for every scan this tick can start, so a scan that ends
+	// after the tick stopped waiting never blocks on it.
+	finished := make(chan struct{}, len(workspaces))
+	pending := &tickPending{ids: map[string]struct{}{}}
+	started := 0
+dispatch:
+	for i, ws := range workspaces {
+		if ms.stopped() || ctx.Err() != nil {
+			break
+		}
 		wsID := ws.WorkspaceID()
-		sem <- struct{}{}
-		wg.Add(1)
+		if !ms.claim(wsID) {
+			log.Warn("previous scan of this workspace is still running; skipped this tick",
+				"scan", scanName, "workspace_id", wsID)
+			continue
+		}
+		select {
+		case sem <- struct{}{}:
+			stall.Reset(wait)
+		case <-stall.C:
+			// Every slot is held by a scan that has not ended for wait:
+			// the tick has stalled, so it neither dispatches nor waits
+			// any longer (the timer has fired; waiting below again would
+			// wait for good).
+			ms.unclaim(wsID)
+			log.Error("workspace scans made no progress within the tick's wait; they continue in the background, later ticks skip these workspaces until they end, and the remaining workspaces wait for the next tick",
+				"scan", scanName, "workspace_ids", pending.list(), "remaining", len(workspaces)-i,
+				"max_concurrent_workspaces", limit, "tick_wait", wait)
+			return
+		case <-ctx.Done():
+			ms.unclaim(wsID)
+			break dispatch
+		case <-ms.done:
+			ms.unclaim(wsID)
+			break dispatch
+		}
+		started++
+		pending.add(wsID)
+		ms.scans.Add(1)
 		go func() {
-			defer wg.Done()
+			defer ms.scans.Done()
+			defer func() { finished <- struct{}{} }()
+			defer pending.remove(wsID)
+			defer ms.unclaim(wsID)
 			defer func() { <-sem }()
 			ms.runWorkspace(ctx, scanName, wsID, fn)
 		}()
 	}
-	wg.Wait()
+
+	for n := 0; n < started; n++ {
+		select {
+		case <-finished:
+			stall.Reset(wait)
+		case <-stall.C:
+			log.Error("workspace scans made no progress within the tick's wait; they continue in the background and later ticks skip these workspaces until they end",
+				"scan", scanName, "workspace_ids", pending.list(), "tick_wait", wait)
+			return
+		case <-ctx.Done():
+			return
+		case <-ms.done:
+			return
+		}
+	}
 }
 
 // resumeFor returns the workspace's scan resume positions.
@@ -250,8 +514,24 @@ func (ms *MultiScheduler) resumeFor(wsID string) *scanResume {
 }
 
 // runWorkspace is one workspace's share of a tick.
+//
+// A panic in it — a store or engine bug, data a scan did not expect (the
+// engine slices stored values, e.g. a run's trace id) — is recovered and
+// logged at Error with its stack (INIT-024 TASK-008): in the shared modes
+// it would otherwise end the process every tenant shares, on every tick
+// that reaches the same data. The workspace is scanned again on the next
+// tick. The recover is deferred first so that it runs last: the pool
+// reference taken below, and every lock or transaction the scan released
+// by defer, is released before it (net/http's per-request recovery makes
+// the same assumption of the code behind every HTTP handler).
 func (ms *MultiScheduler) runWorkspace(ctx context.Context, scanName, wsID string, fn func(ctx context.Context, sched *Scheduler)) {
 	log := observe.Logger(ctx)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("workspace scan panicked; recovered, the workspace is scanned again on the next tick",
+				"scan", scanName, "workspace_id", wsID, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+		}
+	}()
 	ss, err := ms.pool.Get(ctx, wsID)
 	if err != nil {
 		log.Error("get workspace services failed",

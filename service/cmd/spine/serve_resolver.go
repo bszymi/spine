@@ -194,8 +194,8 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 
 	ss.CommitRetryFn = commitRetryFor(orch)
 	// The merge retry budget's exhaustion handler (INIT-023 TASK-012,
-	// P3-27), so a future wiring of the multi-workspace scheduler gets the
-	// bound (owner question 3: wiring it is a follow-up).
+	// P3-27), which the shared-mode multi-workspace scheduler applies with
+	// defaultCommitMaxRetries (INIT-024 TASK-008, serve_scheduler.go).
 	ss.CommitExhaustedFn = orch.AbandonExhaustedMerge
 	// Recovery re-routes a completed execution through RecoverCompletedStep,
 	// never SubmitStepResult (INIT-023 TASK-008; stepRecoveryFor).

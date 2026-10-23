@@ -38,6 +38,13 @@ The management platform owns:
 - Workspace identity passed per-request via `X-Workspace-ID` header.
 - `smp_workspace_id` set per workspace via `POST /workspaces`.
 - Credentials resolved per-push from workspace config.
+- One multi-workspace scheduler scans every active workspace through the workspace pool: step and
+  run timeouts, the orphan scan and bounded merge retries (INIT-024 TASK-008). Each workspace is
+  scanned with its own store, git clients and credentials; at most
+  `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES` at once, each under `SPINE_SCHEDULER_WORKSPACE_BUDGET`
+  per tick. A workspace whose scan hangs is skipped by later ticks until it ends and does not hold
+  up the others. It assumes a single leader: every replica scans every workspace (see
+  `KNOWN-LIMITATIONS.md`, "Shared Working Tree", item 9).
 
 ---
 
@@ -322,7 +329,8 @@ Response (200):
 }
 ```
 
-Deactivation immediately stops serving requests for this workspace and invalidates caches.
+Deactivation immediately stops serving requests for this workspace and invalidates caches. The
+shared-mode scheduler no longer scans it from its next tick; a scan already running finishes.
 
 ### Process Metrics
 
@@ -816,6 +824,8 @@ spec:
 | `SPINE_GIT_PUSH_ENABLED` | No | `true` | Set to `false` to disable git push |
 | `SMP_WORKSPACE_ID` | No | - | Management platform workspace ID (dedicated mode) |
 | `SPINE_ORPHAN_THRESHOLD` | No | - | Duration before recovering orphaned steps |
+| `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES` | No | `4` | Shared modes (`WORKSPACE_RESOLVER=db` or `platform-binding`): how many workspaces one scheduler tick scans at once. A whole number from 1 to 256; any other value refuses to start (in every mode). A scan that has stalled (no progress for the tick's wait, `SPINE_SCHEDULER_WORKSPACE_BUDGET` + 30 s) keeps running and is not counted against later ticks. |
+| `SPINE_SCHEDULER_WORKSPACE_BUDGET` | No | `30s` | Shared modes: the soft time budget of one workspace's scan per tick. A scan stops between items once it is spent and resumes where it stopped on the next tick; it never cancels a git command. A positive Go duration (`45s`, `2m`); any other value refuses to start (in every mode). |
 | `SPINE_STEP_ENTRY_POLICY` | No | `strict` | Engine step-entry policy (INIT-023 TASK-007). `strict` (or unset): assign/claim enforce run status, actor eligibility, execution mode, preconditions, `required_skills` on assign and separation of duties; cancelled/failed runs close their live steps; the gateway's engine-less assign fallback is disabled. `legacy`: pre-INIT-023 behaviour, logged as a `WARN` at startup (migration escape hatch, to be removed). Any other value refuses to start. See [Security Model](/architecture/security-model.md) §4.4.1. |
 | `SPINE_GOVERNANCE_GUARD` | No | on | Governance-path guards (ADR-016; INIT-023 TASK-006). On (unset, `on`, `true`, `1`, `yes`): a governed merge that changes `.spine/`, `.spine.yaml`, `workflows/` or `<artifacts_dir>/workflows/` waits in `committing`, with no timeout, until an operator approves or rejects its bound commit (`POST /runs/{run_id}/governance-decision`; `GET /runs/{run_id}/governance` shows the state), and the projection installs a branch-protection relaxation only with an operator record (an approved merge or an honoured override push). `off`, `false`, `0` or `no` (any case) turn both guards off, logged as a `WARN` at startup. Any other value keeps them on, with a `WARN` naming the value. See [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) and §12. |
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |

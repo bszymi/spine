@@ -1379,9 +1379,49 @@ What that implies, and what it leaves open:
    nothing either. A *permanent* failure after a local merge (a rejected or
    unauthenticated push, a refusal) still routes the run while its merge stays on the local `main`,
    as before TASK-012; re-syncing local `main` is a follow-up.
-9. **The multi-workspace scheduler is bounded but not wired** (owner question 3): in the `db` and
-   `platform-binding` resolver modes no scheduler retries committing runs at all. Wiring
-   `MultiScheduler` into `spine serve` is a follow-up.
+9. **The multi-workspace scheduler is wired; a single leader is assumed** (INIT-024 TASK-008, the
+   open half of P3-27). In the `db` and `platform-binding` resolver modes `spine serve` runs
+   `MultiScheduler` over the workspace pool, so step and run timeouts, the orphan scan and the
+   bounded merge retries fire in every active workspace, each with its own store, git clients and
+   credentials. A tenant cannot hold up the others: one scan per workspace at a time, a tick that
+   makes no progress for its wait (`SPINE_SCHEDULER_WORKSPACE_BUDGET` + 30 s) stops waiting and later
+   ticks skip the stalled workspace until its scan ends, and a panic in one workspace's scan is
+   recovered. What remains:
+   - **More than one replica.** There is no leader election (TASK-008 Decision 3, like the projection
+     sync and every INIT-023 lock): every replica scans every workspace. The scheduler's own writes
+     are compare-and-swap (INIT-023 TASK-008), so a timeout, a run-timeout termination or a
+     recovery applies once, but each replica retries a committing run's merge (the tree lock and the
+     merge-attempt gate are per process; item 7 says what the conditional writes cover across
+     processes). Run one replica per registry, or accept the duplicate merge attempts.
+   - **No startup crash recovery in the shared modes.** Single mode runs `RecoverOnStartup` before it
+     serves (a `pending` run activated, an `assigned` step reset, a completed step routed on, a
+     committing run retried); the shared modes run it for no workspace. Committing runs are still
+     retried by the loop and orphaned active runs failed by the orphan scan (after three thresholds),
+     but a run a crash left `pending`, or on a completed step that was never routed, waits for an
+     operator. Per-workspace startup recovery is a follow-up (TASK-008 owner question 3).
+   - **`platform-binding` schedules only resolved workspaces.** The platform has no enumeration
+     endpoint, so `PlatformBindingProvider.List` reports the bindings the process has resolved since
+     it started: after a restart a workspace is scheduled only once a request has resolved it (as
+     with the projection sync).
+   - **Deactivation outside the operator API.** `POST /workspaces/{id}/deactivate` drops the
+     resolver caches and evicts the workspace, so the next tick skips it. A registry row deactivated
+     any other way (SQL, another replica's API) is still listed and resolved for up to the resolver's
+     60 s cache TTL. A scan already running when its workspace is deactivated finishes.
+   - **A stalled scan keeps what it holds.** It is never cancelled (a cancelled git command can leave a
+     lock file behind): its workspace's tree lock, one git process and one goroutine stay until it
+     ends, it is not counted against later ticks' `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES`, and on
+     shutdown it is waited for only until the 10 s shutdown deadline. A code repository's push has no
+     deadline of its own, so a remote that never answers holds it until the process restarts. As many
+     tenants stalling in one tick as there are slots delay the others by one wait.
+   - **A slow scan still lengthens its tick.** A tick waits as long as it makes progress, and the
+     three kinds of scan (timeouts, orphans, merge retries) share one loop, as in single mode. A
+     tenant whose scan is slow but never stalls (each merge retry just under the wait, every tick —
+     a push that fails after its merge landed is retried every tick, item 7) lengthens each of its
+     ticks by up to one workspace budget plus one wait, so the other tenants' next scan of another
+     kind starts that much later: their timeouts are late, never lost.
+   - **A recovered panic** releases what the scan released by `defer` (the pool reference, the tree
+     lock, transactions); anything held otherwise stays held, the same assumption as net/http's
+     per-request recovery behind every HTTP handler.
 10. **`classifyGitError`'s bare `"lock"` substring** also matches paths in git's stderr (an untracked
     `blocked-notes.md` in the way of a checkout reads as "repository locked", transient). The retry
     budget caps the loop; matching `index.lock': File exists` precisely is a follow-up. Likewise
