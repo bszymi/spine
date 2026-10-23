@@ -181,7 +181,10 @@ outside `service/`, and SMP's `dev/lint-spine-internals` forbids `service/...`).
 ### Per-AC evidence
 
 "Red at the base" means the branch's new test file run in a `git archive` of
-`init/INIT-024-scaffold` (scratch `t006/base/`). The gateway tests build their handler through one
+`init/INIT-024-scaffold`, extracted for the run and deleted afterwards (re-create it with `git
+archive init/INIT-024-scaffold | tar -x -C <dir>`). The logs are scratch `t006/base-gateway.log`,
+`t006/base-cmd.log` and, for review round 1, `t006/base-gateway-r1.log`; the two shim files are
+kept in `t006/base-shims/`. The gateway tests build their handler through one
 helper, `t006GitHandler`; for the base run that helper is replaced by a shim handing the same
 runner addresses to the base's process-wide `TrustedCIDRs` (the only trust an operator could
 configure there). The `cmd/spine` RunE tests compile against the base unchanged (copied without
@@ -232,8 +235,9 @@ the parser and `bind` tests, whose types do not exist there).
 5. **Push unaffected** — `TestHandleGit_PushNeverTakesWorkspaceBypass`: from ws-a's bound runner,
    push enabled, `info/refs?service=git-receive-pack`, `POST git-receive-pack` and the two smuggled
    push queries all answer `401` without the receive-pack advertisement; with a bearer the
-   advertisement is `200`; with push off the canonical advertisement is the flag's `403`. A guard:
-   passes at the base too, as expected (push never took the bypass).
+   advertisement is `200`; with push off the canonical advertisement is the uniform `401`
+   token-less and the flag's `403` with a bearer (review round 1; it was the `403` token-less). A
+   guard for the push-on half: that passes at the base too (push never took the bypass).
 6. **Existing suites** — see Gates: `go test ./...`, the touched packages under `-race`, the
    integration suites, and the scenario-git-http job pass.
 7. **SMP compatibility gate** — see below; inert, no SMP change.
@@ -268,8 +272,13 @@ the parser and `bind` tests, whose types do not exist there).
    in `handleGit` is then mode-independent: a workspace without a binding is never token-less.
 2. **The trust is looked up under the resolved `cfg.ID`, not the URL segment.** The repository
    served is always `cfg`'s (`cfg.RepoPath` or `cfg`'s own pool), so keying on `cfg.ID` pairs the
-   trust with exactly what is served; `/git//ws-b/...` (chi's `workspace_id` is empty, the request
-   resolves ws-b) shows a URL-keyed check would have been the wrong input.
+   trust with exactly what is served, and it works for the single-workspace route `/git/...`,
+   where the URL names no workspace and the file resolver serves its one. A URL-keyed check would
+   not be a cross-tenant hole by itself — the review's mutation of it still passes the new gateway
+   tests, `/git//ws-b/...` included, since an empty segment binds nothing — but it loses the
+   single-workspace route (ten `TestGitHTTP_*` scenarios clone through `/git`) and, without the
+   resolved-workspace condition, gives a bound peer the distinct error of an unresolvable workspace
+   (`TestHandleGit_TrustedCIDRSeesUniform401ForMissingWorkspace`).
 3. **Single mode, behaviour change.** A trusted runner asking for a workspace that does not
    resolve gets the uniform `401` instead of `404`/`403`/`503` (no bypass without a resolved,
    bound workspace). Recorded in CHANGELOG.
@@ -387,3 +396,38 @@ Clean in round 1, so no further round.
   git-http-backend's alias check refuses them with a `500`).
 - Collapse the resolved-workspace "authentication not configured" `503` for a bearer-carrying
   caller, if the operator signal is judged less important than the residual oracle.
+
+### Review round 1 (2026-10-23)
+
+Two reviews (correctness/compatibility and security lenses) found no P1/P2. The P3s fixed here,
+in `c69e4e7b` (code and tests), `bb2ab597` (docs), `e1e63acf` (a gocritic nit in a new test) and
+this commit (notes):
+
+| Finding | Disposition |
+|---|---|
+| Security #1 = correctness #2: with push off, `info/refs?service=git-receive-pack` and `POST git-receive-pack` skipped the auth gate whenever the workspace resolved, so the flag's `403` answered only for existing workspaces (pre-existing, EPIC-004 TASK-031) | **Fixed.** The push-disabled path is no longer an auth bypass (`pushDisabled` now only keeps the repository lookup out of the way). A caller authenticated for the workspace gets the `403` naming the flag; any other caller — no token, junk, `Basic`, a bare scheme, another workspace's token — gets the uniform `401`. `TestHandleGit_PushDisabledIsNoWorkspaceOracle`: existing vs missing vs inactive vs unavailable give identical status, body and headers for both requests, from an outsider and from ws-a's runner, in shared mode with per-workspace auth (each ServiceSet authenticates its own tokens, so ws-b's token is "another workspace's") and without a pool; ws-a's token gets the `403`. **Red at the base** (`403` for ws-a without a token; log `t006/base-gateway-r1.log`), green here. Changed tests: `TestHandleGit_PushDisabledReturns403NotAuth` became `TestHandleGit_PushDisabled403OnlyForAuthenticatedCaller`; `TestHandleGit_DisabledPushDoesNotResolvePolicy`, `TestHandleGit_PerRepoRouting_PushDisabledKeeps403`, the wave 3 guard, AC 5's push-off half and scenario `TestGitHTTP_PushRejected` now authenticate to see the `403` and assert the `401` without a token. Docs: git-push-guide 401/403 rows, integration guide (push section; the uniform-`401` statement with the one known `503` exception), `KNOWN-LIMITATIONS.md` (same, so "the one known exception" is true), `CHANGELOG.md` (Security and Changed (operators)) |
+| Correctness #1: the git-push-guide `401` row said only "no Authorization header" | **Fixed.** The row lists every case the uniform `401` covers (no or non-bearer header; malformed, unknown, expired, revoked or another workspace's token; a missing, inactive or unavailable workspace) |
+| Correctness #3 = security #3: an unquoted `;` ends a shell assignment | **Fixed.** The refusal hint, `.env.example`, the integration guide (§7 and the env table) and the CHANGELOG quote the per-workspace example and say why |
+| Correctness #4: CIDRs bound to different workspaces that overlap were accepted silently | **Fixed.** `crossWorkspaceCIDROverlaps` and one startup Warn listing every overlapping pair (not a refusal: one runner may serve two workspaces); `TestCrossWorkspaceCIDROverlaps` (range typo, shared address, IPv6, same-workspace and disjoint silent). Docs: integration guide, `KNOWN-LIMITATIONS.md`, CHANGELOG |
+| Correctness #5: a trusted peer's resolution error collapsed to `401` with no server-side trace | **Fixed.** `logTrustedPeerResolveFailure` logs at Info when the direct peer is trusted for the workspace its URL names and that workspace did not resolve (the URL segment is logged only when it equals a configured binding); the response is unchanged. `TestHandleGit_TrustedPeerResolveFailureIsLogged` (one line naming the workspace; none for an unbound workspace or an untrusted peer; the response equals the untrusted caller's). Red at the base (the bound runner got the inactive workspace's `403`) |
+| Correctness #6: the notes cited the deleted `t006/base/` | **Fixed** (Per-AC evidence preamble) |
+| Correctness #7: Deviation 2 overstated the `/git//ws-b` rationale | **Fixed** (Deviation 2 reworded: `cfg.ID` is the served workspace and covers the single-workspace route; a URL-keyed check is not by itself a cross-tenant hole) |
+| Security #2: read classification by path suffix inside the bound workspace's tree | **Not here** (orchestrator routing): INIT-024 TASK-004, because `githttp/handler.go` is shared with TASK-003/005. `githttp/handler.go` is untouched by this round |
+
+**Gates (round 1)**, at `bb2ab597` unless noted:
+
+| Gate | Result |
+|---|---|
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | pass |
+| `go test -p 4 -count=1 ./...` | pass (no failure this run) |
+| `go test -race -p 4` githttp, gateway, cmd/spine | pass |
+| scenario-git-http job (`TestGitHTTP_*` 90 PASS lines, `TestBootstrapInternalAdmin_*` 26, `TestWorkflowLifecycle_*` 130, 0 skips), `TestRunnerCloneContext_*`, `-tags integration` on the touched packages | pass |
+| Full scenario suite, branch vs the scaffold base | identical failure sets (the 31 known pre-existing failures) |
+| golangci-lint `--new-from-rev 12376b55` plain / integration / scenario | 0 new after `e1e63acf` (the first scenario-tag run flagged one `httpNoBody` in a new test) |
+| gosec only, branch vs base; `gofmt -l`; `git diff --check` | 0 / 0; clean; clean |
+| SMP gate (`../spine` at `bb2ab597`; `e1e63acf` after it touches only a Spine test): build, vet plain / integration / scenario / faultinject, testgate runtime (2143 passed, 3 allowed skips), testgate githttp (588 passed, 1 allowed skip), race set (only the two by-design gitread tests fail, as before), no `ws_*` left | pass, inert |
+
+**Codex (round 1 fixes)**: `codex review --base init/INIT-024-scaffold` at `bb2ab597`, review session
+`01a169ea-2396-78c2-ad1b-c66004f228be` (`source: {"subagent":"review"}`, this worktree), model
+`gpt-6.1-sol`: 0 findings, "patch is correct" (confidence 0.90). Pass 2 at the final head is below.
+
