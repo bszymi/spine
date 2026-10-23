@@ -221,3 +221,62 @@ func TestDecodeIntoStrict_BoundRejectionPropagates(t *testing.T) {
 		t.Errorf("expected byte-cap error, got %v", err)
 	}
 }
+
+// TestDecodeIntoStrict_RefusesSecondDocument is INIT-024 TASK-002 AC 4
+// (review finding N-7). The strict decoder read the first YAML document
+// and silently ignored everything after a `---` separator, unlike the
+// branch-protection and validation-policy parsers. A second document with
+// content is now refused; an empty trailing document (a bare `---`, which
+// editors and generators append) and an explicit document end (`...`) are
+// still accepted.
+func TestDecodeIntoStrict_RefusesSecondDocument(t *testing.T) {
+	type cfg struct {
+		ID    string   `yaml:"id"`
+		Steps []string `yaml:"steps"`
+	}
+	for _, c := range []struct {
+		name   string
+		in     string
+		refuse bool
+		want   string // substring of the refusal
+	}{
+		{"second document", "id: a\n---\nid: b\n", true, "unexpected second document"},
+		{"separator with trailing space", "id: a\n--- \nsteps: []\n", true, "unexpected second document"},
+		{"second document holding only an anchor", "id: a\n--- &x\n", true, "unexpected second document"},
+		{"content after an empty second document", "id: a\n---\n---\nid: b\n", true, "unexpected second document"},
+		{"explicit null second document", "id: a\n--- ~\n", true, "unexpected second document"},
+		{"tagged empty second document", "id: a\n--- !!null\n", true, "unexpected second document"},
+		{"second document after an explicit end", "id: a\n...\n---\nid: b\n", true, "unexpected second document"},
+		{"empty first document, content second", "---\n---\nid: b\n", true, "unexpected second document"},
+		{"unparseable trailing content", "id: a\n---\n[unclosed\n", true, "trailing content"},
+
+		{"single document", "id: a\n", false, ""},
+		{"leading separator", "---\nid: a\n", false, ""},
+		{"empty trailing document", "id: a\n---\n", false, ""},
+		{"explicit document end", "id: a\n...\n", false, ""},
+		{"several empty trailing documents", "id: a\n---\n---\n", false, ""},
+		{"comment-only trailing document", "id: a\n---\n# trailing note\n", false, ""},
+		{"separator with a comment", "id: a\n--- # note\n\n", false, ""},
+		{"empty document then an explicit end", "id: a\n---\n...\n", false, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var got cfg
+			err := DecodeIntoStrict([]byte(c.in), &got)
+			if !c.refuse {
+				if err != nil {
+					t.Fatalf("DecodeIntoStrict(%q) = %v, want accepted", c.in, err)
+				}
+				if got.ID != "a" {
+					t.Fatalf("DecodeIntoStrict(%q) decoded %+v, want id a", c.in, got)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("DecodeIntoStrict(%q) accepted (decoded %+v), want a refusal", c.in, got)
+			}
+			if !strings.Contains(err.Error(), "invalid YAML") || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("DecodeIntoStrict(%q) = %v, want an 'invalid YAML' refusal naming %q", c.in, err, c.want)
+			}
+		})
+	}
+}
