@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: "Workflow definition strictness: shipped validate steps fail closed, one YAML document, nested workflow directories guarded"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-001-engine-and-governance/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
