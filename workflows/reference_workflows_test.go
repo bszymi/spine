@@ -1,9 +1,14 @@
 package workflows_test
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/workflow"
@@ -379,6 +384,89 @@ func TestEpicLifecycleWorkflow_ExecuteHasNoDeferredStatusPrecondition(t *testing
 	for _, s := range wf.Steps {
 		if s.ID == "execute" && len(s.Preconditions) != 0 {
 			t.Errorf("epic-lifecycle execute preconditions = %+v, want none", s.Preconditions)
+		}
+	}
+}
+
+// shippedWorkflows reads every shipped definition in this directory.
+func shippedWorkflows(t *testing.T) map[string][]byte {
+	t.Helper()
+	files, err := filepath.Glob("*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no reference workflows found")
+	}
+	out := make(map[string][]byte, len(files))
+	for _, f := range files {
+		content, err := os.ReadFile(f) // #nosec G304 -- fixed test directory.
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		out[f] = content
+	}
+	return out
+}
+
+// TestReferenceWorkflows_TimeoutNeverRoutesIntoReview is INIT-024
+// TASK-002 AC 6 (review finding N-4). An automated step's timeout is what
+// happens when its validator is missing, hangs or is starved: the outcome
+// it applies must not carry the run forward into human review as if the
+// check had passed. The three creation workflows' validate steps used to
+// time out as `valid`; they now time out as `invalid`, back to `draft`.
+func TestReferenceWorkflows_TimeoutNeverRoutesIntoReview(t *testing.T) {
+	for f, content := range shippedWorkflows(t) {
+		wf, err := workflow.Parse("workflows/"+f, content)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
+		}
+		types := make(map[string]domain.StepType, len(wf.Steps))
+		for _, s := range wf.Steps {
+			types[s.ID] = s.Type
+		}
+		for _, s := range wf.Steps {
+			if s.Type != domain.StepTypeAutomated || s.TimeoutOutcome == "" {
+				continue
+			}
+			found := false
+			for _, o := range s.Outcomes {
+				if o.ID != s.TimeoutOutcome {
+					continue
+				}
+				found = true
+				if types[o.NextStep] == domain.StepTypeReview {
+					t.Errorf("%s: automated step %q times out as %q, which routes to review step %q (a timed-out check must not pass)",
+						f, s.ID, s.TimeoutOutcome, o.NextStep)
+				}
+			}
+			if !found {
+				t.Errorf("%s: automated step %q: timeout_outcome %q names no outcome", f, s.ID, s.TimeoutOutcome)
+			}
+		}
+	}
+}
+
+// TestReferenceWorkflows_SingleDocument is INIT-024 TASK-002 AC 7 (review
+// finding N-7): every shipped definition is exactly one YAML document —
+// not even an empty trailing `---`, which strict Parse would still accept.
+func TestReferenceWorkflows_SingleDocument(t *testing.T) {
+	for f, content := range shippedWorkflows(t) {
+		dec := yaml.NewDecoder(bytes.NewReader(content))
+		docs := 0
+		for {
+			var n yaml.Node
+			err := dec.Decode(&n)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("%s: document %d: %v", f, docs+1, err)
+			}
+			docs++
+		}
+		if docs != 1 {
+			t.Errorf("%s: %d YAML documents, want exactly 1", f, docs)
 		}
 	}
 }
