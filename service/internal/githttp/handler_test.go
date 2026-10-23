@@ -15,39 +15,53 @@ import (
 	"github.com/bszymi/spine/core/domain"
 )
 
-func TestIsTrustedIP(t *testing.T) {
+// INIT-024 TASK-006 (review finding N-2): trust is bound to a workspace.
+// An address is trusted for the workspaces it is listed under, matched
+// exactly, and for no other — there is no process-wide list.
+func TestIsTrustedIPForWorkspace(t *testing.T) {
 	h, err := NewHandler(Config{
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
-		TrustedCIDRs:    []string{"172.16.0.0/12", "10.0.0.0/8"},
+		TrustedCIDRsByWorkspace: map[string][]string{
+			"ws-a": {"172.16.0.0/12", "10.0.0.0/8"},
+			"ws-b": {"192.168.7.11/32", "fd00:b::/64"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	tests := []struct {
-		name       string
-		remoteAddr string
-		want       bool
+		name, workspace, remoteAddr string
+		want                        bool
 	}{
-		{"docker internal", "172.18.0.3:12345", true},
-		{"private 10.x", "10.0.0.5:80", true},
-		{"external", "203.0.113.1:80", false},
-		{"localhost", "127.0.0.1:80", false},
-		{"no port", "172.18.0.3", true},
-		{"invalid", "not-an-ip", false},
+		{"docker internal", "ws-a", "172.18.0.3:12345", true},
+		{"private 10.x", "ws-a", "10.0.0.5:80", true},
+		{"no port", "ws-a", "172.18.0.3", true},
+		{"ipv4-mapped ipv6 peer of a bound ipv4 range", "ws-a", "[::ffff:10.0.0.5]:80", true},
+		{"external", "ws-a", "203.0.113.1:80", false},
+		{"localhost", "ws-a", "127.0.0.1:80", false},
+		{"invalid", "ws-a", "not-an-ip", false},
+		{"ws-a's runner asking for ws-b", "ws-b", "10.0.0.5:80", false},
+		{"ws-b's runner asking for ws-a", "ws-a", "192.168.7.11:80", false},
+		{"ws-b's runner", "ws-b", "192.168.7.11:80", true},
+		{"ws-b's ipv6 runner", "ws-b", "[fd00:b::5]:80", true},
+		{"ws-b's ipv6 runner asking for ws-a", "ws-a", "[fd00:b::5]:80", false},
+		{"unbound workspace", "ws-c", "10.0.0.5:80", false},
+		{"empty workspace", "", "10.0.0.5:80", false},
+		{"workspace id differs in case", "WS-A", "10.0.0.5:80", false},
+		{"workspace id with a trailing space", "ws-a ", "10.0.0.5:80", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := h.IsTrustedIP(tt.remoteAddr)
-			if got != tt.want {
-				t.Errorf("IsTrustedIP(%q) = %v, want %v", tt.remoteAddr, got, tt.want)
+			if got := h.IsTrustedIPForWorkspace(tt.workspace, tt.remoteAddr); got != tt.want {
+				t.Errorf("IsTrustedIPForWorkspace(%q, %q) = %v, want %v", tt.workspace, tt.remoteAddr, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestIsTrustedIP_NoCIDRs(t *testing.T) {
+func TestIsTrustedIPForWorkspace_NoCIDRs(t *testing.T) {
 	h, err := NewHandler(Config{
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
 	})
@@ -55,18 +69,26 @@ func TestIsTrustedIP_NoCIDRs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if h.IsTrustedIP("172.18.0.3:80") {
-		t.Error("expected no IPs to be trusted when TrustedCIDRs is empty")
+	for _, ws := range []string{"", "default", "ws-a"} {
+		if h.IsTrustedIPForWorkspace(ws, "172.18.0.3:80") {
+			t.Errorf("workspace %q: expected no IPs to be trusted when TrustedCIDRsByWorkspace is empty", ws)
+		}
 	}
 }
 
 func TestNewHandler_InvalidCIDR(t *testing.T) {
-	_, err := NewHandler(Config{
-		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
-		TrustedCIDRs:    []string{"not-a-cidr"},
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid CIDR")
+	for name, cidrs := range map[string]map[string][]string{
+		"unparsable CIDR":   {"ws-a": {"not-a-cidr"}},
+		"empty workspace":   {"": {"10.0.0.0/8"}},
+		"one bad among two": {"ws-a": {"10.0.0.0/8"}, "ws-b": {"10.0.0.1"}},
+	} {
+		_, err := NewHandler(Config{
+			ResolveRepoPath:         func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
+			TrustedCIDRsByWorkspace: cidrs,
+		})
+		if err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
 	}
 }
 

@@ -108,10 +108,10 @@ func setupGitHTTPServerWithOptions(receivePackEnabled bool, policy branchprotect
 					}
 					return cfg.RepoPath, nil
 				},
-				TrustedCIDRs:       []string{"127.0.0.0/8"},
-				MaxConcurrent:      5,
-				ReceivePackEnabled: receivePackEnabled,
-				Policy:             policy,
+				TrustedCIDRsByWorkspace: map[string][]string{"default": {"127.0.0.0/8"}, "ws-1": {"127.0.0.0/8"}},
+				MaxConcurrent:           5,
+				ReceivePackEnabled:      receivePackEnabled,
+				Policy:                  policy,
 			})
 			if err != nil {
 				return fmt.Errorf("create git HTTP handler: %w", err)
@@ -263,25 +263,34 @@ func TestGitHTTP_InfoRefs_WithWorkspaceID(t *testing.T) {
 	})
 }
 
-// TestGitHTTP_InvalidWorkspace verifies 404 for unknown workspace IDs.
+// TestGitHTTP_InvalidWorkspace verifies that an unknown workspace ID is
+// no oracle for a token-less caller and a distinct 404 for an
+// authenticated one.
 //
-// Scenario: GET /git/nonexistent/info/refs returns 404
+// Scenario: GET /git/nonexistent/info/refs
 //
-//	Given a running gateway
-//	When GET /git/nonexistent/info/refs is requested
+//	Given a running gateway whose runner address (127.0.0.1) is trusted
+//	  for "default" and "ws-1"
+//	When GET /git/nonexistent/info/refs is requested without a token
+//	Then the response is the uniform 401 (INIT-024 TASK-006, N-2: a
+//	  trusted address is trusted only for the workspaces it is bound to,
+//	  and a workspace that does not resolve takes no bypass — it used to
+//	  answer the trusted runner 404, telling missing workspaces apart)
+//	When the same request carries a bearer
 //	Then the response is 404
 func TestGitHTTP_InvalidWorkspace(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
 		Name:        "git-http-invalid-workspace",
-		Description: "Git HTTP returns 404 for nonexistent workspace",
+		Description: "Git HTTP: uniform 401 token-less, 404 authenticated, for a nonexistent workspace",
 		EnvOpts: []harness.EnvOption{
 			harness.WithGovernance(),
 		},
 		Steps: []scenarioEngine.Step{
 			setupGitHTTPServer(),
+			mintPushToken("reader-1", domain.RoleContributor),
 			{
-				Name: "nonexistent-workspace-returns-404",
+				Name: "nonexistent-workspace-token-less-is-uniform-401",
 				Action: func(sc *scenarioEngine.ScenarioContext) error {
 					base := sc.MustGet("gw_url").(string)
 					resp, err := http.Get(base + "/git/nonexistent/info/refs?service=git-upload-pack")
@@ -289,7 +298,28 @@ func TestGitHTTP_InvalidWorkspace(t *testing.T) {
 						return err
 					}
 					defer resp.Body.Close()
-
+					body, _ := io.ReadAll(resp.Body)
+					if resp.StatusCode != http.StatusUnauthorized ||
+						!strings.Contains(string(body), "authorization required for external git access") {
+						return fmt.Errorf("expected the uniform 401, got %d (body: %s)", resp.StatusCode, body)
+					}
+					return nil
+				},
+			},
+			{
+				Name: "nonexistent-workspace-authenticated-returns-404",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					base := sc.MustGet("gw_url").(string)
+					req, err := http.NewRequestWithContext(sc.Ctx, http.MethodGet, base+"/git/nonexistent/info/refs?service=git-upload-pack", http.NoBody)
+					if err != nil {
+						return err
+					}
+					req.Header.Set("Authorization", "Bearer "+sc.MustGet("push_token").(string))
+					resp, err := http.DefaultClient.Do(req)
+					if err != nil {
+						return err
+					}
+					defer resp.Body.Close()
 					if resp.StatusCode != http.StatusNotFound {
 						body, _ := io.ReadAll(resp.Body)
 						return fmt.Errorf("expected 404, got %d (body: %s)", resp.StatusCode, body)

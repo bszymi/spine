@@ -32,9 +32,9 @@ func t015GitServer(t *testing.T, trustedCIDRs []string, proxyCIDRs string, recei
 		t.Fatalf("git init: %v %s", err, out)
 	}
 	h, err := githttp.NewHandler(githttp.Config{
-		ResolveRepoPath:    func(context.Context, string) (string, error) { return repo, nil },
-		TrustedCIDRs:       trustedCIDRs,
-		ReceivePackEnabled: receivePack,
+		ResolveRepoPath:         func(context.Context, string) (string, error) { return repo, nil },
+		TrustedCIDRsByWorkspace: map[string][]string{"ws-1": trustedCIDRs},
+		ReceivePackEnabled:      receivePack,
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)

@@ -389,8 +389,8 @@ func TestHandleGit_TrustedCIDRDoesNotBypassPushAuth(t *testing.T) {
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
 			return repo, nil
 		},
-		TrustedCIDRs:       []string{"127.0.0.0/8"},
-		ReceivePackEnabled: true,
+		TrustedCIDRsByWorkspace: map[string][]string{"ws-1": {"127.0.0.0/8"}},
+		ReceivePackEnabled:      true,
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -487,7 +487,7 @@ func TestHandleGit_TrustedCIDRBypassesReadAuth(t *testing.T) {
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
 			return repo, nil
 		},
-		TrustedCIDRs: []string{"127.0.0.0/8"},
+		TrustedCIDRsByWorkspace: map[string][]string{"ws-1": {"127.0.0.0/8"}},
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -608,19 +608,22 @@ func TestHandleGit_UnauthenticatedUnavailable_Returns401(t *testing.T) {
 	}
 }
 
-// TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors asserts that
-// trusted-CIDR callers — which the existing clone affordance trusts
-// to know workspace IDs already — continue to receive distinct
-// resolution errors so operators can debug genuinely missing repos.
-// Hiding this from trusted callers would turn TASK-031 into a
-// usability regression.
-func TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors(t *testing.T) {
+// TestHandleGit_TrustedCIDRSeesUniform401ForMissingWorkspace replaces
+// TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors (TASK-031), which
+// pinned a distinct 404 for a trusted-CIDR caller on the premise that a
+// trusted address may know every workspace ID. INIT-024 TASK-006 (N-2)
+// removed that premise: a trusted address is trusted only for the
+// workspaces it is bound to, and a workspace that does not resolve takes
+// no bypass — even one whose ID the address is bound to — so the caller
+// meets the auth gate's uniform 401 like any unauthenticated caller. An
+// authenticated caller still gets the distinct 404.
+func TestHandleGit_TrustedCIDRSeesUniform401ForMissingWorkspace(t *testing.T) {
 	repo := t.TempDir()
 	handler, err := githttp.NewHandler(githttp.Config{
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
 			return repo, nil
 		},
-		TrustedCIDRs: []string{"127.0.0.0/8"},
+		TrustedCIDRsByWorkspace: map[string][]string{"missing-ws": {"127.0.0.0/8"}},
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -641,8 +644,21 @@ func TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors(t *testing.T) {
 
 	s.handleGit(w, req)
 
+	if w.Code != http.StatusUnauthorized ||
+		!strings.Contains(w.Body.String(), "authorization required for external git access") {
+		t.Errorf("trusted-CIDR caller, missing workspace: got %d body=%s, want the uniform 401",
+			w.Code, w.Body.String())
+	}
+
+	// Guard: an authenticated caller is past the auth gate and still
+	// gets the distinct 404 operators debug missing repositories with.
+	authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
+	s.auth = authSvc
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	w = httptest.NewRecorder()
+	s.handleGit(w, req)
 	if w.Code != http.StatusNotFound {
-		t.Errorf("trusted-CIDR caller should see the distinct 404, got %d body=%s",
+		t.Errorf("authenticated caller, missing workspace: got %d body=%s, want the distinct 404",
 			w.Code, w.Body.String())
 	}
 }

@@ -84,8 +84,9 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 
 	// Auth gate (INIT-023 TASK-015, audit P3-30 — invariants I3, I4).
 	//
-	//  - Read-only (clone/fetch) from a trusted-CIDR peer skips the
-	//    bearer check: the runner-container affordance. The peer is
+	//  - Read-only (clone/fetch) from a trusted-CIDR peer bound to the
+	//    requested workspace (INIT-024 TASK-006, below) skips the bearer
+	//    check: the runner-container affordance. The peer is
 	//    the TCP peer of a DIRECT connection only (gitPeerIP). A request
 	//    whose peer is a declared reverse proxy
 	//    (SPINE_TRUSTED_PROXY_CIDRS), or that carries a forwarding
@@ -139,11 +140,33 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// caller still gets the 400.
 	pushDisabledShortCircuit := push && !githttp.IsNonCanonicalInfoRefs(r) &&
 		!s.gitHTTP.ReceivePackEnabled() && resolveErr == nil
+	// The trusted-CIDR read bypass is scoped to the workspace the request
+	// resolved to (INIT-024 TASK-006, review finding N-2). It used to be
+	// decided from the peer address alone, so in shared mode a runner
+	// host trusted for one tenant — or any job running on it — cloned
+	// every tenant's repository token-less, and a missing workspace
+	// (its 404) could be told from a present one (200). Now:
+	//
+	//  - The trust is looked up under cfg.ID, the workspace whose
+	//    repository (cfg.RepoPath, or a code repo of cfg's own pool) is
+	//    served below — never under a raw URL segment, so no spelling of
+	//    the path can pair one workspace's trust with another's
+	//    repository.
+	//  - A workspace that did not resolve (missing, inactive,
+	//    unavailable) takes no bypass, so a trusted peer meets the auth
+	//    gate's uniform 401 there, exactly as an untrusted one does; and a
+	//    real workspace the peer is not bound to answers that same 401.
+	//    The existence oracle closes with the cross-tenant read.
+	//  - Single mode has one workspace, which `spine serve` binds the
+	//    bare SPINE_GIT_HTTP_TRUSTED_CIDRS list to; shared mode refuses
+	//    the bare list at startup and takes only the per-workspace form.
+	//    The decision here is the same in both modes and needs no mode
+	//    test: a workspace without a binding is never token-less.
 	trustedBypass := false
-	if !push {
+	if !push && resolveErr == nil && cfg != nil {
 		if ip := gitPeerIP(r, s.trustedProxyCIDRs); ip != nil {
-			trustedBypass = s.gitHTTP.IsTrustedIP(ip.String())
-		} else if s.gitHTTP.IsTrustedIP(r.RemoteAddr) {
+			trustedBypass = s.gitHTTP.IsTrustedIPForWorkspace(cfg.ID, ip.String())
+		} else if s.gitHTTP.IsTrustedIPForWorkspace(cfg.ID, r.RemoteAddr) {
 			s.warnProxiedTrustedGitPeer(r)
 		}
 	}
@@ -167,9 +190,15 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 		//    retryable/server-side signal that operators and
 		//    clients need; collapsing it to 401 would misreport
 		//    the failure as bad credentials.
+		//  - Except a 401 itself, which is always the uniform one
+		//    (INIT-024 TASK-006 adversarial review): its message
+		//    ("invalid token", "invalid authorization header format",
+		//    "token expired", ...) answered only for a workspace that
+		//    resolved, so a junk bearer told present workspaces from
+		//    absent ones — for any caller, trusted or not.
 		a, err := s.validateGitAuth(r, cfg)
 		if err != nil {
-			if resolveErr != nil {
+			if resolveErr != nil || isUnauthorizedError(err) {
 				WriteError(w, domain.NewError(domain.ErrUnauthorized, "authorization required for external git access"))
 			} else {
 				WriteError(w, err)
@@ -504,6 +533,14 @@ func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) (*domai
 	}
 
 	return authSvc.ValidateToken(r.Context(), token)
+}
+
+// isUnauthorizedError reports whether err is a SpineError with code
+// ErrUnauthorized (a missing, malformed, unknown, expired or revoked
+// bearer, or an inactive actor).
+func isUnauthorizedError(err error) bool {
+	var se *domain.SpineError
+	return errors.As(err, &se) && se.Code == domain.ErrUnauthorized
 }
 
 // gitForwardingHeaders are request headers a proxy adds. Their presence
