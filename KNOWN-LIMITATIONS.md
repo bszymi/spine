@@ -846,6 +846,24 @@ The following limitations have been resolved:
   sent no `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`, `X-Forwarded-Proto` or
   `Via`. No forwarded address is trusted for access (owner question 6: a runner behind a reverse
   proxy presents a token; pending the owner).
+- Since INIT-024 TASK-006 (review finding N-2) the bypass is also **bound to a workspace**: a
+  trusted address reads only the workspaces its `SPINE_GIT_HTTP_TRUSTED_CIDRS` entry names
+  (`ws-a=172.28.1.10/32;ws-b=172.28.1.11/32`), and the trust is looked up under the workspace the
+  request resolved to. In shared mode (`db`, `platform-binding`) the bare list refuses to start
+  (owner question 1 default, pending the owner); in single mode it is bound to the one workspace.
+  Any other workspace, and any workspace that does not resolve, answers the uniform `401`.
+- **Residual: the binding is per address, not per job.** A runner address bound to a workspace
+  reads that workspace's whole repository — every branch, not only the run branch of the job it is
+  executing — and any process or job on that host can do the same. Two tenants that share a runner
+  address (or a runner host) share each other's repositories. Give each tenant its own runner
+  addresses. A job-scoped clone token, after which trusted CIDRs could be dropped, is a follow-up
+  (TASK-006 owner question 2).
+- **Residual: `SPINE_GIT_HTTP_DEV_NO_AUTH` is not workspace-scoped.** The development flag (accepted
+  only with `SPINE_ENV=development`) lets every client read every workspace, in every mode.
+- **Residual: a server without any auth service tells workspaces apart.** Every `401` on `/git` is
+  the uniform one, but a resolved workspace whose process and workspace auth services are both
+  missing still answers `503` "authentication not configured" to a caller presenting a bearer,
+  where a missing workspace answers `401` — a misconfiguration signal kept on purpose for operators.
 - **Residual: TCP-level proxies are invisible.** A proxy that relays connections without adding a
   header — Docker's userland proxy for a published port, which connects from the bridge gateway
   (`x.y.z.1`), or an L4 load balancer — looks like a direct peer. Never put such an address in
