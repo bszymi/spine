@@ -262,7 +262,8 @@ func waitHeld(t *testing.T, l *sseLimiter, key string, n int) {
 // workspace A, and the same actor ID in workspace B must still get a
 // stream, while a second stream in A is refused.
 func TestP329_SSELimiter_KeyedPerWorkspace(t *testing.T) {
-	s := &Server{store: t015NilStore{}, eventBroadcaster: delivery.NewEventBroadcaster(), sseLimiter: newSSELimiter(1)}
+	sa, authSvc := newStreamAuth()
+	s := &Server{store: t015NilStore{}, auth: authSvc, eventBroadcaster: delivery.NewEventBroadcaster(), sseLimiter: newSSELimiter(1)}
 	type stream struct {
 		w      *httptest.ResponseRecorder
 		cancel context.CancelFunc
@@ -270,7 +271,7 @@ func TestP329_SSELimiter_KeyedPerWorkspace(t *testing.T) {
 	}
 	open := func(ws string) stream {
 		ctx, cancel := context.WithCancel(t015Ctx(ws, domain.RoleReader, "smp-admin"))
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/events/stream", http.NoBody).WithContext(ctx)
+		req := sa.withStreamBearer(httptest.NewRequest(http.MethodGet, "/api/v1/events/stream", http.NoBody).WithContext(ctx), "smp-admin")
 		st := stream{w: httptest.NewRecorder(), cancel: cancel, done: make(chan struct{})}
 		go func() { s.handleEventStream(st.w, req); close(st.done) }()
 		return st

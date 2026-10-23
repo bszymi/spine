@@ -27,6 +27,10 @@ services:
       - SPINE_PROJECTION_POLLING_INTERVAL=5s
       - SPINE_ORPHAN_THRESHOLD=720h
       - SPINE_LOG_LEVEL=debug
+      # spine serve refuses to start without a known SPINE_ENV
+      # (production, staging or development; INIT-024 TASK-007). This
+      # compose file is a local development stack.
+      - SPINE_ENV=development
       # No git trusted-CIDR list by default: every git clone needs a
       # bearer token (INIT-023 TASK-015). The whole bridge subnet
       # (172.28.0.0/16) used to be trusted, and it contains the bridge

@@ -76,9 +76,21 @@ func InspectRun(ctx context.Context, client *Client, runID string, format Output
 // gateway's run.status response (INIT-014 EPIC-006 TASK-005). Output
 // is grouped by repository per AC #2; raw logs are referenced via
 // evidence_uri rather than embedded (AC #3).
+//
+// Provenance (INIT-024 TASK-007, review finding N-17): a repository whose
+// record the server marks "verified": false was read from the run branch,
+// which the run's author can push anything to, so its status and checks
+// are printed with an UNVERIFIED marker naming the ref, and the headline
+// says how many repositories that covers. A server that predates the
+// field sends no "verified" key and gets no marker.
 func printEvidenceSummary(ev map[string]any) {
 	fmt.Println()
-	fmt.Printf("Evidence: %s\n", ColorStatus(str(ev["status"])))
+	headline := ColorStatus(str(ev["status"]))
+	if unverified, _ := ev["unverified_repositories"].([]any); len(unverified) > 0 {
+		headline += colorize(fmt.Sprintf(" (UNVERIFIED for %d repositor%s: read from the run branch, written by the run's author)",
+			len(unverified), map[bool]string{true: "y", false: "ies"}[len(unverified) == 1]), colorYellow)
+	}
+	fmt.Printf("Evidence: %s\n", headline)
 	repos, _ := ev["repositories"].([]any)
 	if len(repos) == 0 {
 		return
@@ -94,7 +106,11 @@ func printEvidenceSummary(ev map[string]any) {
 			fmt.Printf("  %s: %s — %s\n", colorize(repoID, colorBold), colorize("missing", colorRed), str(repo["reason"]))
 			continue
 		}
-		fmt.Printf("  %s: %s\n", colorize(repoID, colorBold), ColorStatus(str(repo["status"])))
+		marker := ""
+		if verified, ok := repo["verified"].(bool); ok && !verified {
+			marker = colorize(fmt.Sprintf(" UNVERIFIED (read from %s, author-writable)", str(repo["source_ref"])), colorYellow)
+		}
+		fmt.Printf("  %s: %s%s\n", colorize(repoID, colorBold), ColorStatus(str(repo["status"])), marker)
 		if base := str(repo["base_commit"]); base != "" {
 			fmt.Printf("    base→head: %s..%s\n", truncate(base, 12), truncate(str(repo["head_commit"]), 12))
 		}

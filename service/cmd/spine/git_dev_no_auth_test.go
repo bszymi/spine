@@ -74,11 +74,13 @@ func TestP330_OverlappingCIDRs(t *testing.T) {
 }
 
 // The guard runs before any store, secret or listener is opened: with an
-// unset SPINE_ENV and an unreachable database URL, a serve that skipped
-// the guard would fail later, at the database, with an error that does
-// not name the flag.
+// unreachable database URL, a serve that skipped the guard would fail
+// later, at the database, with an error that does not name the flag. An
+// unset SPINE_ENV is refused one gate earlier since INIT-024 TASK-007
+// (TestServe_RequiresKnownSpineEnv), so only the known non-development
+// values reach this guard.
 func TestP330_ServeRefusesGitDevNoAuthOutsideDevelopment(t *testing.T) {
-	for _, env := range []string{"", "staging", "production"} {
+	for _, env := range []string{"staging", "production"} {
 		t.Run("env="+env, func(t *testing.T) {
 			t.Setenv("SPINE_ENV", env)
 			t.Setenv("SPINE_GIT_HTTP_DEV_NO_AUTH", "1")

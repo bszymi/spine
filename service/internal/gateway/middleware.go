@@ -20,11 +20,11 @@ import (
 // Context keys are empty structs so they collide only with themselves and
 // their label never leaks when a context is formatted for debug output.
 type (
-	actorKey                 struct{}
-	workspaceKey             struct{}
-	serviceSetKey            struct{}
-	workspaceErrKey          struct{}
-	releaseWorkspaceRefKey   struct{}
+	actorKey               struct{}
+	workspaceKey           struct{}
+	serviceSetKey          struct{}
+	workspaceErrKey        struct{}
+	releaseWorkspaceRefKey struct{}
 )
 
 // releaseWorkspaceRef invokes the request's pool-release function if
@@ -90,6 +90,17 @@ func serviceSetFromContext(ctx context.Context) *workspace.ServiceSet {
 // unauthenticated callers with a uniform 401 — without leaking whether the
 // workspace exists, is inactive, or is currently unavailable. Authenticated
 // callers see the original tenant-state error after the bearer is validated.
+//
+// It resolves the workspace's configuration only. It never builds the
+// workspace's ServiceSet (INIT-024 TASK-007, review finding N-15): that
+// opens the workspace's database pool, seeds the bootstrap admin and
+// sweeps its subscription secrets, and it ran here for every request —
+// before authMiddleware had seen a bearer — so an anonymous caller could
+// make Spine load any tenant, and a build failure answered 500 where a
+// missing workspace answered 401, telling the two apart. authMiddleware
+// acquires the ServiceSet (acquireServiceSet) once a well-formed bearer
+// is present, because the bearer can only be checked against that
+// workspace's own token store.
 func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.wsResolver == nil {
@@ -108,30 +119,64 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), workspaceKey{}, cfg)
 		ctx = observe.WithWorkspaceID(ctx, cfg.ID)
-
-		// If service pool is configured, get the workspace's service set.
-		if s.servicePool != nil {
-			ss, err := s.servicePool.Get(r.Context(), cfg.ID)
-			if err != nil {
-				WriteError(w, domain.NewError(domain.ErrInternal, "failed to initialize workspace services"))
-				return
-			}
-			ctx = context.WithValue(ctx, serviceSetKey{}, ss)
-			// sync.Once guards the release so a long-lived handler
-			// (e.g. handleEventStream) can call releaseWorkspaceRef
-			// once it no longer needs the ServiceSet's store, and
-			// this defer remains a safe no-op cleanup.
-			var releaseOnce sync.Once
-			workspaceID := cfg.ID
-			release := func() {
-				releaseOnce.Do(func() { s.servicePool.Release(workspaceID) })
-			}
-			ctx = context.WithValue(ctx, releaseWorkspaceRefKey{}, release)
-			defer release()
-		}
-
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// acquireServiceSet takes a pool reference on the workspace's ServiceSet
+// (building it on first use) and returns the request context carrying it,
+// plus the release function the caller must defer. The release is
+// sync.Once-guarded and also stored in the context, so a long-lived
+// handler (handleEventStream) can drop the reference early with
+// releaseWorkspaceRef once it no longer needs the ServiceSet's store, and
+// the caller's deferred release stays a safe no-op.
+//
+// Only authMiddleware calls it, and only for a request that carries a
+// well-formed bearer (INIT-024 TASK-007, N-15).
+func (s *Server) acquireServiceSet(ctx context.Context, workspaceID string) (context.Context, func(), error) {
+	ss, err := s.servicePool.Get(ctx, workspaceID)
+	if err != nil {
+		return ctx, func() {}, err
+	}
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { s.servicePool.Release(workspaceID) })
+	}
+	ctx = context.WithValue(ctx, serviceSetKey{}, ss)
+	ctx = context.WithValue(ctx, releaseWorkspaceRefKey{}, release)
+	return ctx, release, nil
+}
+
+// uniformUnauthorizedMessage is the one message every pre-authentication
+// refusal answers in shared mode, whatever its cause (writeUniformUnauthorized).
+const uniformUnauthorizedMessage = "authentication required"
+
+// writeUniformUnauthorized writes the shared-mode pre-authentication 401
+// (INIT-024 TASK-007, N-15). Status and body are byte-identical for every
+// cause, so a caller who has not proven a bearer cannot learn whether the
+// workspace exists, is inactive or unavailable, failed to build, has no
+// auth service, or whether its token was unknown, expired or revoked.
+func writeUniformUnauthorized(w http.ResponseWriter) {
+	WriteError(w, domain.NewError(domain.ErrUnauthorized, uniformUnauthorizedMessage))
+}
+
+// bearerFromRequest extracts the bearer token from the Authorization header
+// without any I/O. The scheme is case-insensitive (RFC 7235). The error is
+// the single-mode response for a missing or malformed header; shared mode
+// answers every such request with writeUniformUnauthorized instead.
+func bearerFromRequest(r *http.Request) (string, error) {
+	header := r.Header.Get("Authorization")
+	if header == "" {
+		return "", domain.NewError(domain.ErrUnauthorized, "authorization header required")
+	}
+	if len(header) < 7 || !strings.EqualFold(header[:7], "bearer ") {
+		return "", domain.NewError(domain.ErrUnauthorized, "invalid authorization header format")
+	}
+	token := header[7:]
+	if token == "" {
+		return "", domain.NewError(domain.ErrUnauthorized, "invalid authorization header format")
+	}
+	return token, nil
 }
 
 // mapWorkspaceResolveErr translates a workspace.Resolver error into the
@@ -167,6 +212,11 @@ func mapWorkspaceResolveErr(err error, workspaceID string) error {
 // IDs or status by probing distinct error codes.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.servicePool != nil && s.wsResolver != nil {
+			s.authenticatePooled(w, r, next)
+			return
+		}
+
 		wsErr, hasWSErr := pendingWorkspaceErr(r.Context())
 
 		authSvc := s.authFrom(r.Context())
@@ -189,20 +239,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		header := r.Header.Get("Authorization")
-		if header == "" {
-			WriteError(w, domain.NewError(domain.ErrUnauthorized, "authorization header required"))
-			return
-		}
-
-		// HTTP auth schemes are case-insensitive per RFC 7235
-		if len(header) < 7 || !strings.EqualFold(header[:7], "bearer ") {
-			WriteError(w, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format"))
-			return
-		}
-		token := header[7:]
-		if token == "" {
-			WriteError(w, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format"))
+		token, err := bearerFromRequest(r)
+		if err != nil {
+			WriteError(w, err)
 			return
 		}
 
@@ -245,6 +284,113 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		ctx = observe.WithActorID(ctx, actor.ActorID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// authenticatePooled is authMiddleware for shared mode — a ServicePool and
+// a workspace resolver, as `spine serve` wires for WORKSPACE_RESOLVER=db and
+// platform-binding (INIT-024 TASK-007, review finding N-15).
+//
+// The bearer can only be checked against the workspace's own token store,
+// which lives in its ServiceSet, so authentication and the ServiceSet build
+// are ordered:
+//
+//  1. Bearer shape (no I/O). A request without a well-formed bearer never
+//     reaches servicePool.Get: no database pool is opened, no bootstrap
+//     admin seeded, no secret sweep run for an anonymous caller.
+//  2. A workspace that did not resolve (missing, inactive, unavailable,
+//     no X-Workspace-ID) has nothing to validate against: uniform 401, no
+//     build. Unchanged from INIT-008 TASK-030.
+//  3. Build (or reuse) the ServiceSet, then validate the bearer against
+//     its auth service.
+//
+// Until step 3 has validated the bearer, every refusal is
+// writeUniformUnauthorized: the same status and body for a missing header,
+// a malformed one, an unresolved workspace, a ServiceSet that failed to
+// build, a workspace with no auth service, an unknown, expired or revoked
+// token, a suspended actor, and a token-store error. Each of these used to
+// answer differently (500 for a build failure, 503 for a missing auth
+// service, 500 for a store error, a distinct 401 message per token state),
+// so any caller — even one sending "Bearer x" — could tell an existing
+// workspace from a missing one. The cause is logged server-side instead
+// (never the token), so an outage still shows up for operators. A caller
+// whose bearer is valid but whose workspace cannot be built also gets the
+// 401: without the workspace's store there is no way to know it is valid
+// (Implementation Notes, deviation from AC 3's 500).
+//
+// After step 3 the actor is authenticated and the original granular
+// errors apply: the membership check's 403, and every handler error.
+func (s *Server) authenticatePooled(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	ctx := r.Context()
+	log := observe.Logger(ctx)
+
+	token, tokenErr := bearerFromRequest(r)
+	if tokenErr != nil {
+		writeUniformUnauthorized(w)
+		return
+	}
+	if _, hasWSErr := pendingWorkspaceErr(ctx); hasWSErr {
+		writeUniformUnauthorized(w)
+		return
+	}
+	cfg := WorkspaceConfigFromContext(ctx)
+	if cfg == nil || cfg.ID == "" {
+		// A resolver that returned no error and no config. Defensive:
+		// nothing to build or validate against.
+		log.Error("workspace resolver returned no configuration; refusing the request")
+		writeUniformUnauthorized(w)
+		return
+	}
+
+	ctx, release, err := s.acquireServiceSet(ctx, cfg.ID)
+	if err != nil {
+		log.Warn("workspace services could not be built for a request that is not yet authenticated; answering the uniform 401",
+			"workspace_id", cfg.ID, "error", err)
+		writeUniformUnauthorized(w)
+		return
+	}
+	defer release()
+
+	// The workspace's own auth service only: falling back to a
+	// process-level one would validate this tenant's bearer against
+	// another store.
+	ss := serviceSetFromContext(ctx)
+	if ss == nil || ss.Auth == nil {
+		log.Error("workspace has no auth service (no runtime database?); answering the uniform 401",
+			"workspace_id", cfg.ID)
+		writeUniformUnauthorized(w)
+		return
+	}
+
+	actor, err := ss.Auth.ValidateToken(ctx, token)
+	if err != nil {
+		var se *domain.SpineError
+		if !errors.As(err, &se) || se.Code != domain.ErrUnauthorized {
+			log.Warn("bearer validation failed on the workspace token store; answering the uniform 401",
+				"workspace_id", cfg.ID, "error", err)
+		}
+		writeUniformUnauthorized(w)
+		return
+	}
+
+	// Defense-in-depth membership check, as in single mode: the actor
+	// must exist in this workspace's own store (never a process-level
+	// fallback).
+	if ss.Store != nil {
+		if _, gerr := ss.Store.GetActor(ctx, actor.ActorID); gerr != nil {
+			log.Warn("actor not a member of requested workspace",
+				"actor_id", actor.ActorID,
+				"workspace_id", cfg.ID,
+				"error", gerr.Error(),
+			)
+			WriteError(w, domain.NewError(domain.ErrForbidden, "actor has no membership in this workspace"))
+			return
+		}
+	}
+
+	ctx = context.WithValue(ctx, actorKey{}, actor)
+	ctx = domain.WithActor(ctx, actor)
+	ctx = observe.WithActorID(ctx, actor.ActorID)
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // authorize checks if the authenticated actor has permission for the operation.

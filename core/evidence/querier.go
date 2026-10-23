@@ -89,7 +89,15 @@ func (q *Querier) SummarizeForRun(ctx context.Context, run *domain.Run) (*RunSum
 	if run != nil && run.Mode == domain.RunModePlanning {
 		return nil, nil
 	}
-	return BuildSummary(ctx, q.reader, RefsForRun(run, q.primaryBranch), run)
+	primary := q.primaryBranch
+	if primary == "" {
+		primary = PrimaryAuthoritativeBranchDefault
+	}
+	// Evidence read from the run branch is the author's claim, not a
+	// server record: buildSummary marks it unverified (INIT-024
+	// TASK-007, N-17). The run branch stays in the ref list — operators
+	// rely on in-flight evidence — but is never presented as verified.
+	return buildSummary(ctx, q.reader, RefsForRun(run, primary), primary, run)
 }
 
 // RefsForRun returns the priority-ordered list of Git refs the loader
