@@ -401,6 +401,35 @@ func TestCheck(t *testing.T) {
 			},
 		},
 		{
+			// Codex round 3: jobs run on separate runners, so a tag one job
+			// builds is pulled by another.
+			name: "a tag built in another job is pulled there",
+			mutate: func(f map[string]string) {
+				addJob(f, "  b:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: docker build -t alpine:latest .\n"+
+					"  c:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: docker run --rm alpine:latest\n")
+			},
+			want: []string{ciFile + ":28: image \"alpine:latest\" is not pinned by digest"},
+		},
+		{
+			name: "run before the build, and a pull after it, in one job",
+			mutate: func(f map[string]string) {
+				addJob(f, "  b:\n    runs-on: ubuntu-24.04\n    steps:\n"+
+					"      - run: docker run --rm local:ci\n"+
+					"      - run: docker build -t local:ci . && docker pull local:ci\n")
+			},
+			want: []string{
+				ciFile + ":24: image \"local:ci\" is not pinned by digest",
+				ciFile + ":25: image \"local:ci\" is not pinned by digest",
+			},
+		},
+		{
+			name: "a Docker Hub spelling of the compose postgres must match it too",
+			mutate: func(f map[string]string) {
+				f[ciFile] = strings.Replace(f[ciFile], "image: postgres:18-bookworm@"+dPg, "image: docker.io/library/postgres:18-bookworm@"+dPg2, 1)
+			},
+			want: []string{ciFile + ":8: image \"docker.io/library/postgres:18-bookworm@" + dPg2 + "\" differs from the compose stack's"},
+		},
+		{
 			name:   "an image in a Makefile recipe",
 			mutate: func(f map[string]string) { f["Makefile"] += "shell:\n\tdocker run -it --rm alpine:3 sh\n" },
 			want:   []string{"Makefile:7: image \"alpine:3\" is not pinned by digest"},
@@ -607,6 +636,8 @@ func TestShellScan(t *testing.T) {
 		{name: "comments", script: "# docker run a:1\necho x # docker run b:2", want: nil},
 		{name: "compose is not docker run", script: "docker compose run --rm db psql", want: nil},
 		{name: "locally built tag is exempt", script: "docker build -t local:ci .\ndocker run --rm local:ci", want: nil},
+		{name: "a run before the build is not exempt", script: "docker run local:ci\ndocker build -t local:ci .", want: []string{"1 local:ci"}},
+		{name: "a pull of a built tag is not exempt", script: "docker build -t local:ci .\ndocker pull local:ci", want: []string{"2 local:ci"}},
 		{name: "buildx --tag= is exempt", script: "docker buildx build --tag=local:ci .\ndocker run local:ci", want: nil},
 		{name: "computed image is reported", script: "docker run $(IMAGE)", want: []string{"1 $(IMAGE)"}},
 		{name: "absolute docker path", script: "/usr/bin/docker run a:1", want: []string{"1 a:1"}},

@@ -151,10 +151,12 @@ func (s *scanned) imageValue(file string, n *yaml.Node, origin string) {
 // scanWorkflow walks jobs.*: runs-on, a reusable-workflow `uses`, the job
 // container (string or mapping), every service image and every step.
 func (s *scanned) scanWorkflow(file string, content []byte) {
-	sh := newShellScan(file, originWorkflow)
 	for _, doc := range s.parseYAML(file, content) {
 		for _, jobs := range lookup(doc, "jobs") {
 			for _, job := range entries(jobs.val) {
+				// One shell scope per job: each job runs on its own runner
+				// with its own image store.
+				sh := newShellScan(file, originWorkflow)
 				for _, e := range lookup(job.val, "runs-on") {
 					s.checkRunsOn(file, e.val)
 				}
@@ -181,11 +183,10 @@ func (s *scanned) scanWorkflow(file string, content []byte) {
 				for _, e := range lookup(job.val, "steps") {
 					s.scanSteps(file, e.val, originWorkflow, sh)
 				}
+				s.images = append(s.images, sh.images()...)
 			}
 		}
 	}
-	s.images = append(s.images, sh.images()...)
-	s.problems = append(s.problems, sh.problems...)
 }
 
 // scanAction walks a composite action's runs.steps and a Docker action's
@@ -210,7 +211,6 @@ func (s *scanned) scanAction(file string, content []byte) {
 		}
 	}
 	s.images = append(s.images, sh.images()...)
-	s.problems = append(s.problems, sh.problems...)
 }
 
 // scanCompose records every services.*.image.

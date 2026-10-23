@@ -9,8 +9,13 @@ import (
 // `docker run`, `docker create`, `docker pull` (and the `docker container
 // run|create`, `docker image pull` spellings) in workflow `run:` scripts and
 // Makefiles. The first non-flag argument after the subcommand is the image.
-// An image the same file builds (`docker build`/`docker buildx build` with
-// `-t`/`--tag`) is local and exempt.
+//
+// A `docker run|create` of a tag built earlier in the same scope (`docker
+// build`/`docker buildx build` with `-t`/`--tag`) uses the local image and
+// is exempt. The scope is one workflow job (jobs run on separate runners with
+// separate image stores, so a tag built in one job is pulled in another), one
+// composite action or one Makefile, and "earlier" is text order. A `docker
+// pull` is never exempt: it always goes to the registry.
 //
 // It is a heuristic, not a shell: a flag it does not know to be boolean is
 // assumed to take a value, so an unknown boolean flag makes it read the
@@ -22,7 +27,6 @@ type shellScan struct {
 	file, origin string
 	calls        []imageRef
 	built        map[string]bool
-	problems     []problem
 }
 
 func newShellScan(file, origin string) *shellScan {
@@ -34,18 +38,11 @@ func (s *scanned) scanShellImages(file string, firstLine int, text, origin strin
 	sh := newShellScan(file, origin)
 	sh.scan(firstLine, text)
 	s.images = append(s.images, sh.images()...)
-	s.problems = append(s.problems, sh.problems...)
 }
 
-// images returns the pulled images, without the ones this file builds.
+// images returns the images the scanned text fetches.
 func (sh *shellScan) images() []imageRef {
-	var out []imageRef
-	for _, c := range sh.calls {
-		if !sh.built[c.ref] {
-			out = append(out, c)
-		}
-	}
-	return out
+	return sh.calls
 }
 
 // token is one shell word and the line it is on.
@@ -184,9 +181,9 @@ func (sh *shellScan) command(toks []token) {
 		case "build", "image build", "buildx build":
 			sh.buildTags(args)
 		case "run", "create", "container run", "container create":
-			sh.imageArg(args, runBoolFlags, runBoolShort)
+			sh.imageArg(args, runBoolFlags, runBoolShort, true)
 		case "pull", "image pull":
-			sh.imageArg(args, pullBoolFlags, pullBoolShort)
+			sh.imageArg(args, pullBoolFlags, pullBoolShort, false)
 		}
 	}
 }
@@ -208,11 +205,16 @@ func (sh *shellScan) buildTags(args []token) {
 	}
 }
 
-// imageArg records the first non-flag word: the image.
-func (sh *shellScan) imageArg(args []token, bools map[string]bool, short string) {
+// imageArg records the first non-flag word: the image. localOK says whether
+// a tag built earlier in this scope is used as it is (run, create) rather
+// than fetched (pull).
+func (sh *shellScan) imageArg(args []token, bools map[string]bool, short string, localOK bool) {
 	for i := 0; i < len(args); i++ {
 		a := args[i].text
 		if !strings.HasPrefix(a, "-") || a == "-" {
+			if localOK && sh.built[a] {
+				return
+			}
 			sh.calls = append(sh.calls, imageRef{file: sh.file, line: args[i].line, ref: a, origin: sh.origin})
 			return
 		}

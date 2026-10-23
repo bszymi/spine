@@ -26,8 +26,7 @@ type tagResolver func(ctx context.Context, repo, tag string) (string, error)
 // inspection is the same one whichever short form the file used; a mirror
 // path is inspected as written.
 func canonicalRepo(name string) string {
-	switch name {
-	case "golang", "library/golang", "index.docker.io/library/golang":
+	if hubRepo(name) == "golang" {
 		return "docker.io/library/golang"
 	}
 	return name

@@ -126,6 +126,15 @@ var (
 	composeName = regexp.MustCompile(`^(?:docker-)?compose(?:[.-][^/]*)?\.ya?ml$`)
 )
 
+// hubRepo folds the Docker Hub spellings of a repository into one, so
+// `postgres`, `library/postgres` and `docker.io/library/postgres` are the
+// same repository.
+func hubRepo(name string) string {
+	name = strings.TrimPrefix(name, "index.docker.io/")
+	name = strings.TrimPrefix(name, "docker.io/")
+	return strings.TrimPrefix(name, "library/")
+}
+
 // isGolangRepo reports whether an image repository is the official golang
 // image under any registry or mirror path (golang, library/golang,
 // docker.io/library/golang, mirror.gcr.io/library/golang, …). A mirror
@@ -425,8 +434,8 @@ func composeConsistency(images []imageRef) []problem {
 			continue
 		}
 		name, _, _ := splitImageRef(img.ref)
-		if _, ok := first[name]; !ok {
-			first[name] = img
+		if _, ok := first[hubRepo(name)]; !ok {
+			first[hubRepo(name)] = img
 		}
 	}
 	var out []problem
@@ -435,7 +444,7 @@ func composeConsistency(images []imageRef) []problem {
 			continue
 		}
 		name, _, _ := splitImageRef(img.ref)
-		want, ok := first[name]
+		want, ok := first[hubRepo(name)]
 		if !ok || img.ref == want.ref || pinProblem(img.ref) != "" {
 			continue
 		}
