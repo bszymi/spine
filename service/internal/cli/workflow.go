@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/core/yamlsafe"
 )
 
@@ -48,14 +50,14 @@ func ListWorkflows(repoPath string, format OutputFormat) error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
 			continue
 		}
-		path := filepath.Join(wfDir, entry.Name())
-		wf, err := parseWorkflowSummary(path)
+		rel := "workflows/" + entry.Name()
+		wf, err := readWorkflow(repoPath, rel)
 		if err != nil {
-			continue // skip unparseable files
+			// Not listed, as the server does not project it; say why.
+			fmt.Fprintf(os.Stderr, "warning: %s not listed: %v\n", rel, err)
+			continue
 		}
-		wf.Path = "workflows/" + entry.Name()
-		normalizeMode(wf)
-		workflows = append(workflows, *wf)
+		workflows = append(workflows, summaryOf(wf, rel))
 	}
 
 	if format == FormatJSON {
@@ -76,13 +78,11 @@ func ListWorkflows(repoPath string, format OutputFormat) error {
 
 // ShowWorkflow displays the full workflow definition.
 func ShowWorkflow(repoPath, workflowPath string, format OutputFormat) error {
-	fullPath := filepath.Join(repoPath, workflowPath)
-	detail, err := parseWorkflowDetail(fullPath)
+	wf, err := readWorkflow(repoPath, workflowPath)
 	if err != nil {
 		return err
 	}
-	detail.Path = workflowPath
-	normalizeMode(&detail.WorkflowSummary)
+	detail := detailOf(wf, workflowPath)
 
 	if format == FormatJSON {
 		return PrintJSON(detail)
@@ -139,20 +139,20 @@ func ResolveWorkflow(repoPath, artifactPath string, format OutputFormat) error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
 			continue
 		}
-		path := filepath.Join(wfDir, entry.Name())
-		wf, err := parseWorkflowSummary(path)
+		rel := "workflows/" + entry.Name()
+		def, err := readWorkflow(repoPath, rel)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s not considered: %v\n", rel, err)
 			continue
 		}
+		wf := summaryOf(def, rel)
 		// Only consider Active workflows for binding resolution.
 		if wf.Status != "Active" {
 			continue
 		}
 		for _, at := range wf.AppliesTo {
 			if strings.EqualFold(at, artMeta.Type) {
-				wf.Path = "workflows/" + entry.Name()
-				normalizeMode(wf)
-				matches = append(matches, *wf)
+				matches = append(matches, wf)
 			}
 		}
 	}
@@ -179,63 +179,56 @@ func ResolveWorkflow(repoPath, artifactPath string, format OutputFormat) error {
 	return nil
 }
 
-// normalizeMode sets the default mode for workflows that omit it.
-func normalizeMode(wf *WorkflowSummary) {
-	if wf.Mode == "" {
-		wf.Mode = "execution"
-	}
-}
-
-func parseWorkflowSummary(path string) (*WorkflowSummary, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var wf WorkflowSummary
-	if err := yamlsafe.DecodeInto(data, &wf); err != nil {
-		return nil, err
-	}
-	return &wf, nil
-}
-
-func parseWorkflowDetail(path string) (*WorkflowDetail, error) {
-	data, err := os.ReadFile(path)
+// readWorkflow reads one workflow file and accepts it exactly as the
+// server's projection does (INIT-024 TASK-002): workflow.ProjectionDefinition
+// — strict Parse (one YAML document, no unknown or duplicate keys, the
+// yamlsafe bounds) and the projection round trip. These commands used to
+// decode leniently and read only the first YAML document, so they could
+// show a file Active, or resolve a binding to it, while the server had
+// quarantined it. relPath is the repository-relative path, as the
+// projection keys the row; the mode defaults to "execution" as Parse
+// does.
+func readWorkflow(repoPath, relPath string) (*domain.WorkflowDefinition, error) {
+	data, err := os.ReadFile(filepath.Join(repoPath, relPath)) // #nosec G304 -- operator-supplied repository path (local CLI).
 	if err != nil {
 		return nil, fmt.Errorf("read workflow: %w", err)
 	}
-
-	var raw struct {
-		WorkflowSummary `yaml:",inline"`
-		EntryStep       string `yaml:"entry_step"`
-		Steps           []struct {
-			ID       string `yaml:"id"`
-			Name     string `yaml:"name"`
-			Type     string `yaml:"type"`
-			Timeout  string `yaml:"timeout"`
-			Outcomes []struct {
-				ID string `yaml:"id"`
-			} `yaml:"outcomes"`
-		} `yaml:"steps"`
+	wf, _, err := workflow.ProjectionDefinition(relPath, data)
+	if err != nil {
+		return nil, err
 	}
-	if err := yamlsafe.DecodeInto(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse workflow: %w", err)
-	}
+	return wf, nil
+}
 
+func summaryOf(wf *domain.WorkflowDefinition, relPath string) WorkflowSummary {
+	return WorkflowSummary{
+		ID:        wf.ID,
+		Name:      wf.Name,
+		Version:   wf.Version,
+		Status:    string(wf.Status),
+		Mode:      wf.Mode,
+		AppliesTo: wf.AppliesTo,
+		Path:      relPath,
+	}
+}
+
+func detailOf(wf *domain.WorkflowDefinition, relPath string) *WorkflowDetail {
 	detail := &WorkflowDetail{
-		WorkflowSummary: raw.WorkflowSummary,
-		EntryStep:       raw.EntryStep,
+		WorkflowSummary: summaryOf(wf, relPath),
+		EntryStep:       wf.EntryStep,
 	}
-	for _, s := range raw.Steps {
-		var outcomeIDs []string
-		for _, o := range s.Outcomes {
+	for i := range wf.Steps {
+		st := &wf.Steps[i]
+		outcomeIDs := make([]string, 0, len(st.Outcomes))
+		for _, o := range st.Outcomes {
 			outcomeIDs = append(outcomeIDs, o.ID)
 		}
 		detail.Steps = append(detail.Steps, stepSummary{
-			ID: s.ID, Name: s.Name, Type: s.Type,
-			Timeout: s.Timeout, Outcomes: outcomeIDs,
+			ID: st.ID, Name: st.Name, Type: string(st.Type),
+			Timeout: st.Timeout, Outcomes: outcomeIDs,
 		})
 	}
-	return detail, nil
+	return detail
 }
 
 // extractFrontMatter returns the YAML front matter from a Markdown file.
