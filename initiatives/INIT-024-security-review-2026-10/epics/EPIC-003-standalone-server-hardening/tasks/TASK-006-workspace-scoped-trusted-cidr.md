@@ -2,7 +2,7 @@
 id: TASK-006
 type: Task
 title: "Workspace-scoped trusted-CIDR clone in shared mode"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
@@ -149,3 +149,241 @@ workspace, not just the ones it serves.
 - `service/internal/gateway/handlers_git.go` and `service/internal/githttp/handler.go`
   (`IsTrustedIP`): this task only in EPIC-003. TASK-003/005 touch other parts of
   `githttp/handler.go`; `IsTrustedIP` and `ServeHTTP`'s CIDR block do not overlap their lines.
+
+## Implementation Notes
+
+*(Implementation, 2026-10-23. Branch `init/INIT-024-TASK-006-workspace-scoped-trusted-cidr`, cut
+from `init/INIT-024-scaffold` `12376b55` (= `a560c210` + the INIT-024 scaffold). macOS (APFS),
+git 2.54.0 (Apple), go 1.26.5 (SMP's toolchain line: 1.26.8), PostgreSQL 18.6 in `i23-pg`; the
+git-floor job in the local `golang:1.26-bookworm` image (git 2.39.5). The design's line numbers
+held at `12376b55`.)*
+
+### Owner questions (defaults, pending the owner)
+
+| Question | Default taken | Where |
+|---|---|---|
+| OQ1 shared-mode unbound list | Refuse to start, naming the per-workspace form | `gitTrustedCIDRs.checkMode` (early, from `WORKSPACE_RESOLVER`) and `bind` (backstop, from the built `ServicePool`) |
+| OQ2 job-scoped clone tokens | Not in this task; per-workspace CIDRs only. Residual recorded in `KNOWN-LIMITATIONS.md` | — |
+
+### What was built
+
+| Commit | Change |
+|---|---|
+| `c8be2f8b` | `githttp`: `Config.TrustedCIDRsByWorkspace` / `Handler.IsTrustedIPForWorkspace` replace the process-wide `TrustedCIDRs` / `IsTrustedIP` (exact workspace-ID match; an empty ID or an unparsable CIDR refuses `NewHandler`). `gateway.handleGit`: the bypass is looked up under the **resolved** `cfg.ID` and only when the workspace resolved; every `401` on `/git` is the uniform one (`isUnauthorizedError`). `cmd/spine`: `gitTrustedCIDRs` (bare `Unbound` / per-workspace `ByWorkspace`), `parseGitHTTPTrustedCIDRs` (now returns an error), `checkMode`, `bind`, `unservedTrustedWorkspaces`, `sharedWorkspaceResolverEnv`; the early gate in `serveCmd` and the binding after the resolver is built; `serveDeps.TrustedGitHTTPCIDRs` and `buildGitHTTPHandler` take the map. Tests below; existing tests and three scenario setups moved to the per-workspace config. |
+| `087bc243` | Docs: integration guide §7 and env table, `docker-compose.override.yaml.example` (Option D, shared mode), `.env.example`, README, `KNOWN-LIMITATIONS.md`, `CHANGELOG.md`. |
+| (this commit) | These notes; status In Progress. |
+
+No migration, schema, table, column, route, event or Go interface change (the renamed githttp
+`Config` field and `Handler` method are in an internal package). No package SMP embeds is
+touched: every changed Go file is under `service/` (`service/internal/...` is not importable
+outside `service/`, and SMP's `dev/lint-spine-internals` forbids `service/...`).
+
+### Per-AC evidence
+
+"Red at the base" means the branch's new test file run in a `git archive` of
+`init/INIT-024-scaffold` (scratch `t006/base/`). The gateway tests build their handler through one
+helper, `t006GitHandler`; for the base run that helper is replaced by a shim handing the same
+runner addresses to the base's process-wide `TrustedCIDRs` (the only trust an operator could
+configure there). The `cmd/spine` RunE tests compile against the base unchanged (copied without
+the parser and `bind` tests, whose types do not exist there).
+
+1. **Regression N-2** — `TestHandleGit_TrustedCIDRScopedToWorkspace`
+   (`service/internal/gateway/git_trusted_cidr_scope_internal_test.go`), the PoC ported: real
+   git-http-backend, bare repos side by side under one root, `ws-a` bound to `172.28.1.10/32` and
+   `ws-b` to `172.28.1.11/32`, through the real `/git` chi routes, in shared mode (a
+   `ServicePool`) and in the PoC's pool-less two-workspace shape. ws-a's runner: ws-a `200` with
+   ws-a's refs; ws-b `401` with nothing of ws-b for smart and dumb `info/refs`, `POST
+   git-upload-pack`, `HEAD`, `objects/info/packs` and `/git/ws-b/spine/...`; ws-b's runner reads
+   ws-b and gets `401` for ws-a; a bearer still reads ws-b. Plus
+   `TestHandleGit_TrustedCIDRScopedToWorkspace_RealClone`: a real `git clone` over
+   `httptest` with `127.0.0.1/32` bound to ws-a only — ws-a clones token-less, ws-b's clone and
+   `ls-remote` fail and nothing of ws-b reaches the runner.
+   **Red at the base:** both fail — ws-b answers `200` advertising `spine/run/tenant-b-secret`
+   (`POST git-upload-pack` got past auth to git-http-backend's `415`), ws-b's runner reads ws-a,
+   and the real clone of ws-b succeeds. **Green on the branch.**
+   **The PoC itself:** at the base it reproduces (`ws-a -> 200`, `ws-b -> 200`); at the branch head
+   it no longer compiles (`unknown field TrustedCIDRs`), and with its one config line moved to
+   `TrustedCIDRsByWorkspace: {"ws-a": {"172.28.1.10/32"}}` it reports `ws-b: 401 (finding
+   refuted)`.
+2. **Existence oracle closed** — `TestHandleGit_UnboundWorkspaceUniform401`: from ws-a's runner
+   (and its IPv4-mapped form), token-less reads of ws-b, a missing, an inactive and an
+   unavailable workspace, `WS-A` and `ws-a-` (smart, dumb, `HEAD`) all answer exactly the
+   untrusted caller's `401`: same status, body and content type, both modes. **Red at the base:**
+   `200` for ws-b, `404`/`403`/`503` for the others.
+3. **Startup gate** — `TestServe_SharedModeRefusesBareTrustedList`
+   (`service/cmd/spine/git_trusted_cidrs_test.go`): `serveCmd().RunE` with
+   `WORKSPACE_RESOLVER=db`, `platform-binding` and ` DB ` and a bare list returns the refusal naming
+   the per-workspace form and its example, before the registry or the platform is touched (neither
+   is configured). Single mode (`WORKSPACE_RESOLVER` unset or `file`) with the same value, and
+   shared mode with the per-workspace form or no value, get past the gate (they stop at the later
+   `SPINE_STEP_ENTRY_POLICY` gate the test arms, instead of starting a listener).
+   `TestGitTrustedCIDRs_Bind` covers the binding: bare → `{served workspace: list}` in single mode,
+   refused in shared mode (the backstop), per-workspace passed through in both. **Red at the base:**
+   the shared-mode cases reach the step-entry gate (no refusal).
+4. **Parsing** — `TestParseGitHTTPTrustedCIDRs_PerWorkspace`: bare (IPv4, IPv6, whitespace) and
+   per-workspace forms (several CIDRs, `;;`, trailing `,`, `_` in IDs) parse; 14 malformed shapes
+   are errors (unparsable CIDR, an address without a prefix, workspace bound to nothing, empty /
+   spaced / traversal-shaped / percent-encoded ID, a workspace named twice, a bare entry mixed in,
+   a comma between workspaces, a second `=`). `TestServe_MalformedTrustedCIDRsRefuseStartup`: four
+   malformed values refuse `spine serve` in every mode with `SPINE_GIT_HTTP_TRUSTED_CIDRS: ...`.
+   The existing `TestParseGitHTTPTrustedCIDRs` keeps its bare-list cases. **Red at the base:**
+   `TestServe_MalformedTrustedCIDRsRefuseStartup` reaches the step-entry gate (at the base a
+   malformed value only disabled `/git` with a Warn).
+5. **Push unaffected** — `TestHandleGit_PushNeverTakesWorkspaceBypass`: from ws-a's bound runner,
+   push enabled, `info/refs?service=git-receive-pack`, `POST git-receive-pack` and the two smuggled
+   push queries all answer `401` without the receive-pack advertisement; with a bearer the
+   advertisement is `200`; with push off the canonical advertisement is the flag's `403`. A guard:
+   passes at the base too, as expected (push never took the bypass).
+6. **Existing suites** — see Gates: `go test ./...`, the touched packages under `-race`, the
+   integration suites, and the scenario-git-http job pass.
+7. **SMP compatibility gate** — see below; inert, no SMP change.
+8. **Documentation** — `docs/integration-guide.md` (§7 Authentication path 2 with both forms, the
+   shared-mode refusal, the uniform `401`; the example clone; the env table row),
+   `docker-compose.override.yaml.example` (Option D, per-workspace recipe; Options A–C labelled
+   single-workspace), `KNOWN-LIMITATIONS.md` (the binding and four residuals), `CHANGELOG.md`
+   (Security, Changed (operators), Changed (embedders): none), plus `.env.example` and README.
+
+### Existing tests that change
+
+- `TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors` (TASK-031) pinned a distinct `404` for a
+  trusted caller on the premise that a trusted address may know every workspace ID — the oracle
+  AC 2 closes. Replaced by `TestHandleGit_TrustedCIDRSeesUniform401ForMissingWorkspace` (uniform
+  `401`, even for a missing workspace whose ID the address is bound to; an authenticated caller
+  still gets the `404`).
+- Scenario `TestGitHTTP_InvalidWorkspace` asserted `404` for a token-less request from the trusted
+  `127.0.0.1`; it now asserts the uniform `401` token-less and the `404` with a bearer.
+- `TestIsTrustedIP*` / `TestNewHandler_InvalidCIDR` (githttp) became `TestIsTrustedIPForWorkspace`
+  (cross-workspace, case, trailing space, empty ID, IPv6, IPv4-mapped), `..._NoCIDRs` and the
+  invalid-config table. The t015 helper, three `handlers_git_test.go` handlers and three scenario
+  setups bind their workspaces (`ws-1`; `default` and `ws-1`) to the same CIDR they trusted.
+
+### Deviations and additions (with reasons)
+
+1. **No process-wide list survives anywhere, not only in shared mode.** The design kept
+   `IsTrustedIP` for single mode and switched to `IsTrustedIPForWorkspace` in shared mode. The
+   gateway's only shared-mode signal is `servicePool != nil`, and the PoC's own server (two
+   workspaces, no pool) would have kept the cross-tenant read under that rule. Instead githttp
+   holds only workspace-bound trust, and `spine serve` binds the bare list to the single-mode
+   workspace (`SPINE_WORKSPACE_ID`, default `default` — the ID `FileProvider` serves). The decision
+   in `handleGit` is then mode-independent: a workspace without a binding is never token-less.
+2. **The trust is looked up under the resolved `cfg.ID`, not the URL segment.** The repository
+   served is always `cfg`'s (`cfg.RepoPath` or `cfg`'s own pool), so keying on `cfg.ID` pairs the
+   trust with exactly what is served; `/git//ws-b/...` (chi's `workspace_id` is empty, the request
+   resolves ws-b) shows a URL-keyed check would have been the wrong input.
+3. **Single mode, behaviour change.** A trusted runner asking for a workspace that does not
+   resolve gets the uniform `401` instead of `404`/`403`/`503` (no bypass without a resolved,
+   bound workspace). Recorded in CHANGELOG.
+4. **A malformed value refuses startup** (AC 4) in every mode. At the base it reached
+   `githttp.NewHandler`, whose error disabled the whole `/git` endpoint with a Warn.
+5. **The shared-mode refusal runs twice.** Early from `WORKSPACE_RESOLVER` (`db`,
+   `platform-binding`), before any registry, secret or database is opened; again in `bind` against
+   the resolver actually built (`wsWiring.Pool != nil`), so a future shared resolver kind cannot slip
+   past the environment check. An unknown `WORKSPACE_RESOLVER` is left to its own refusal.
+6. **Addition: the per-workspace form is accepted in single mode** (one configuration for both
+   modes); an entry for a workspace the server does not serve logs a startup Warn and has no effect.
+7. **Addition (adversarial review): every `401` on `/git` is the uniform one.** A junk or malformed
+   bearer got the auth error's own message (`invalid token`, `invalid authorization header format`)
+   only for a workspace that resolved, and the uniform message otherwise — an existence oracle for
+   any caller, trusted or not (pre-existing, not in the review). `TestHandleGit_InvalidBearerIsNoWorkspaceOracle`
+   is red at the base (ws-b `invalid token` vs the missing workspace's uniform body) and green on the
+   branch. A `503`/`500` for a resolved workspace is still surfaced (the TASK-031 rationale); the
+   no-auth-service `503` remains a documented residual.
+
+### Adversarial self-review
+
+`TestHandleGit_TrustedPeerCannotReachUnboundWorkspace` (both modes; status and body probed per
+case, then pinned as "no `200`, nothing of ws-b"), from ws-a's runner against ws-b, with a control
+showing ws-a's own repository served through the same routes:
+
+| Attempt | Result on the branch |
+|---|---|
+| `WS-B`, `ws%2Db`, `%77s-b`, `ws-b%00`, `ws-b.`, `ws-a%2F..%2Fws-b` as the workspace segment | uniform `401` (no such workspace resolves) |
+| `/git//ws-b/...` (empty chi segment, resolves ws-b) | `401` (at the base: `200` with ws-b's refs) |
+| `/git/ws-a/../ws-b/...`, `/git/ws-a/ws-b/...` (repository segment) | ws-a's own catalog: `404` (shared) / `503` no pool (single) |
+| `/git/ws-a/info/../../ws-b/...`, `objects/../../ws-b/HEAD`, `POST .../info/../../ws-b/git-upload-pack` | git-http-backend refuses the `..` path (`'...': aliased`, `500`), verified by hand outside Spine too |
+| `/git/ws-a/info/%2E%2E/%2E%2E/ws-b/...` | `404` (literal `%2E` path) |
+| `/git/ws-a/info%2F..%2F..%2Fws-b/...` | unknown repository `404` / `503` |
+| `/git/info/refs?...` (single-workspace route, shared mode) | `401` |
+| `X-Forwarded-For`, `Forwarded`, `X-Real-IP` naming ws-b's runner | `401` (forwarded requests are never token-less) |
+| `HEAD`, `PROPFIND` | `401`, `405` |
+| IPv4-mapped `[::ffff:172.28.1.10]` | ws-b `401`; ws-a `200` (same host) |
+| IPv6 peer with a zone | `401` (unparsable peer) |
+| Push vs fetch | AC 5 |
+| A peer trusted for A asking for B, single vs shared | AC 1, both modes |
+| A junk or malformed bearer as an oracle | Found and closed (addition 7) |
+
+Not closed here (no cross-workspace read, recorded as follow-ups): the `..` refusal lives in
+git-http-backend, not Spine (a gateway-side `400` for dot segments would be defence in depth);
+`SPINE_GIT_HTTP_DEV_NO_AUTH` is not workspace-scoped (development only); a resolved workspace with
+no auth service at all still answers `503` to a bearer.
+
+### Gates
+
+At `087bc243` (code identical to these notes' commit). Logs in SMP `tmp/init027-orchestration/i24/t006/`.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | pass |
+| `make build` | pass |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | pass |
+| `go vet ./...`, `-tags integration ./...`, `-tags scenario ./...` | pass (all three) |
+| `go test -p 4 ./...` | pass except `core/artifact` `TestUpdateEmitsEvent` (`git commit ...:` under load; untouched package): passes standalone (`-count=3`) and the whole package re-run passes |
+| `go test -race -p 4 -count=1` githttp, gateway, cmd/spine | pass |
+| `go test -tags integration -p 4` githttp, gateway, cmd/spine (own database `s24006_ci_br2`) | pass |
+| scenario-git-http job: `TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*` (`-tags scenario -count=1 -v`) | pass, 0 skips (89 / 26 / 130 PASS lines; a `TestGitHTTP_Push*` passed); before the `TestGitHTTP_InvalidWorkspace` update the first run failed exactly that scenario (the trusted caller's `404`, now the uniform `401`) |
+| `TestRunnerCloneContext_*` (scenario setup moved to the per-workspace config) | pass |
+| Full `go test -tags scenario -p 1 ./service/scenariotest/...` with a migrated registry, branch vs scaffold base | identical failure sets: the 31 known pre-existing top-level failures, no new one |
+| git-floor job in `golang:1.26-bookworm` (`--pull=never`, git 2.39.5): both CI steps, plus the githttp/gateway TASK-006 and P3-30 tests | pass |
+| golangci-lint v2.11.4 `--new-from-rev 12376b55` on githttp, gateway, cmd/spine, scenarios (plain / integration / scenario) | 0 new issues (the non-zero exit on plain/integration is the scenarios package having only scenario-tagged files) |
+| `--enable-only=gosec --build-tags scenario`, branch vs base | 0 / 0 |
+| `gofmt -l` and `git diff --check` on changed files | clean |
+
+### SMP compatibility gate
+
+SMP `3addd44b` (`.spine-revision` `ae513dca`) in `i23/s24-T006/smp`, whose `../spine` is this
+worktree at `087bc243`, no SMP change, no `vendor/`.
+
+- `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario ./scenariotest/...`,
+  `-tags faultinject`: all pass.
+- No SMP package imports a changed Spine package (every change is under Spine `service/`; the only
+  SMP mention of `bszymi/spine/service` is `dev/lint-spine-internals`, which forbids it). The
+  initiative §5 package set was still run under `go test -race -p 4`: all pass except
+  `internal/customer/gitread` `TestClient_ErrorContractEqualsCLIClient/*/dangling_gitlink` and
+  `TestClient_SpineReadFileRendersTheGitlinksPatch` — the two by-design gitread contract tests that
+  fail against `a560c210` too, the same pair TASK-001 recorded.
+- `dev/testgate` Spine-runtime leg (spinecore, spineembedded, runner, executionreadiness; platform
+  and spine-runtime databases migrated with `dev/apply-migrations`): PASS, 2143 tests, 3 allowed
+  skips. githttp `-tags integration` leg: PASS, 588 tests, 1 allowed skip (Linux `ru_maxrss`).
+- No `ws_*` database or role left behind (0 before, 0 after); the `s24006_*` databases are dropped.
+
+Verdict: inert for SMP, as the task predicted.
+
+### Codex review (`codex review --base init/INIT-024-scaffold`, plain)
+
+| Round | Review session | Model | Result |
+|---|---|---|---|
+| 1 (at `087bc243`) | `01a167fe-ef06-7dd1-a4b1-2fb1a3acdbd4` (`source: {"subagent":"review"}`, cwd this worktree) | `gpt-6.1-sol` | 0 findings, "patch is correct" (confidence 0.91); it re-ran the three touched packages' tests |
+
+Clean in round 1, so no further round.
+
+### Not run
+
+- GitHub Actions on the pushed branch (nothing is pushed; INIT-024 owner question 1).
+- `TestGitHTTP_InvalidWorkspace`'s new expectations at the base: the scenario file binds through
+  `TrustedCIDRsByWorkspace`, which does not compile there; AC 2's red run covers the same
+  behaviour (`404` for a trusted token-less caller at the base). Command, at the branch:
+  `SPINE_TEST_DATABASE_URL=... go test -tags scenario -count=1 -run '^TestGitHTTP_InvalidWorkspace$' -v ./service/scenariotest/scenarios/`.
+- A live `spine serve` in `db` mode with real runner containers: the startup gate is exercised
+  through `serveCmd().RunE` and the request path through the real chi routes, git-http-backend
+  and a real `git clone`. Command for a manual check:
+  `WORKSPACE_RESOLVER=db SPINE_REGISTRY_DATABASE_URL=... SPINE_GIT_HTTP_TRUSTED_CIDRS=172.28.1.10/32 spine serve`
+  (expect the refusal), then `SPINE_GIT_HTTP_TRUSTED_CIDRS='ws-a=172.28.1.10/32' spine serve` and
+  `git clone http://spine:8080/git/<ws-b>` from 172.28.1.10 (expect `401`).
+
+### Follow-ups
+
+- Job-scoped clone tokens, after which trusted CIDRs can be dropped (owner question 2).
+- Defence in depth: refuse `.`/`..` path segments in `handleGit` before git-http-backend (today
+  git-http-backend's alias check refuses them with a `500`).
+- Collapse the resolved-workspace "authentication not configured" `503` for a bearer-carrying
+  caller, if the operator signal is judged less important than the residual oracle.
