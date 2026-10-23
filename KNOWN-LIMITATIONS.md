@@ -1385,8 +1385,8 @@ What that implies, and what it leaves open:
    bounded merge retries fire in every active workspace, each with its own store, git clients and
    credentials. A tenant cannot hold up the others: one scan per workspace at a time, a tick that
    makes no progress for its wait (`SPINE_SCHEDULER_WORKSPACE_BUDGET` + 30 s) stops waiting and later
-   ticks skip the stalled workspace until its scan ends, and a panic in one workspace's scan is
-   recovered. What remains:
+   ticks skip the stalled workspace until its scan ends, every scan is cancelled at a hard 10-minute
+   deadline, and a panic in one workspace's scan is recovered. What remains:
    - **More than one replica.** There is no leader election (TASK-008 Decision 3, like the projection
      sync and every INIT-023 lock): every replica scans every workspace. The scheduler's own writes
      are compare-and-swap (INIT-023 TASK-008), so a timeout, a run-timeout termination or a
@@ -1400,25 +1400,56 @@ What that implies, and what it leaves open:
      but a run a crash left `pending`, or on a completed step that was never routed, waits for an
      operator. Per-workspace startup recovery is a follow-up (TASK-008 owner question 3).
    - **`platform-binding` schedules only resolved workspaces.** The platform has no enumeration
-     endpoint, so `PlatformBindingProvider.List` reports the bindings the process has resolved since
-     it started: after a restart a workspace is scheduled only once a request has resolved it (as
-     with the projection sync).
-   - **Deactivation outside the operator API.** `POST /workspaces/{id}/deactivate` drops the
-     resolver caches and evicts the workspace, so the next tick skips it. A registry row deactivated
-     any other way (SQL, another replica's API) is still listed and resolved for up to the resolver's
-     60 s cache TTL. A scan already running when its workspace is deactivated finishes.
-   - **A stalled scan keeps what it holds.** It is never cancelled (a cancelled git command can leave a
-     lock file behind): its workspace's tree lock, one git process and one goroutine stay until it
-     ends, it is not counted against later ticks' `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES`, and on
-     shutdown it is waited for only until the 10 s shutdown deadline. A code repository's push has no
-     deadline of its own, so a remote that never answers holds it until the process restarts. As many
-     tenants stalling in one tick as there are slots delay the others by one wait.
+     endpoint, so the scheduler lists the bindings the process has resolved since it started
+     (`PlatformBindingProvider.ListIDs`, the cache's ids): after a restart a workspace is scheduled
+     only once a request has resolved it (as with the projection sync).
+   - **How long a workspace that should stop is still scheduled**, per mode. A scan already running
+     when it happens finishes (within the scan deadline below).
+     - `db`: `POST /workspaces/{id}/deactivate` on this replica drops the resolver caches and evicts
+       the workspace, so the next tick skips it. A row deactivated any other way (SQL, another
+       replica's API) is still listed and resolved for up to the db provider's 60 s cache TTL.
+     - `platform-binding`: a binding is re-fetched once its 5-minute cache TTL has passed, and a
+       platform 404 drops it then. While the platform errors (5xx, network) a cached binding is
+       served stale for up to 30 minutes more (`StaleGrace`), so up to 35 minutes in all. The
+       invalidation webhook drops it at once, but only on the replica that receives it. A workspace
+       the platform answers 403 for (or whose secrets cannot be read) stays listed: every tick then
+       logs an Error for it, and each scan's resolve fetches it from the platform again.
+   - **A stalled scan holds what it holds until its deadline.** A scan no tick waits for any more
+     keeps its workspace's tree lock, one git process, one goroutine and its pool reference, and is not
+     counted against later ticks' `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES`. Every scan runs under a
+     hard 10-minute deadline (`MultiSchedulerConfig.ScanDeadline`; no variable): past it the scan's
+     context is cancelled — its git children are stopped with SIGTERM (git's handlers remove its lock
+     files; a remote helper exits with it) — and it gives back its pool reference, with an Error. Until
+     then a request for an evicted workspace (a deactivation, a binding invalidation, a credential
+     rotation) waits for that reference: up to the deadline, or less if the request's own deadline
+     comes first. A sequence on a shared working tree (the primary repository's merge and push) runs
+     detached from the cancellation and ends within its own 5-minute bound. An attempt cut by the
+     deadline records nothing — its outcome write uses the expired context — so, like a lock wait cut
+     short (item 8), it does not count against the merge retry budget: a code repository whose remote
+     never answers keeps its run in `committing`, retried on later ticks, each attempt held up to the
+     deadline (only that workspace waits). On shutdown a stalled scan is waited for only until the 10 s
+     shutdown deadline. As many tenants stalling in one tick as there are slots delay the others by one
+     wait.
+   - **Each tick lists every candidate row.** The scans read, per workspace and per tick, every
+     unfinished step execution (`ListActiveStepExecutions`, `adapters/store/postgres_steps.go`), every
+     run past its timeout, every stale active run and every committing run (`postgres_runs.go`), with
+     no `LIMIT`; the soft budget bounds the work done on them, not the read. A workspace with a very
+     large backlog is loaded into the shared process every 30 s (timeouts) and 60 s (orphans, merge
+     retries). Paging is a follow-up.
+   - **`platform-binding` reads secrets on every scan.** Listing for a tick reads none (`ListIDs`), but
+     each scan resolves its workspace through the pool, and a platform-binding resolve dereferences
+     the binding's three secret references every time (the provider caches no secret value; the
+     secret client's own cache decides what reaches the backend): about three reads per workspace per
+     scan, three scans a minute at the default intervals. The projection sync's `List` adds three
+     more per cached binding per poll.
    - **A slow scan still lengthens its tick.** A tick waits as long as it makes progress, and the
      three kinds of scan (timeouts, orphans, merge retries) share one loop, as in single mode. A
      tenant whose scan is slow but never stalls (each merge retry just under the wait, every tick —
      a push that fails after its merge landed is retried every tick, item 7) lengthens each of its
      ticks by up to one workspace budget plus one wait, so the other tenants' next scan of another
-     kind starts that much later: their timeouts are late, never lost.
+     kind starts that much later: their timeouts are late, never lost. A scan that ends just after
+     each wait costs one wait on every tick that dispatches it (every other tick of its loop, since
+     the tick in between skips it).
    - **A recovered panic** releases what the scan released by `defer` (the pool reference, the tree
      lock, transactions); anything held otherwise stays held, the same assumption as net/http's
      per-request recovery behind every HTTP handler.

@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -259,27 +261,39 @@ func TestServe_SingleModeSchedulerUnchanged(t *testing.T) {
 }
 
 func TestMultiSchedulerConfigFromEnv(t *testing.T) {
+	threeHours := 3 * time.Hour
 	for _, tc := range []struct {
 		name       string
 		max        *string
 		budget     *string
+		orphan     *time.Duration // nil: 3h
 		wantMax    int
 		wantBudget time.Duration
+		wantOrphan time.Duration
 		wantErr    string
 	}{
-		{name: "unset"},
-		{name: "valid", max: ptr("8"), budget: ptr("90s"), wantMax: 8, wantBudget: 90 * time.Second},
-		{name: "spaces", max: ptr(" 2 "), budget: ptr(" 1m "), wantMax: 2, wantBudget: time.Minute},
-		{name: "ceiling", max: ptr("256"), wantMax: 256},
-		{name: "empty max", max: ptr(""), wantErr: schedulerMaxConcurrentEnv},
+		{name: "unset", wantOrphan: threeHours},
+		{name: "valid", max: ptr("8"), budget: ptr("90s"), wantMax: 8, wantBudget: 90 * time.Second, wantOrphan: threeHours},
+		{name: "spaces", max: ptr(" 2 "), budget: ptr(" 1m "), wantMax: 2, wantBudget: time.Minute, wantOrphan: threeHours},
+		{name: "ceiling", max: ptr("256"), wantMax: 256, wantOrphan: threeHours},
+		// Set but empty or blank means unset, as for every other variable
+		// (review round 1): a ${VAR:-} template must not stop a deployment.
+		{name: "empty max is unset", max: ptr(""), wantOrphan: threeHours},
+		{name: "blank max is unset", max: ptr("   "), wantOrphan: threeHours},
+		{name: "empty budget is unset", budget: ptr(""), wantOrphan: threeHours},
+		{name: "blank budget is unset", budget: ptr(" \t "), wantOrphan: threeHours},
 		{name: "zero max", max: ptr("0"), wantErr: schedulerMaxConcurrentEnv},
 		{name: "negative max", max: ptr("-1"), wantErr: schedulerMaxConcurrentEnv},
 		{name: "over ceiling", max: ptr("257"), wantErr: schedulerMaxConcurrentEnv},
 		{name: "not a number", max: ptr("four"), wantErr: schedulerMaxConcurrentEnv},
-		{name: "empty budget", budget: ptr(""), wantErr: schedulerWorkspaceBudgetEnv},
 		{name: "zero budget", budget: ptr("0s"), wantErr: schedulerWorkspaceBudgetEnv},
 		{name: "negative budget", budget: ptr("-5s"), wantErr: schedulerWorkspaceBudgetEnv},
 		{name: "unitless budget", budget: ptr("30"), wantErr: schedulerWorkspaceBudgetEnv},
+		// Review round 1 (P2): a negative orphan threshold would fail every
+		// active run on the first orphan tick; 0 keeps the default.
+		{name: "zero orphan threshold is the default", orphan: dur(0), wantOrphan: 0},
+		{name: "negative orphan threshold", orphan: dur(-720 * time.Hour), wantErr: orphanThresholdEnv},
+		{name: "slightly negative orphan threshold", orphan: dur(-time.Nanosecond), wantErr: orphanThresholdEnv},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearSchedulerEnv(t)
@@ -289,7 +303,11 @@ func TestMultiSchedulerConfigFromEnv(t *testing.T) {
 			if tc.budget != nil {
 				t.Setenv(schedulerWorkspaceBudgetEnv, *tc.budget)
 			}
-			cfg, err := multiSchedulerConfigFromEnv(3 * time.Hour)
+			orphan := threeHours
+			if tc.orphan != nil {
+				orphan = *tc.orphan
+			}
+			cfg, err := multiSchedulerConfigFromEnv(orphan)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("error = %v, want one naming %s (serve must refuse to start)", err, tc.wantErr)
@@ -299,7 +317,7 @@ func TestMultiSchedulerConfigFromEnv(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := scheduler.MultiSchedulerConfig{OrphanThreshold: 3 * time.Hour, CommitMaxRetries: defaultCommitMaxRetries,
+			want := scheduler.MultiSchedulerConfig{OrphanThreshold: tc.wantOrphan, CommitMaxRetries: defaultCommitMaxRetries,
 				MaxConcurrentWorkspaces: tc.wantMax, WorkspaceBudget: tc.wantBudget}
 			if cfg != want {
 				t.Fatalf("config = %+v, want %+v", cfg, want)
@@ -315,6 +333,224 @@ func TestMultiSchedulerConfigFromEnv(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+func dur(d time.Duration) *time.Duration { return &d }
+
+// Regression (review round 1, P2; red at db9a2d0b, where the value reached
+// the scheduler unchanged and the first orphan tick failed every active
+// run): in the shared modes a negative SPINE_ORPHAN_THRESHOLD refuses to
+// start, naming the variable.
+func TestServe_SharedModeRefusesANegativeOrphanThreshold(t *testing.T) {
+	clearSchedulerEnv(t)
+	res := newMultiResolver(t, "ws-a")
+	pool, _ := timeoutPool(t, res)
+	deps := sharedDeps(t, res, pool)
+	deps.OrphanThreshold = -720 * time.Hour
+	if _, err := buildServerConfig(context.Background(), deps); err == nil || !strings.Contains(err.Error(), orphanThresholdEnv) {
+		t.Fatalf("buildServerConfig with a negative orphan threshold in shared mode = %v, want a refusal naming %s", err, orphanThresholdEnv)
+	}
+	deps.OrphanThreshold = 0
+	ms, err := buildMultiScheduler(deps, slog.New(slog.DiscardHandler))
+	if err != nil || ms == nil {
+		t.Fatalf("zero threshold: %v, %v", ms, err)
+	}
+	if got := ms.Config().OrphanThreshold; got != 30*24*time.Hour {
+		t.Fatalf("zero threshold: effective %s, want the 30-day default", got)
+	}
+}
+
+// Single mode keeps today's behaviour for a negative SPINE_ORPHAN_THRESHOLD
+// (buildScheduler applies only a positive one; AC 6): it never refuses to
+// start, but now says at startup that the value is ignored (red at
+// db9a2d0b: no Warn).
+func TestServe_SingleModeIgnoresANegativeOrphanThresholdWithAWarn(t *testing.T) {
+	clearSchedulerEnv(t)
+	var buf syncBuf
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	ms, err := buildMultiScheduler(serveDeps{Store: newTimeoutStore(), OrphanThreshold: -time.Hour}, log)
+	if err != nil || ms != nil {
+		t.Fatalf("single mode: buildMultiScheduler = %v, %v; want no scheduler and no error", ms, err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, orphanThresholdEnv+" is negative; ignored") || !strings.Contains(out, "value=-1h0m0s") {
+		t.Fatalf("no startup Warn for the ignored negative threshold:\n%s", out)
+	}
+	buf.Reset()
+	if _, err := buildMultiScheduler(serveDeps{Store: newTimeoutStore(), OrphanThreshold: time.Hour}, log); err != nil || strings.Contains(buf.String(), "WARN") {
+		t.Fatalf("a positive threshold in single mode: %v, logs %q", err, buf.String())
+	}
+}
+
+// syncBuf is a goroutine-safe log sink.
+type syncBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func (s *syncBuf) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.b.Reset()
+}
+
+// idListingResolver lists ids without assembling configs; its List must
+// not be called by the scheduler's resolver adapter.
+type idListingResolver struct {
+	*multiResolver
+	ids       []string
+	listCalls int
+}
+
+func (r *idListingResolver) List(ctx context.Context) ([]workspace.Config, error) {
+	r.listCalls++
+	return r.multiResolver.List(ctx)
+}
+
+func (r *idListingResolver) ListIDs(context.Context) ([]string, error) {
+	return append([]string(nil), r.ids...), nil
+}
+
+// Review round 1 (P3): a resolver that can list ids (the platform-binding
+// provider) is asked for those, so listing for a tick reads no secret;
+// invalid ids are still never handed to the pool.
+func TestSchedulerWorkspaceResolver_PrefersIDsWithoutConfigs(t *testing.T) {
+	r := &idListingResolver{multiResolver: &multiResolver{cfgs: map[string]workspace.Config{}},
+		ids: []string{"ws-a", "../escape", "", "ws-b"}}
+	refs, err := schedulerWorkspaceResolver{resolver: r}.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, ref := range refs {
+		ids = append(ids, ref.WorkspaceID())
+	}
+	if strings.Join(ids, ",") != "ws-a,ws-b" {
+		t.Fatalf("listed %v, want the valid ids from ListIDs", ids)
+	}
+	if r.listCalls != 0 {
+		t.Fatalf("the adapter called List %d times; it must use ListIDs", r.listCalls)
+	}
+}
+
+// The platform-binding provider is such a resolver.
+var _ workspaceIDLister = (*workspace.PlatformBindingProvider)(nil)
+
+// hungRemote accepts git's connections and never answers, like a remote
+// that holds a push open for good.
+func hungRemote(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	return "http://" + ln.Addr().String() + "/repo.git"
+}
+
+// committingOneStore lists one committing run.
+type committingOneStore struct{ stubStore }
+
+func (committingOneStore) ListRunsByStatus(_ context.Context, status domain.RunStatus) ([]domain.Run, error) {
+	if status == domain.RunStatusCommitting {
+		return []domain.Run{{RunID: "run-push", Status: domain.RunStatusCommitting}}, nil
+	}
+	return nil, nil
+}
+
+// Review round 1 (P3): a scan no tick waits for any more — a merge retry
+// whose real git push hangs on a remote that never answers — ends at its
+// ScanDeadline: the push is cancelled through the git client's context
+// (SIGTERM to git), the scan gives back its pool reference, and a request
+// for the workspace after an eviction (a deactivation, a binding
+// invalidation) no longer waits for good.
+func TestMultiScheduler_StalledScanReleasesItsPoolReferenceAtTheDeadline(t *testing.T) {
+	clearSchedulerEnv(t)
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+	repo := testutil.NewTempRepo(t)
+	if out, err := exec.Command("git", "-C", repo, "remote", "add", "origin", hungRemote(t)).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	cli := git.NewCLIClient(repo)
+	pushErr := make(chan error, 1)
+	res := newMultiResolver(t, "ws-a")
+	pool := workspace.NewServicePool(context.Background(), res, workspace.PoolConfig{
+		IdleCheckInterval: -1,
+		Builder: func(_ context.Context, ss *workspace.ServiceSet) error {
+			ss.Store = committingOneStore{}
+			ss.CommitRetryFn = func(ctx context.Context, _ string) error {
+				err := cli.Push(ctx, "origin", "main")
+				select {
+				case pushErr <- err:
+				default:
+				}
+				return err
+			}
+			return nil
+		},
+	})
+	t.Cleanup(pool.Close)
+	const scanDeadline = time.Second
+	ms := scheduler.NewMultiScheduler(&schedulerWorkspacePool{pool: pool}, schedulerWorkspaceResolver{resolver: res},
+		scheduler.MultiSchedulerConfig{TickWait: 50 * time.Millisecond, ScanDeadline: scanDeadline, CommitMaxRetries: -1})
+	start := time.Now()
+	ms.RunCommitRetry(context.Background())
+	if n := pool.RefCount("ws-a"); n != 1 {
+		t.Fatalf("right after the stalled tick ws-a holds %d references, want the hung scan's 1", n)
+	}
+	pool.Evict("ws-a")
+	getCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := pool.Get(getCtx, "ws-a"); err != nil {
+		t.Fatalf("Get after Evict, with a scan stalled on a hung push: %v (it waits for the scan's reference)", err)
+	}
+	pool.Release("ws-a")
+	took := time.Since(start)
+	if took < scanDeadline {
+		t.Fatalf("Get after Evict returned after %s, before the scan's deadline", took)
+	}
+	select {
+	case err := <-pushErr:
+		var gitErr *git.GitError
+		if err == nil || !errors.As(err, &gitErr) {
+			t.Fatalf("the cancelled push returned %v, want a *git.GitError", err)
+		}
+		t.Logf("cancelled push: kind=%v op=%q message=%q retryable=%v", gitErr.Kind, gitErr.Op, gitErr.Message, gitErr.IsRetryable())
+	case <-time.After(5 * time.Second):
+		t.Fatal("the push never returned")
+	}
+}
 
 // AC 2: through the real wiring (pool adapter, pooled builder, real
 // per-workspace orchestrators), one timeout tick fails over the run past

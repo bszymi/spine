@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sort"
@@ -41,22 +42,30 @@ import (
 //     mode has.
 //   - A tick stops waiting once it has made no progress (no slot came
 //     free, none of its scans ended) for TickWait. A scan still running
-//     then is not cancelled (see WorkspaceBudget: a cancelled git command
-//     can leave a lock file behind); it continues in the background, an
-//     Error names its workspace, and later ticks skip that workspace until
-//     it ends. Without this a single item that never returns — a code
-//     repository's push has no deadline, so a remote that accepts the
-//     connection and never answers holds it — blocked the tick, and with
-//     it the one loop every tenant's scans run on, for good.
+//     then continues in the background, an Error names its workspace, and
+//     later ticks skip that workspace until it ends. Without this a single
+//     item that never returns — a code repository's push has no deadline
+//     of its own, so a remote that accepts the connection and never
+//     answers holds it — blocked the tick, and with it the one loop every
+//     tenant's scans run on, for good.
+//   - Every workspace scan runs under a hard deadline, ScanDeadline (10
+//     minutes by default), far beyond its soft budget: an abandoned scan
+//     has its context cancelled then — its git children are stopped with
+//     SIGTERM, whose handlers remove git's lock files — and gives back its
+//     pool reference, which an evicted workspace's next request waits for.
 //   - A panic in one workspace's scan is recovered and logged with its
 //     stack (runWorkspace); it ends that workspace's share of the tick,
 //     not the process every tenant shares.
 //
-// The resulting bound: a tenant that hangs delays the other tenants' scans
-// by at most one TickWait, once, and holds at most one scan at a time. A
-// scan a tick stopped waiting for is not counted against a later tick's
-// MaxConcurrentWorkspaces (each such scan is its own workspace's single
-// scan), so tenants that hang cannot use up the other tenants' slots.
+// What that bounds: a tenant holds at most one scan at a time, and each of
+// its scans delays the tick it runs in by at most one TickWait past the
+// tick's last progress — a scan that never ends costs that once, since
+// later ticks skip its workspace; one that ends just after each TickWait
+// costs it on every tick that dispatches it, i.e. every other tick of a
+// loop. A scan a tick stopped waiting for is not counted against a later
+// tick's MaxConcurrentWorkspaces (each such scan is its own workspace's
+// single scan), so tenants that hang cannot use up the other tenants'
+// slots.
 type MultiScheduler struct {
 	pool             WorkspacePool
 	resolver         WorkspaceResolver
@@ -67,6 +76,7 @@ type MultiScheduler struct {
 	workspaceBudget  time.Duration
 	maxConcurrent    int
 	tickWait         time.Duration
+	scanDeadline     time.Duration
 	done             chan struct{}
 	stopOnce         sync.Once
 
@@ -92,6 +102,11 @@ type MultiScheduler struct {
 type MultiSchedulerConfig struct {
 	TimeoutInterval time.Duration
 	OrphanInterval  time.Duration
+	// OrphanThreshold is how long an active run must be without step
+	// activity to be reported as an orphan (it is failed past three
+	// thresholds). 0 or a negative value means the 30-day default: a
+	// negative threshold lies in the future, so every active run would be
+	// an orphan past three of them and be failed on the first orphan tick.
 	OrphanThreshold time.Duration
 	// CommitMaxRetries is each workspace's automatic merge retry budget
 	// (WithCommitRetry). 0 means DefaultCommitMaxRetries; a negative value
@@ -100,9 +115,8 @@ type MultiSchedulerConfig struct {
 	// WorkspaceBudget is the soft time budget of one workspace's scan per
 	// tick: its per-item loops stop between items once it is spent and
 	// leave the rest to the next tick (a Warn names the scan and how many
-	// items remain). It is never a context deadline: cancelling the
-	// context would stop git mid-command and could leave a lock file that
-	// fails every later attempt. 0 means TimeoutInterval.
+	// items remain). It is never a context deadline: an item in progress
+	// is never interrupted by it. 0 means TimeoutInterval.
 	WorkspaceBudget time.Duration
 	// MaxConcurrentWorkspaces bounds how many workspaces one tick scans at
 	// once, so a slow tenant no longer delays every other tenant's
@@ -118,6 +132,17 @@ type MultiSchedulerConfig struct {
 	// TimeoutInterval: a scan stops itself at its budget, and the extra
 	// interval covers one item that started just before the budget ran out.
 	TickWait time.Duration
+	// ScanDeadline is the hard deadline of one workspace's scan (INIT-024
+	// TASK-008): its context is cancelled once it has run that long. It is
+	// the backstop for a scan no tick waits for any more — one that never
+	// ends would keep its pool reference, and an evicted workspace's next
+	// request waits for the last one. Cancellation stops its git children
+	// with SIGTERM (adapters/git), whose handlers remove git's lock files;
+	// a sequence on a shared working tree runs detached from the caller's
+	// cancellation and ends within its own bound (5 minutes). 0 means
+	// DefaultScanDeadline, twice that bound, so the deadline never cuts
+	// an item the sequence bound allows.
+	ScanDeadline time.Duration
 }
 
 // Defaults for MultiSchedulerConfig.
@@ -126,6 +151,7 @@ const (
 	// scheduler (owner question 1).
 	DefaultCommitMaxRetries        = 3
 	DefaultMaxConcurrentWorkspaces = 4
+	DefaultScanDeadline            = 10 * time.Minute
 )
 
 // WorkspaceResolver enumerates active workspaces by ID. Satisfied by
@@ -174,7 +200,7 @@ func NewMultiScheduler(pool WorkspacePool, resolver WorkspaceResolver, cfg Multi
 	if cfg.OrphanInterval == 0 {
 		cfg.OrphanInterval = 60 * time.Second
 	}
-	if cfg.OrphanThreshold == 0 {
+	if cfg.OrphanThreshold <= 0 {
 		cfg.OrphanThreshold = 30 * 24 * time.Hour
 	}
 	switch {
@@ -192,6 +218,9 @@ func NewMultiScheduler(pool WorkspacePool, resolver WorkspaceResolver, cfg Multi
 	if cfg.TickWait <= 0 {
 		cfg.TickWait = cfg.WorkspaceBudget + cfg.TimeoutInterval
 	}
+	if cfg.ScanDeadline <= 0 {
+		cfg.ScanDeadline = DefaultScanDeadline
+	}
 	return &MultiScheduler{
 		pool:             pool,
 		resolver:         resolver,
@@ -202,6 +231,7 @@ func NewMultiScheduler(pool WorkspacePool, resolver WorkspaceResolver, cfg Multi
 		workspaceBudget:  cfg.WorkspaceBudget,
 		maxConcurrent:    cfg.MaxConcurrentWorkspaces,
 		tickWait:         cfg.TickWait,
+		scanDeadline:     cfg.ScanDeadline,
 		done:             make(chan struct{}),
 		exited:           make(chan struct{}),
 	}
@@ -218,6 +248,7 @@ func (ms *MultiScheduler) Config() MultiSchedulerConfig {
 		WorkspaceBudget:         ms.workspaceBudget,
 		MaxConcurrentWorkspaces: ms.maxConcurrent,
 		TickWait:                ms.tickWait,
+		ScanDeadline:            ms.scanDeadline,
 	}
 }
 
@@ -524,6 +555,10 @@ func (ms *MultiScheduler) resumeFor(wsID string) *scanResume {
 // reference taken below, and every lock or transaction the scan released
 // by defer, is released before it (net/http's per-request recovery makes
 // the same assumption of the code behind every HTTP handler).
+//
+// The whole share — the pool Get included — runs under ScanDeadline: past
+// it the scan's context is cancelled (an Error says so), so a scan no tick
+// waits for any more still ends and releases its pool reference.
 func (ms *MultiScheduler) runWorkspace(ctx context.Context, scanName, wsID string, fn func(ctx context.Context, sched *Scheduler)) {
 	log := observe.Logger(ctx)
 	defer func() {
@@ -532,6 +567,20 @@ func (ms *MultiScheduler) runWorkspace(ctx context.Context, scanName, wsID strin
 				"scan", scanName, "workspace_id", wsID, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 		}
 	}()
+	deadline := ms.scanDeadline
+	if deadline <= 0 {
+		deadline = DefaultScanDeadline
+	}
+	parent := ctx
+	scanCtx, cancel := context.WithTimeout(parent, deadline)
+	defer cancel()
+	defer func() {
+		if errors.Is(scanCtx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
+			log.Error("workspace scan reached its deadline; its context was cancelled and the workspace is scanned again on a later tick",
+				"scan", scanName, "workspace_id", wsID, "scan_deadline", deadline)
+		}
+	}()
+	ctx = scanCtx
 	ss, err := ms.pool.Get(ctx, wsID)
 	if err != nil {
 		log.Error("get workspace services failed",

@@ -36,12 +36,15 @@ type isoStore struct {
 	panicOnScan bool
 	// blockScan, when set, holds every step-timeout listing until closed.
 	blockScan <-chan struct{}
-	scans     atomic.Int32
-	active    atomic.Int32 // step-timeout listings in progress
-	peak      atomic.Int32
+	// blockUntilDone holds every step-timeout listing until its context
+	// ends, like a git command waiting on a remote that never answers.
+	blockUntilDone bool
+	scans          atomic.Int32
+	active         atomic.Int32 // step-timeout listings in progress
+	peak           atomic.Int32
 }
 
-func (s *isoStore) ListActiveStepExecutions(context.Context) ([]domain.StepExecution, error) {
+func (s *isoStore) ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error) {
 	s.scans.Add(1)
 	n := s.active.Add(1)
 	defer s.active.Add(-1)
@@ -56,6 +59,10 @@ func (s *isoStore) ListActiveStepExecutions(context.Context) ([]domain.StepExecu
 	}
 	if s.blockScan != nil {
 		<-s.blockScan
+	}
+	if s.blockUntilDone {
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
 	return nil, nil
 }

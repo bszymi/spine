@@ -31,21 +31,47 @@ gap more than a security finding (INIT-024 owner question 5). Standalone only: S
   retries for good, and a panic in one workspace's scan ended the process. Now a tick stops waiting
   once it has made no progress for its wait (the workspace budget + the timeout interval, 60 s by
   default), the stalled scan keeps running in the background and later ticks skip its workspace
-  until it ends; a workspace is never scanned twice at once; and a panic is recovered, logged at
-  Error with the workspace and the stack, and the workspace scanned again on the next tick.
+  until it ends; a workspace is never scanned twice at once; every scan is cancelled at a hard
+  10-minute deadline, so a stalled one still gives back its pool reference (which an evicted
+  workspace's next request waits for); and a panic is recovered, logged at Error with the workspace
+  and the stack, and the workspace scanned again on the next tick.
 
 ### Changed (standalone)
 
 - New variables, read only in the shared modes but validated in every mode (an invalid value refuses
-  to start): `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES` (default 4, 1–256) and
-  `SPINE_SCHEDULER_WORKSPACE_BUDGET` (default `30s`, a positive Go duration). The orphan threshold
-  is `SPINE_ORPHAN_THRESHOLD`, as in single mode. A startup Info line prints the effective bounds.
+  to start; unset, empty or blank means the default): `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES`
+  (default 4, 1–256) and `SPINE_SCHEDULER_WORKSPACE_BUDGET` (default `30s`, a positive Go duration).
+  A startup Info line prints the effective bounds, the tick wait and the scan deadline.
+- `SPINE_ORPHAN_THRESHOLD`: a positive value sets the orphan threshold in every mode, as before in
+  single mode; unset or `0` keeps the 30-day default. A **negative** value now refuses to start in
+  the shared modes (it would have made every active run an orphan, failed on the first orphan tick);
+  single mode still ignores it, as before, and now logs a startup Warn.
+- In `platform-binding` mode the scheduler lists workspaces from the provider's cache keys
+  (`ListIDs`), reading no secret; each scan's resolve still reads the binding's secrets
+  (`KNOWN-LIMITATIONS.md`, item 9).
 - On SIGINT/SIGTERM `spine serve` now waits, within the 10 s shutdown deadline, for the shared-mode
   scheduler's running scans before it closes the workspace pool, so a merge is not cut off by its
   store closing under it.
 - Remaining limits (single leader across replicas, no startup crash recovery in the shared modes,
-  `platform-binding` scheduling only resolved workspaces): `KNOWN-LIMITATIONS.md`, "Shared Working
-  Tree", item 9.
+  `platform-binding` scheduling only resolved workspaces, per-mode deactivation lag, unbounded
+  per-tick listings, the scan deadline's window): `KNOWN-LIMITATIONS.md`, "Shared Working Tree",
+  item 9.
+
+### Upgrading (shared-mode operators)
+
+The shared modes had no scheduler, so the first ticks after the upgrade act on everything that has
+built up in every active workspace:
+
+- every run past its `timeout_at` is cancelled, and its live steps closed (first timeout tick,
+  about 30 s after start);
+- every step past its step timeout is failed, or completed with its `timeout_outcome` — a step
+  still `waiting` or `assigned` is measured from its creation, not from when someone picked it up;
+- every active run without step activity for three orphan thresholds is failed (first orphan tick,
+  about 60 s), and committing runs are retried under the budget of 3;
+- `SPINE_ORPHAN_THRESHOLD`, which had no effect in these modes, takes effect (a negative value now
+  refuses to start).
+
+Review the active runs, their timeouts and the configured orphan threshold before upgrading.
 
 ### Changed (embedders)
 
@@ -60,6 +86,10 @@ gap more than a security finding (INIT-024 owner question 5). Standalone only: S
     of any kind is still running, including a workspace the resolver lists twice.
   - A panic in a workspace's scan is recovered (Error log with `scan`, `workspace_id`, `panic` and
     `stack`); its pool reference is still released.
+  - Every workspace scan runs under `MultiSchedulerConfig.ScanDeadline` (new; 0 means
+    `DefaultScanDeadline`, 10 minutes): its context is cancelled past it. A scan cut by it records
+    nothing whose write uses that context.
+  - `OrphanThreshold` 0 **or negative** now means the 30-day default (only 0 did).
   - New methods: `ScanTimeouts`, `ScanOrphans` and `RunCommitRetry` run one tick of each loop
     synchronously (`Start` calls them); `Wait(ctx)` waits for `Start` to return and every scan to
     end; `Config()` reports the effective configuration. `Stop` is idempotent; `Start` must be called

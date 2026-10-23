@@ -32,6 +32,8 @@ import (
 const (
 	schedulerMaxConcurrentEnv   = "SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES"
 	schedulerWorkspaceBudgetEnv = "SPINE_SCHEDULER_WORKSPACE_BUDGET"
+	// orphanThresholdEnv is parsed by serveCmd into serveDeps.OrphanThreshold.
+	orphanThresholdEnv = "SPINE_ORPHAN_THRESHOLD"
 
 	// maxSchedulerConcurrentWorkspaces is the largest accepted
 	// SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES. Each slot is a workspace
@@ -43,26 +45,36 @@ const (
 // multiSchedulerConfigFromEnv is the shared-mode scheduler configuration:
 // the merge retry budget standalone enforces (defaultCommitMaxRetries, the
 // single-mode value), the orphan threshold serveCmd parsed from
-// SPINE_ORPHAN_THRESHOLD (0 keeps the 30-day default, as in single mode),
-// and the two operator overrides. A set but invalid override refuses to
-// start (fail closed, and no silent fallback to a value the operator did
-// not choose): the value must be a positive integer up to
-// maxSchedulerConcurrentWorkspaces, and a positive Go duration.
+// SPINE_ORPHAN_THRESHOLD, and the two operator overrides.
+//
+// Unset, empty or blank means the default, for every variable (a
+// `${VAR:-}` template must not stop a deployment). A set but invalid value
+// refuses to start (fail closed, and no silent fallback to a value the
+// operator did not choose): a whole number from 1 to
+// maxSchedulerConcurrentWorkspaces, a positive Go duration. A negative
+// orphan threshold refuses too: it lies in the future, so every active run
+// would be an orphan past three thresholds and the first orphan tick would
+// fail every active run in every workspace. 0 keeps the 30-day default.
+// buildMultiScheduler passes the threshold only in the shared modes.
 func multiSchedulerConfigFromEnv(orphanThreshold time.Duration) (scheduler.MultiSchedulerConfig, error) {
+	if orphanThreshold < 0 {
+		return scheduler.MultiSchedulerConfig{}, fmt.Errorf("%s=%s is negative: the shared-mode orphan scan would fail every active run; "+
+			"set a positive duration or leave it unset (30-day default)", orphanThresholdEnv, orphanThreshold)
+	}
 	cfg := scheduler.MultiSchedulerConfig{
 		OrphanThreshold:  orphanThreshold,
 		CommitMaxRetries: defaultCommitMaxRetries,
 	}
-	if raw, set := os.LookupEnv(schedulerMaxConcurrentEnv); set {
-		n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if raw := strings.TrimSpace(os.Getenv(schedulerMaxConcurrentEnv)); raw != "" {
+		n, err := strconv.Atoi(raw)
 		if err != nil || n <= 0 || n > maxSchedulerConcurrentWorkspaces {
 			return scheduler.MultiSchedulerConfig{}, fmt.Errorf("%s=%q: want a whole number from 1 to %d",
 				schedulerMaxConcurrentEnv, raw, maxSchedulerConcurrentWorkspaces)
 		}
 		cfg.MaxConcurrentWorkspaces = n
 	}
-	if raw, set := os.LookupEnv(schedulerWorkspaceBudgetEnv); set {
-		d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if raw := strings.TrimSpace(os.Getenv(schedulerWorkspaceBudgetEnv)); raw != "" {
+		d, err := time.ParseDuration(raw)
 		if err != nil || d <= 0 {
 			return scheduler.MultiSchedulerConfig{}, fmt.Errorf("%s=%q: want a positive duration such as 30s",
 				schedulerWorkspaceBudgetEnv, raw)
@@ -77,12 +89,25 @@ func multiSchedulerConfigFromEnv(orphanThreshold time.Duration) (scheduler.Multi
 // single-workspace scheduler of buildScheduler. The overrides are parsed
 // in every mode, so a mistyped value never starts silently. buildServerConfig
 // calls it beside buildScheduler and hands the result to the lifecycle.
+//
+// Single mode keeps its orphan threshold as before (buildScheduler applies
+// only a positive SPINE_ORPHAN_THRESHOLD): a negative value is ignored
+// there, with a startup Warn, and never refuses to start.
 func buildMultiScheduler(deps serveDeps, log *slog.Logger) (*scheduler.MultiScheduler, error) {
-	cfg, err := multiSchedulerConfigFromEnv(deps.OrphanThreshold)
+	shared := deps.WSServicePool != nil && deps.WSResolver != nil
+	orphanThreshold := deps.OrphanThreshold
+	if !shared {
+		if orphanThreshold < 0 {
+			log.Warn(orphanThresholdEnv+" is negative; ignored, the 30-day orphan threshold applies",
+				"value", orphanThreshold.String())
+		}
+		orphanThreshold = 0
+	}
+	cfg, err := multiSchedulerConfigFromEnv(orphanThreshold)
 	if err != nil {
 		return nil, err
 	}
-	if deps.WSServicePool == nil || deps.WSResolver == nil {
+	if !shared {
 		return nil, nil
 	}
 	ms := scheduler.NewMultiScheduler(
@@ -95,6 +120,7 @@ func buildMultiScheduler(deps serveDeps, log *slog.Logger) (*scheduler.MultiSche
 		"max_concurrent_workspaces", eff.MaxConcurrentWorkspaces,
 		"workspace_budget", eff.WorkspaceBudget,
 		"tick_wait", eff.TickWait,
+		"scan_deadline", eff.ScanDeadline,
 		"commit_max_retries", eff.CommitMaxRetries,
 		"orphan_threshold", eff.OrphanThreshold,
 	)
@@ -161,18 +187,37 @@ func schedulerServiceSet(ss *workspace.ServiceSet) scheduler.ServiceSet {
 // schedulerWorkspaceResolver adapts workspace.Resolver to
 // scheduler.WorkspaceResolver.
 //
-// List is the resolver's own active list: the db provider selects
-// status = 'active' (a deactivation through the API also drops its list
-// cache, so the next tick no longer sees the workspace), and the
-// platform-binding provider lists the bindings it has resolved (a 404
-// from the platform drops one). As a second line, anything not marked
-// active, or whose id fails workspace.ValidateID, is never handed to the
-// pool.
+// The scheduler needs only ids: each scan resolves its workspace through
+// the pool anyway. A resolver that can list ids without assembling configs
+// (workspaceIDLister: the platform-binding provider, whose List reads every
+// cached binding's three secrets just to build configs this would drop) is
+// asked for those; the others for List, their own active list — the db
+// provider selects status = 'active' and reads no secret. As a second
+// line, anything not marked active, or whose id fails workspace.ValidateID,
+// is never handed to the pool.
 type schedulerWorkspaceResolver struct {
 	resolver workspace.Resolver
 }
 
+// workspaceIDLister lists workspace ids without reading their secrets.
+type workspaceIDLister interface {
+	ListIDs(ctx context.Context) ([]string, error)
+}
+
 func (r schedulerWorkspaceResolver) List(ctx context.Context) ([]scheduler.WorkspaceRef, error) {
+	if l, ok := r.resolver.(workspaceIDLister); ok {
+		ids, err := l.ListIDs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]scheduler.WorkspaceRef, 0, len(ids))
+		for _, id := range ids {
+			if workspace.ValidateID(id) == nil {
+				out = append(out, schedulerWorkspaceRef(id))
+			}
+		}
+		return out, nil
+	}
 	cfgs, err := r.resolver.List(ctx)
 	if err != nil {
 		return nil, err

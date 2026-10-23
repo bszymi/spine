@@ -414,6 +414,7 @@ func TestMultiScheduler_ConfigDefaults(t *testing.T) {
 	want := scheduler.MultiSchedulerConfig{
 		TimeoutInterval: 30 * time.Second, OrphanInterval: 60 * time.Second, OrphanThreshold: 30 * 24 * time.Hour,
 		CommitMaxRetries: 3, WorkspaceBudget: 30 * time.Second, MaxConcurrentWorkspaces: 4, TickWait: 60 * time.Second,
+		ScanDeadline: 10 * time.Minute,
 	}
 	if got != want {
 		t.Fatalf("defaults = %+v, want %+v", got, want)
@@ -423,5 +424,29 @@ func TestMultiScheduler_ConfigDefaults(t *testing.T) {
 	}).Config()
 	if got.TickWait != 7*time.Second || got.WorkspaceBudget != 5*time.Second || got.MaxConcurrentWorkspaces != 2 {
 		t.Fatalf("explicit values not kept: %+v", got)
+	}
+}
+
+// Regression (red at db9a2d0b, where only a zero threshold took the
+// default): a negative orphan threshold lies in the future, so every active
+// run — a fresh one included — was listed as stale and, its age being
+// "more than three thresholds", failed on the first orphan tick. Now 0 and
+// any negative value mean the 30-day default.
+func TestMultiScheduler_NegativeOrphanThresholdFailsNoFreshRun(t *testing.T) {
+	for _, threshold := range []time.Duration{-720 * time.Hour, -time.Nanosecond, 0} {
+		fs := newFakeStore()
+		fs.runs = []domain.Run{{RunID: "run-fresh", Status: domain.RunStatusActive, TraceID: "trace-run-fresh-0123456789",
+			CreatedAt: time.Now()}}
+		var failed atomic.Int32
+		pool := newCountingPool(map[string]scheduler.ServiceSet{"ws": {Store: fs,
+			RunFailFn: func(context.Context, string, string) error { failed.Add(1); return nil }}})
+		ms := scheduler.NewMultiScheduler(pool, listResolver{"ws"}, scheduler.MultiSchedulerConfig{OrphanThreshold: threshold})
+		ms.ScanOrphans(context.Background())
+		if n := failed.Load(); n != 0 {
+			t.Fatalf("threshold %s: a fresh active run was failed as an orphan (%d calls)", threshold, n)
+		}
+		if got := ms.Config().OrphanThreshold; got != 30*24*time.Hour {
+			t.Fatalf("threshold %s: effective orphan threshold %s, want the 30-day default", threshold, got)
+		}
 	}
 }

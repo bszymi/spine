@@ -5,9 +5,12 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bszymi/spine/core/observe"
 )
 
 // idleStores is n workspaces with an isoStore each, in id order.
@@ -115,5 +118,69 @@ func TestMultiScheduler_HungWorkspacesCannotUseUpTheSlots(t *testing.T) {
 		if n := stores[id].scans.Load(); n > 2 {
 			t.Fatalf("%s scanned after Stop", id)
 		}
+	}
+}
+
+// A scan no tick waits for any more still ends at ScanDeadline: its
+// context is cancelled, it gives back its pool reference (which an
+// evicted workspace's next request would otherwise wait for), its
+// workspace is scanned again by a later tick, and an Error names it.
+func TestMultiScheduler_ScanDeadlineEndsAnAbandonedScan(t *testing.T) {
+	logs := captureLogs(t)
+	hung := &isoStore{blockUntilDone: true}
+	ok := &isoStore{}
+	pool := &refPool{sets: map[string]ServiceSet{"a-hung": {Store: hung}, "b-ok": {Store: ok}}}
+	ms := NewMultiScheduler(pool, msResolver{ids: []string{"a-hung", "b-ok"}}, MultiSchedulerConfig{
+		TickWait: 30 * time.Millisecond, ScanDeadline: 300 * time.Millisecond,
+	})
+	start := time.Now()
+	ms.forEachWorkspace(context.Background(), "timeout-scan", timeoutTick)
+	if took := time.Since(start); took > 250*time.Millisecond {
+		t.Fatalf("the tick waited %s for the hung scan, want about TickWait", took)
+	}
+	if held := pool.held(); held["a-hung"] != 1 {
+		t.Fatalf("references held right after the tick: %v, want a-hung's scan still holding one", held)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(pool.held()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("a-hung's scan still holds its pool reference 5s after its 300ms deadline: %v", pool.held())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if took := time.Since(start); took < 300*time.Millisecond {
+		t.Fatalf("the scan ended after %s, before its deadline", took)
+	}
+	// The reference goes back inside the scan; its claim right after.
+	for {
+		ms.inflightMu.Lock()
+		busy := len(ms.inflight)
+		ms.inflightMu.Unlock()
+		if busy == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a-hung's scan still claimed after it gave back its reference")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ms.forEachWorkspace(context.Background(), "timeout-scan", func(ctx context.Context, sched *Scheduler) {
+		if observe.WorkspaceID(ctx) == "a-hung" {
+			return // its next scan; do not block again
+		}
+		timeoutTick(ctx, sched)
+	})
+	if n := hung.scans.Load(); n != 1 {
+		t.Fatalf("a-hung entered %d scans, want 1 (the second tick's share returned at once)", n)
+	}
+	pool.mu.Lock()
+	gets := pool.gets["a-hung"]
+	pool.mu.Unlock()
+	if gets != 2 {
+		t.Fatalf("a-hung asked for %d times over two ticks, want 2 (scanned again once its scan ended)", gets)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "workspace scan reached its deadline") || !strings.Contains(out, "workspace_id=a-hung") {
+		t.Fatalf("no Error naming the cancelled scan:\n%s", out)
 	}
 }
