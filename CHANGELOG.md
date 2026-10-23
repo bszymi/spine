@@ -38,15 +38,30 @@ or the guard over it, was less strict than the rest of the system. No runtime sc
   `WorkflowDirs` left `<artifacts_dir>/workflows/` unguarded while the projection installed its
   definitions. With the guard on, each decision now also guards `<ArtifactsDir()>/workflows/`
   when the orchestrator has an artifacts directory (`WithArtifactsDir`, called before or after
-  `WithGovernanceGuard`), and, as a backstop, the parent directory of every changed `*.yaml` /
-  `*.yml` file that sits directly in a directory named `workflows` at any depth (case-folded).
-  The post-merge assertion applies the backstop to the paths the merge actually changed.
+  `WithGovernanceGuard`), and, as a backstop, every changed `*.yaml` / `*.yml` file that sits
+  directly in a directory named `workflows` at any depth (case-folded). The backstop guards those
+  files only, not their directory: a script or README changed beside them is judged by the
+  configured set alone. The post-merge assertion applies the backstop to the paths the merge
+  actually changed.
 
 ### Changed (standalone)
 
 - With the guard on (the `spine serve` default), a governed merge that changes a YAML file
   directly inside any directory named `workflows` — `.github/workflows/ci.yml` included — now
-  waits for an operator approval like a change to `workflows/`.
+  waits for an operator approval like a change to `workflows/` (the hold names those files only).
+- **Upgrade: runs bound to a workflow file with a second YAML document.** The engine re-reads and
+  re-parses a run's workflow at the commit the run is pinned to whenever it acts on the run
+  (assign, claim, submit, merge). A run started before this release on a file that carries a
+  second document with content therefore fails those actions afterwards. Remove the second
+  document on `main`, cancel the run (cancelling does not load the workflow; as always, not from
+  `committing`) and start it again. Projection-backed reads are not affected: the scheduler's
+  timeout and recovery scans and SMP's projection workflow loader read the stored row, which the
+  projection keeps (quarantined) at the commit runs are pinned to.
+- `spine workflow list`, `show` and `resolve` accept a workflow file exactly as the projection
+  does (`workflow.ProjectionDefinition`: strict keys, one document, the round trip). They decoded
+  leniently before, so they could list a file `Active`, or resolve a binding to it, that the
+  server had quarantined. `list` and `resolve` now skip such a file with a warning on stderr that
+  names it and the reason; `show` returns the error.
 - A timed-out `validate` step of the three shipped creation workflows routes to `draft`.
 
 ### Changed (embedders)
@@ -55,14 +70,14 @@ or the guard over it, was less strict than the rest of the system. No runtime sc
   second non-empty YAML document, so the projection quarantines such a workflow file and
   `ProjectionDefinition` and the workflow writers refuse it.
 - With the guard on, more merges are held: `<ArtifactsDir()>/workflows/**` and the backstop's
-  directories are added to the configured set at every decision (and to the post-merge
-  assertion). `GovernanceGuard.WorkflowDirs` is still the documented wiring; it is the only
+  files are added to the configured set at every decision (and to the post-merge assertion). `GovernanceGuard.WorkflowDirs` is still the documented wiring; it is the only
   source that also guards nested files of a projection directory the orchestrator was never told
   about. `GovernanceGuardConfig()` still returns the configuration, not the per-decision set. The
   zero value (guard off) is unchanged.
-- New in `core/branchprotect`: `GovernancePaths.WithDirs(dirs ...string)` (adds literal,
-  case-folded prefix entries; unlike `NewGovernancePaths` it does not refuse glob or quoting
-  characters, which are legal in git paths) and `WorkflowDefinitionDirs(paths)` (the backstop).
+- New in `core/branchprotect`: `GovernancePaths.WithLiteralEntries(entries ...string)` (adds
+  literal, case-folded prefix entries; unlike `NewGovernancePaths` it does not refuse glob or
+  quoting characters, which are legal in git paths) and `WorkflowDefinitionPaths(paths)` (the
+  backstop: the definition-shaped paths themselves).
   `GovernancePaths.Match` decides exactly as before; it now looks the folded path and each of its
   `/`-ancestors up in an index instead of scanning every entry, so an evaluation stays linear when
   a run's diff adds many derived entries.

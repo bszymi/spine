@@ -629,13 +629,14 @@ unprovenanced branch-protection removal. What remains:
     approve whose merge ended blocked says so in `merge_error`.
 18. **The workflow-directory backstop is broad on one side and short on the other** (INIT-024
     TASK-002, review finding N-5). Every decision adds the orchestrator's
-    `<artifacts_dir>/workflows/` and the parent of every changed `*.yaml` / `*.yml` file that
-    sits directly in a directory named `workflows` (any depth, case-folded) to the guarded set,
-    so an embedder that configured the projection's `artifacts_dir` without `WorkflowDirs` or
-    `WithArtifactsDir` still holds a new definition. The cost: a YAML file in any `workflows`
-    directory that is not a Spine definition (`.github/workflows/ci.yml`, a documentation
-    folder) needs an operator approval; there is no switch to turn the backstop off while the
-    guard is on. The residual: a nested file (`<artifacts_dir>/workflows/steps/x.yaml`) under a
+    `<artifacts_dir>/workflows/` and every changed `*.yaml` / `*.yml` file that sits directly in
+    a directory named `workflows` (any depth, case-folded) to the guarded set — the files
+    themselves, not their directory — so an embedder that configured the projection's
+    `artifacts_dir` without `WorkflowDirs` or `WithArtifactsDir` still holds a new definition.
+    The cost: a YAML file directly in any `workflows` directory that is not a Spine definition
+    (`.github/workflows/ci.yml`, a documentation folder) needs an operator approval; scripts,
+    READMEs and nested files changed beside it are not held by the backstop. There is no switch
+    to turn the backstop off while the guard is on (INIT-024 TASK-002 owner question 3). The residual: a nested file (`<artifacts_dir>/workflows/steps/x.yaml`) under a
     projection directory that neither `WorkflowDirs` nor the orchestrator names merges unheld.
     The projection does not install nested files as definitions, but an embedder's runner may
     read them (SMP's step profiles live under the root `workflows/steps/`, which the default
@@ -649,6 +650,14 @@ unprovenanced branch-protection removal. What remains:
   binds the workflow) until the second document is removed. Copies of the three shipped creation
   workflows made before the release keep `timeout_outcome: valid` on their `validate` step until
   an operator edits them (CHANGELOG, INIT-024 TASK-002).
+- **A run bound before the upgrade to a two-document workflow file is stranded in standalone**
+  (INIT-024 TASK-002). `spine serve` loads a run's workflow from git (`GitWorkflowLoader`),
+  re-parsing the file at the commit the run is pinned to on every action that needs it (assign,
+  claim, submit, merge), and that file is refused now. Removing the second document on `main` does
+  not change the pinned commit: cancel the run (cancelling does not load the workflow; not allowed
+  from `committing`) and start it again. Projection-backed reads are unaffected — the scheduler's
+  timeout and recovery scans, and SMP's projection workflow loader, read the stored row by path,
+  which the projection keeps (quarantined, at its old `source_commit`).
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are
   enforced (a file that fails either is not projected), but a workflow that fails the full
   `workflow.Validate` suite is still projected, with one Info log line. 6 of Spine's 8 shipped
