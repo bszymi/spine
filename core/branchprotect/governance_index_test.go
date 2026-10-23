@@ -59,7 +59,7 @@ func TestGovernancePaths_IndexedMatchEqualsScan(t *testing.T) {
 	// Random paths over an alphabet that exercises separators, case and
 	// the non-ASCII fold partners (deterministic seed).
 	alphabet := []string{"a", "A", "b", "/", "/", ".", "k", "K", "\u212a", "s", "\u017f", "workflows", "spine", "[", "x", `"`, `\`}
-	r := rand.New(rand.NewSource(20261023))
+	r := rand.New(rand.NewSource(20261023)) //nolint:gosec // G404: deterministic test corpus
 	for i := 0; i < 20000; i++ {
 		var b strings.Builder
 		for n := r.Intn(8); n >= 0; n-- {
