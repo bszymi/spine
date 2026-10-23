@@ -320,6 +320,24 @@ make docker-vet
 make lint-security
 ```
 
+### Supply-Chain Checks
+
+CI pins every action to a full commit SHA (with a `# vX.Y.Z` comment) and every image to a
+digest next to its tag. Two jobs keep it that way:
+
+- **`toolchain-parity`** runs `go run ./dev/pincheck -resolve`. It refuses an unpinned action or
+  image, and a golang image (the Dockerfile builder, the CI git-floor container, the Makefile's
+  `DOCKER_GO`) whose Go version differs from go.mod's `toolchain` line. The golang image sets
+  `GOTOOLCHAIN=local`, so its own Go is the compiler that ships, and bumping go.mod alone would
+  silently keep the old one.
+- **`vuln`** runs `govulncheck ./...` and fails on any reachable advisory.
+
+To move the Go toolchain, change go.mod's `toolchain` line and all three golang references to the
+new `golang:<version>-bookworm` tag and its index digest (`docker buildx imagetools inspect
+golang:<version>-bookworm`), then run `make toolchain-parity` and `make vuln`. Dependabot
+(`.github/dependabot.yml`) proposes module, action and image updates weekly, but it does not move
+the toolchain line.
+
 ---
 
 ## Repository Structure

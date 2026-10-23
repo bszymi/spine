@@ -786,6 +786,26 @@ The governed merge judges artifact-status changes against the declared lifecycle
 - **Runs in flight at the upgrade** whose branch carries status edits on artifacts they do not own
   are refused at the merge; a publish-step workflow routes them back to `execute`.
 
+### Supply Chain: What INIT-024 TASK-009 Leaves Open
+
+CI pins every action and image, scans for reachable advisories and enforces toolchain parity
+(`dev/pincheck`, CI jobs `vuln` and `toolchain-parity`). What it does not cover:
+
+- **Repository settings are owner actions** (INIT-024 §7d): a `main` ruleset (PR and CI required,
+  no force push), approval for all outside contributors, and "allowed actions: selected" with SHA
+  pinning required. Until the ruleset exists, nothing makes these CI jobs required.
+- **Dependabot does not move the toolchain.** It proposes a new golang image for the Dockerfile but
+  never edits go.mod's `toolchain` line, the `ci.yml` git-floor container or the Makefile's
+  `DOCKER_GO`. `toolchain-parity` fails that PR until all four agree, and that failure is
+  intended. The `ci.yml` postgres service image and the govulncheck version (`ci.yml`, Makefile)
+  are moved by hand.
+- **govulncheck scans the default build only.** Code behind the `integration` and `scenario` tags
+  and `_test.go` files is not analysed. A new upstream advisory fails every PR until it is fixed
+  or the job is changed. This is the default fail-closed policy (TASK-009 owner question 2).
+- **The runtime image's packages are not pinned.** The debian digest fixes the base, but `apt-get
+  install git ca-certificates` resolves at build time. There is no image vulnerability scan, SBOM
+  or signing: Spine has no image publishing pipeline.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:

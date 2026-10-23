@@ -6,6 +6,64 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-004 TASK-009: toolchain, dependency floors, CI pinning)
+
+Closes the Spine half of the 2026-10-22 review's supply-chain findings SC-01, SC-06, SC-08 and
+SC-09. Build and CI only: no Spine package changes, no runtime behaviour or schema change.
+
+### Security
+
+- **Go toolchain go1.26.10.** `go.mod` gains `toolchain go1.26.10`, the newest 1.26 patch. At
+  go1.26.8 govulncheck reports 11 reachable standard-library advisories, among them GO-2026-6809
+  (crypto/x509 did not apply the denylist of untrustworthy intermediate certificates; fixed in
+  go1.26.10) and the go1.26.9 net/http, net/textproto, crypto/tls and os fixes; at go1.26.10 it
+  reports none.
+- **Dependency floors.** pgx v5.8.0 → v5.9.2 (GO-2026-5004, reachable from the delivery
+  listener's `QueryRow`, though only the simple protocol, which Spine never selects, is affected;
+  GO-2026-4771/4772). x/text v0.29.0 → v0.42.0 (GO-2026-6629, GO-2026-5970). x/text v0.42.0
+  raises x/sync v0.17.0 → v0.23.0 and the `go` line `1.26` → `1.26.0`. chi stays at v5.2.5:
+  GO-2026-5774/5775/5777 are in `middleware.RealIP`, a package Spine does not import
+  (module-level only).
+- **The standalone image is digest-pinned.** The Dockerfile builds on
+  `golang:1.26.10-bookworm@sha256:632dff73…` and runs on `debian:bookworm-slim@sha256:7ff6ba31…`
+  (tag kept beside each digest). The golang image sets `GOTOOLCHAIN=local`, so its own Go is the
+  compiler that ships.
+- **CI is pinned and read-only.** `ci.yml` has `permissions: contents: read` at the top. Every
+  action is a full commit SHA with a `# vX.Y.Z` comment (`actions/checkout` v4.4.0,
+  `actions/setup-go` v5.6.0), and checkouts no longer persist the token in `.git/config`. The
+  postgres service image and the git-floor container are digest-pinned, and the git-floor
+  container is the Dockerfile's builder image, so that job tests the shipped git and Go.
+- **New CI jobs.** `vuln` runs `govulncheck@v1.9.0 ./...` and fails on any reachable advisory,
+  after checking that the Go in use is go.mod's toolchain. `toolchain-parity` runs `dev/pincheck`,
+  which refuses a missing toolchain line, an unpinned image or action, and a golang image
+  reference (Dockerfile, git-floor container, Makefile `DOCKER_GO`) that names another Go version
+  than the toolchain or differs from the others. With `-resolve` it also reads the digest's
+  `GOLANG_VERSION` from the registry without pulling. Bumping go.mod alone would otherwise keep
+  shipping the old compiler with nothing red. `image-build` builds the standalone image from its
+  pinned bases.
+- **Dependabot.** `.github/dependabot.yml` covers `gomod`, `github-actions`, `docker` (Dockerfile)
+  and `docker-compose`, weekly, with minor and patch updates grouped and a 7-day cooldown. It
+  does not move go.mod's `toolchain` line or the images inside `ci.yml`; `toolchain-parity`
+  fails a half-done golang bump.
+- **Compose.** The postgres and localstack images in `docker-compose.yaml` and
+  `docker-compose.test.yaml` are digest-pinned with a tag comment.
+- **Not covered here (owner actions, INIT-024 §7d).** A `main` ruleset (PR and CI required, no
+  force push), approval for all outside contributors' workflow runs, and "allowed actions:
+  selected" with SHA pinning required are repository settings this change cannot make. Now that
+  every action is SHA-pinned, the last of these can be turned on without breaking CI.
+
+### Changed (embedders)
+
+- **Module floors.** Spine's `go.mod` now requires pgx v5.9.2, x/text v0.42.0 and x/sync v0.23.0,
+  and says `go 1.26.0`. Minimal version selection raises an embedder that selects older versions.
+  These floors were chosen to equal SMP's own selections at 3addd44b. SMP's module build list
+  (`go list -m all`) is identical before and after this change, so SMP builds unchanged with
+  `-mod=readonly` and `go mod tidy` changes nothing in SMP. The `toolchain` line is not
+  inherited: an embedder's own go.mod decides its compiler.
+- New dev-only package `dev/pincheck` (`package main`, standard library only). Nothing imports
+  it, and `go test ./...` now includes its tests (fixtures plus a check of this repository's own
+  pins).
+
 ## INIT-023 — Security Audit Remediation: wave 4 follow-up
 
 Fixes found after the wave 4 integration (a TASK-003 residual SMP INIT-027/EPIC-004/TASK-008 measured
