@@ -125,6 +125,114 @@ func normalizeGovernanceEntry(raw string) (string, error) {
 	return foldPath(e), nil
 }
 
+// WithDirs returns a copy of g with each dir added as a literal prefix
+// entry (INIT-024 TASK-002, review finding N-5). It exists for entries the
+// engine derives at decision time — the orchestrator's
+// <artifacts_dir>/workflows directory and the WorkflowDefinitionDirs
+// backstop — not for configuration, which goes through NewGovernancePaths.
+//
+// A dir is case-folded like every entry, with its leading and trailing
+// "/" removed; nothing else is changed, and nothing is refused. That
+// differs from NewGovernancePaths on purpose: its refusal of glob and
+// quoting characters (* ? [ \ ") and of empty or dot segments keeps an
+// operator from writing a pattern the guard would read as a literal, but
+// these dirs come from git paths and from the artifacts directory the
+// projection matches literally, and a directory named "[id]" is a legal
+// git path. Refusing it would leave the backstop nothing to add — a merge
+// the projection may install from, let through. Matching stays Match's:
+// a literal, folded prefix compare. A dir that is empty once trimmed is
+// skipped (it would guard every path). A zero-value g starts from
+// DefaultGovernancePaths, as Match does.
+func (g GovernancePaths) WithDirs(dirs ...string) GovernancePaths {
+	base := g.entries
+	if base == nil {
+		base = defaultGovernancePaths().entries
+	}
+	seen := make(map[string]struct{}, len(base)+len(dirs))
+	out := make([]string, 0, len(base)+len(dirs))
+	for _, e := range base {
+		seen[e] = struct{}{}
+		out = append(out, e)
+	}
+	for _, d := range dirs {
+		e := foldPath(strings.TrimRight(strings.TrimLeft(d, "/"), "/"))
+		if e == "" {
+			continue
+		}
+		if _, dup := seen[e]; dup {
+			continue
+		}
+		seen[e] = struct{}{}
+		out = append(out, e)
+	}
+	sort.Strings(out)
+	return GovernancePaths{entries: out}
+}
+
+// workflowsDirName is the folded last segment of a directory the backstop
+// treats as a workflow directory.
+const workflowsDirName = "workflows"
+
+// WorkflowDefinitionDirs is the guard's structural backstop (INIT-024
+// TASK-002, review finding N-5). It returns the parent directory of every
+// path that looks like a workflow definition: a leaf ending in ".yaml" or
+// ".yml" directly inside a directory whose last segment is "workflows",
+// at any depth, both compared case-folded like Match ("Docs/WORKFLOWS/x.YML"
+// counts, and so does "worKflows" with U+212A KELVIN SIGN). Each parent is
+// returned once, spelled as in the first path that named it.
+//
+// Why: the projection installs the direct *.yaml / *.yml children of
+// workflows/ and of <artifacts_dir>/workflows/ as live workflow policy,
+// and artifacts_dir is the projection's configuration, which the guard
+// may never have been told (no GovernanceGuard.WorkflowDirs, no
+// Orchestrator.WithArtifactsDir). Whatever artifacts_dir is, every file
+// the projection could install from it has this shape, so adding these
+// parents to the guarded set (GovernancePaths.WithDirs) holds the merge
+// anyway. It over-approximates: a YAML file in any directory named
+// "workflows" (".github/workflows/ci.yml") needs an operator approval
+// too. Nested files ("workflows/steps/x.yaml") are not definitions and
+// are not matched here; the artifacts-directory entry covers those.
+//
+// Paths Match already governs whatever the entries — "", a path
+// domain.UnsafeRepositoryPath refuses, a C-quoted path that does not
+// decode — are skipped; a C-quoted path that decodes is judged by its
+// decoded form, as Match judges it.
+func WorkflowDefinitionDirs(paths []string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, p := range paths {
+		if p == "" || domain.UnsafeRepositoryPath(p) {
+			continue
+		}
+		if strings.HasPrefix(p, `"`) {
+			dec, ok := unquoteGitPath(p)
+			if !ok || dec == "" || domain.UnsafeRepositoryPath(dec) {
+				continue
+			}
+			p = dec
+		}
+		p = strings.TrimLeft(p, "/")
+		i := strings.LastIndexByte(p, '/')
+		if i <= 0 {
+			continue // a root-level file has no parent directory
+		}
+		parent, leaf := p[:i], foldPath(p[i+1:])
+		if !strings.HasSuffix(leaf, ".yaml") && !strings.HasSuffix(leaf, ".yml") {
+			continue
+		}
+		if foldPath(parent[strings.LastIndexByte(parent, '/')+1:]) != workflowsDirName {
+			continue
+		}
+		key := foldPath(parent)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, parent)
+	}
+	return out
+}
+
 // Entries returns the folded entries, each without a trailing "/", for
 // logs and wiring tests.
 func (g GovernancePaths) Entries() []string {

@@ -333,6 +333,13 @@ func TestGovernanceGuard_CascadeFootprintIsEvaluated(t *testing.T) {
 // "spine/workflows/"], pinned in adapters/projection and the standalone
 // wiring test — both workflow directories are guarded and other
 // artifacts_dir content is not.
+//
+// The last two cases changed with INIT-024 TASK-002 (review finding N-5):
+// this case used to pin spine/workflows/task-default.yaml merging
+// unguarded when WorkflowDirs was left out — the finding itself. The
+// structural backstop now holds it; only a nested file of a directory
+// neither WorkflowDirs nor the orchestrator's artifacts directory names
+// still merges (the projection does not install nested files).
 func TestGovernanceGuard_ArtifactsDirWorkflows(t *testing.T) {
 	dirs := []string{"workflows/", "spine/workflows/"}
 	for _, c := range []struct {
@@ -344,7 +351,8 @@ func TestGovernanceGuard_ArtifactsDirWorkflows(t *testing.T) {
 		{"spine/workflows held", "spine/workflows/task-default.yaml", dirs, true},
 		{"root workflows held", "workflows/x.yaml", dirs, true},
 		{"spine/docs not held", "spine/docs/a.md", dirs, false},
-		{"spine/workflows unguarded without WorkflowDirs", "spine/workflows/task-default.yaml", nil, false},
+		{"spine/workflows held by the backstop without WorkflowDirs", "spine/workflows/task-default.yaml", nil, true},
+		{"nested spine/workflows file unguarded without WorkflowDirs", "spine/workflows/steps/x.yaml", nil, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			g := newGovRepo(t, govRepoOpts{runFiles: map[string]string{c.path: "id: x\n"},

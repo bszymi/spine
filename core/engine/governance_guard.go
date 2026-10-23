@@ -89,6 +89,17 @@ type GovernanceGuard struct {
 	// projection installs workflow definitions from. Callers pass
 	// projection.WorkflowDirs(artifactsDir) (core/engine cannot import
 	// adapters/projection), e.g. ["workflows/", "spine/workflows/"].
+	//
+	// Since INIT-024 TASK-002 (review finding N-5) leaving it out no longer
+	// leaves those directories open: every decision also guards
+	// <ArtifactsDir()>/workflows/ when the orchestrator has an artifacts
+	// directory (WithArtifactsDir, in either call order), and the
+	// structural backstop branchprotect.WorkflowDefinitionDirs holds a
+	// *.yaml / *.yml file directly inside any directory named "workflows"
+	// (see governedPathsFor). Passing the projection's directories is still
+	// the documented wiring: it is the only source that also guards nested
+	// files of <artifacts_dir>/workflows/ when the orchestrator was never
+	// told the artifacts directory.
 	WorkflowDirs []string
 	// ExemptWorkflowLifecycleTaskPath lets an ADR-008 workflow-lifecycle
 	// planning run merge its own workflow file without an operator
@@ -513,7 +524,7 @@ func (o *Orchestrator) buildGovernanceCheck(ctx context.Context, run *domain.Run
 		return nil, err
 	}
 	gc := &branchprotect.GovernanceCheck{
-		Paths:        g.paths,
+		Paths:        o.governedPathsFor(changed),
 		BoundSHA:     src.bound,
 		ChangedPaths: changed,
 		Approval:     governanceApprovalFrom(run.CommitMeta),
@@ -521,6 +532,44 @@ func (o *Orchestrator) buildGovernanceCheck(ctx context.Context, run *domain.Run
 	gc.ExemptPaths = append(gc.ExemptPaths, o.ownEvidenceExemptions(run, changed)...)
 	gc.ExemptPaths = append(gc.ExemptPaths, o.lifecycleExemption(ctx, run, src, bases, changed)...)
 	return gc, nil
+}
+
+// governedPathsFor is the guarded set for one decision over the changed
+// paths (INIT-024 TASK-002, review finding N-5). The set WithGovernanceGuard
+// built — Paths (or the defaults) plus WorkflowDirs — was fixed at setup
+// and held only what the embedder listed, while the projection installs
+// the direct *.yaml / *.yml children of workflows/ AND of
+// <artifacts_dir>/workflows/ as live policy: an embedder that configured
+// the projection's artifacts_dir without passing WorkflowDirs left that
+// directory's workflow definitions to merge unreviewed. The set is
+// therefore built at decision time from three sources:
+//
+//	(a) the configured set (g.paths), as before;
+//	(b) <ArtifactsDir()>/workflows when the orchestrator has an artifacts
+//	    directory — read here, not in WithGovernanceGuard, so the order
+//	    of WithArtifactsDir and WithGovernanceGuard does not matter; the
+//	    entry also covers nested files (workflows/steps/x.yaml);
+//	(c) the structural backstop: the parent of every changed path that
+//	    looks like a workflow definition — a *.yaml / *.yml leaf directly
+//	    inside a directory named "workflows" at any depth, case-folded
+//	    (branchprotect.WorkflowDefinitionDirs). This over-approximates
+//	    the projection's set for every possible artifacts_dir, so a merge
+//	    is held even when neither the guard nor the orchestrator knows
+//	    the projection's directory.
+//
+// (b) and (c) are added as literal prefix entries
+// (GovernancePaths.WithDirs); Match is unchanged. With the guard off none
+// of this runs (the zero value holds nothing). The post-merge assertion
+// applies (c) to the paths the merge actually changed as well
+// (checkGovernedMerge), so rename following into such a directory is
+// refused like rename following into workflows/.
+func (o *Orchestrator) governedPathsFor(changed []string) branchprotect.GovernancePaths {
+	var dirs []string
+	if d := o.ArtifactsDir(); d != "" {
+		dirs = append(dirs, d+"/workflows")
+	}
+	dirs = append(dirs, branchprotect.WorkflowDefinitionDirs(changed)...)
+	return o.governance.paths.WithDirs(dirs...)
 }
 
 // changedPathsFrom is the union of Path and OldPath of Diff(B, to) over
@@ -1162,7 +1211,11 @@ func (o *Orchestrator) checkGovernedMerge(ctx context.Context, run *domain.Run, 
 			}
 		}
 		post := &branchprotect.GovernanceCheck{
-			Paths:        gc.Paths,
+			// The evaluated set plus the backstop over what the merge
+			// actually changed (INIT-024 TASK-002): rename following can
+			// land a definition in a "workflows" directory the
+			// pre-merge diff never named.
+			Paths:        gc.Paths.WithDirs(branchprotect.WorkflowDefinitionDirs(actual)...),
 			ChangedPaths: actual,
 			ExemptPaths:  append(append([]string(nil), exempt...), o.ownEvidenceExemptions(run, actual)...),
 		}
