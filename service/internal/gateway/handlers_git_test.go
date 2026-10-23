@@ -456,7 +456,7 @@ func TestHandleGit_PushDisabled403OnlyForAuthenticatedCaller(t *testing.T) {
 
 	send := func(header string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("GET",
-			"/git/ws-1/info/refs?service=git-receive-pack", nil)
+			"/git/ws-1/info/refs?service=git-receive-pack", http.NoBody)
 		req.RemoteAddr = "203.0.113.1:12345"
 		if header != "" {
 			req.Header.Set("Authorization", header)
