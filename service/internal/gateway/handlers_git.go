@@ -478,16 +478,15 @@ func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) (*domai
 		return nil, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format")
 	}
 
-	// Use workspace-scoped auth if available, otherwise server-level.
-	// The Release must run on every path that Get succeeded on — even
-	// when ss.Auth is nil or ValidateToken below fails — otherwise
-	// repeated auth failures leak pool references and eventually
-	// exhaust the workspace pool.
+	// Shared mode: the resolved workspace's own auth service only
+	// (validatePooledGitAuth, INIT-024 TASK-007). Otherwise the
+	// server-level one.
 	//
 	// cfg may be nil when the caller invoked us before workspace
 	// resolution succeeded (TASK-031 defers state-leaking workspace
 	// errors past the auth gate). Skip the pool lookup in that case
-	// — server-level auth still applies in single mode.
+	// — server-level auth still applies in single mode, and in shared
+	// mode (no server-level auth) handleGit answers the uniform 401.
 	if cfg != nil && s.servicePool != nil {
 		return s.validatePooledGitAuth(r, cfg.ID, token)
 	}

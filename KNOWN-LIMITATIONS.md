@@ -887,16 +887,13 @@ The following limitations have been resolved:
   services fail to build, or whose token store errors, gets the uniform `401` — even with a token
   that is valid there — where it used to get `500`/`503`. The cause is logged at `Warn`/`Error`
   with the workspace id; operators read outages from the logs, not from client status codes.
-- **Not closed here: the push-disabled `403`.** With `SPINE_GIT_RECEIVE_PACK_ENABLED` off, an
-  unauthenticated push to an existing workspace answers the operator-guidance `403` and one to a
-  missing workspace the uniform `401` (INIT-008 EPIC-004 TASK-031, by design). No ServiceSet is
-  built on that path.
 - **"Verified" evidence (N-17).** `run.status` marks each repository's evidence `verified: true`
   only when it was read from the authoritative branch, and `false` with the run branch as
   `source_ref` otherwise; `unverified_repositories` lists the latter. "Verified" means the record
   passed the run's governed merge, not that the server produced or signed it: a run's own evidence
-  directory is excused from the governance-path approval ("Governance-Path Guard" above), so its content
-  is still the producer's, reviewed with the run. The merge gate never read this display path.
+  directory is excused from the governance-path approval ("Governance-Path Guard" above), so its
+  content is still the producer's, reviewed with the run. The merge gate never read this display
+  path.
 - **`SPINE_ENV` is required (N-16).** `spine serve` and `spine secrets reencrypt` refuse to start
   unless it is `production`, `staging` or `development` (owner question 2 default: refuse rather
   than treat unset as production, pending the owner). `staging` and `development` still turn every
