@@ -323,8 +323,10 @@ directly: **inert**.
 | Round | Review sub-session | Model | Result |
 |---|---|---|---|
 | 1 (on `59a49ca3`) | `01a169f8-4b37-7fe3-8ff4-11170919008a` | `gpt-6.1-sol` | `findings: []`, "patch is correct" (confidence 0.85) — clean; nothing to dispose |
+| 2 (on `32d4334f`, notes + docs) | `01a16a05-e5e7-7430-b500-65d9eec664a2` | `gpt-6.1-sol` | `findings: []`, "patch is correct" — clean |
 
-(The final round on the notes commit is recorded in the orchestrator report.)
+Both runs: `codex review --base init/INIT-024-scaffold`, plain, from this worktree; the model read
+from each review sub-session's JSONL (`source: {"subagent":"review"}`, `cwd` = this worktree).
 
 ### Not run
 
