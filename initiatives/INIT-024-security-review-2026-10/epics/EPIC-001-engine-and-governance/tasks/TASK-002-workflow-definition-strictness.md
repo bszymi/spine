@@ -353,6 +353,8 @@ sub-session (`source: {"subagent":"review"}`, `cwd` = the worktree), model confi
   (Deviation 2), with `TestGovernanceCheck_TouchedLinearInDerivedEntries` (fails on the pre-fix
   matcher: 39.9 s for 80,000 paths; 0.09 s after) and the equivalence test.
 - **Round 2** (session `01a16922-1c75-7972-b24b-3f5e3b47e5ab`, over `c6361d97`): no findings.
+- **Round 3** (session `01a16998-7cd8-7633-84ab-b6d195bb0471`, over `568a2892`, the final code): no
+  findings.
 
 ### Not run
 
