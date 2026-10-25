@@ -1423,7 +1423,12 @@ What that implies, and what it leaves open:
      then a request for an evicted workspace (a deactivation, a binding invalidation, a credential
      rotation) waits for that reference: up to the deadline, or less if the request's own deadline
      comes first. A sequence on a shared working tree (the primary repository's merge and push) runs
-     detached from the cancellation and ends within its own 5-minute bound. An attempt cut by the
+     detached from the cancellation and ends within its own 5-minute bound. Building a cold
+     workspace's services is not bounded by the scan either (the build runs on the pool's lifetime
+     context, which the services it starts need): the pool gives up on a build after 2 minutes
+     (`PoolConfig.InitTimeout`) for every caller waiting on it — the scan, requests, the projection
+     sync — with `ErrWorkspaceUnavailable`, and the next caller builds afresh; the abandoned build
+     keeps running in the background until it returns, and its result is closed. An attempt cut by the
      deadline records nothing — its outcome write uses the expired context — so, like a lock wait cut
      short (item 8), it does not count against the merge retry budget: a code repository whose remote
      never answers keeps its run in `committing`, retried on later ticks, each attempt held up to the

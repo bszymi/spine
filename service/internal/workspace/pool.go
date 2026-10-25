@@ -184,6 +184,7 @@ type ServicePool struct {
 	secretClient secrets.SecretClient
 	dbPolicy     PoolPolicy
 	codeRepoBase string
+	initTimeout  time.Duration
 	closed       bool
 	ctx          context.Context    // pool-lifetime context for background goroutines
 	cancel       context.CancelFunc // cancels pool-lifetime context on Close
@@ -287,7 +288,26 @@ type PoolConfig struct {
 	// expected to set it (cmd/spine fails fast when
 	// SPINE_ENV=production and this is unset).
 	CodeRepoBase string
+
+	// InitTimeout bounds how long Get waits for a workspace's services to
+	// be built (INIT-024 TASK-008). The build runs on the pool-lifetime
+	// context, because the services it starts (queue, event delivery,
+	// bootstrap retries) live as long as the set, so nothing inside it
+	// is bounded by the caller: a database that accepts the connection
+	// and never answers held every Get of the workspace — a request, the
+	// scheduler's scan, the projection sync — for good. Past the timeout
+	// the entry fails with an error wrapping ErrWorkspaceUnavailable and
+	// is removed, so the next Get starts afresh; the abandoned build keeps
+	// running in the background and whatever it returns is closed
+	// ("init-error"). 0 means DefaultInitTimeout.
+	InitTimeout time.Duration
 }
+
+// DefaultInitTimeout is PoolConfig.InitTimeout's default: far beyond a
+// healthy build (a database connection and ping, the subscription-secret
+// sweep, a few git commands, the builder hook), well inside the
+// scheduler's scan deadline.
+const DefaultInitTimeout = 2 * time.Minute
 
 // NewServicePool creates a service pool backed by the given resolver.
 // The provided context is used as the parent for pool-lifetime goroutines
@@ -310,6 +330,7 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 		secretClient:   cfg.SecretClient,
 		dbPolicy:       cfg.DBPolicy,
 		codeRepoBase:   cfg.CodeRepoBase,
+		initTimeout:    cfg.InitTimeout,
 		ctx:            poolCtx,
 		cancel:         cancel,
 
@@ -549,7 +570,7 @@ func (p *ServicePool) removeLocked(id string, entry *poolEntry) {
 // inserted the entry into p.entries with refCount=1 before releasing the
 // mutex.
 func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, cfg Config, entry *poolEntry) (*ServiceSet, error) {
-	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretEnvelopeMode, p.secretClient, p.dbPolicy, p.codeRepoBase)
+	ss, buildErr := p.buildWithTimeout(ctx, canonicalID, cfg)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -588,6 +609,43 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 
 	observe.Logger(ctx).Info("workspace service set initialized", "workspace_id", canonicalID)
 	return ss, nil
+}
+
+// buildWithTimeout runs buildServiceSet on the pool-lifetime context and
+// waits for it at most InitTimeout (see PoolConfig.InitTimeout). A build
+// that outlives the wait is abandoned: the error returned wraps
+// ErrWorkspaceUnavailable, and the set the build returns later, if any,
+// is closed with reason "init-error".
+func (p *ServicePool) buildWithTimeout(ctx context.Context, canonicalID string, cfg Config) (*ServiceSet, error) {
+	timeout := p.initTimeout
+	if timeout <= 0 {
+		timeout = DefaultInitTimeout
+	}
+	type built struct {
+		ss  *ServiceSet
+		err error
+	}
+	done := make(chan built, 1)
+	go func() {
+		ss, err := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretEnvelopeMode, p.secretClient, p.dbPolicy, p.codeRepoBase)
+		done <- built{ss, err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case b := <-done:
+		return b.ss, b.err
+	case <-timer.C:
+	}
+	observe.Logger(ctx).Error("workspace service set initialization timed out; abandoned, the next request builds it afresh",
+		"workspace_id", canonicalID, "init_timeout", timeout)
+	go func() {
+		if late := <-done; late.ss != nil {
+			late.ss.close("init-error")
+		}
+	}()
+	return nil, fmt.Errorf("%w: initialization of workspace %q services did not finish within %s",
+		ErrWorkspaceUnavailable, canonicalID, timeout)
 }
 
 // Release decrements the reference count for a workspace service set.

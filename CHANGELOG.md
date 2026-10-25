@@ -46,6 +46,12 @@ gap more than a security finding (INIT-024 owner question 5). Standalone only: S
   single mode; unset or `0` keeps the 30-day default. A **negative** value now refuses to start in
   the shared modes (it would have made every active run an orphan, failed on the first orphan tick);
   single mode still ignores it, as before, and now logs a startup Warn.
+- Shared modes: building a workspace's services is bounded. The build runs on the pool's lifetime
+  context (the services it starts live as long as the set), so a workspace database that accepts
+  the connection and never answers held every request, scan and projection sync of that workspace
+  indefinitely. After 2 minutes (`PoolConfig.InitTimeout`) every caller waiting on the build gets
+  `ErrWorkspaceUnavailable` (503) and the next one builds afresh; the abandoned build's result is
+  closed when it returns.
 - In `platform-binding` mode the scheduler lists workspaces from the provider's cache keys
   (`ListIDs`), reading no secret; each scan's resolve still reads the binding's secrets
   (`KNOWN-LIMITATIONS.md`, item 9).

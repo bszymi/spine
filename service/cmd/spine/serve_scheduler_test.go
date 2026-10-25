@@ -829,3 +829,60 @@ func TestServe_PlatformBindingModeBuildsMultiScheduler(t *testing.T) {
 		t.Fatalf("a tick with no resolved binding built %d workspace service sets", n)
 	}
 }
+
+// Codex review round 3 (P2): a cold workspace whose services never finish
+// building (the build runs on the pool-lifetime context, beyond the scan's
+// deadline) no longer keeps the scheduler's scan, and so the workspace,
+// claimed for good: the pool gives up after its InitTimeout, the scan ends
+// without a reference, and the next tick builds and scans the workspace.
+func TestMultiScheduler_HungWorkspaceBuildDoesNotWedgeTheScan(t *testing.T) {
+	clearSchedulerEnv(t)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	res := newMultiResolver(t, "ws-a")
+	st := newTimeoutStore()
+	var builds int32
+	var mu sync.Mutex
+	pool := workspace.NewServicePool(context.Background(), res, workspace.PoolConfig{
+		IdleCheckInterval: -1,
+		InitTimeout:       150 * time.Millisecond,
+		Builder: func(_ context.Context, ss *workspace.ServiceSet) error {
+			mu.Lock()
+			builds++
+			first := builds == 1
+			mu.Unlock()
+			if first {
+				<-release
+			}
+			ss.Store = st
+			return nil
+		},
+	})
+	t.Cleanup(pool.Close)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.DiscardHandler))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	ms := scheduler.NewMultiScheduler(&schedulerWorkspacePool{pool: pool}, schedulerWorkspaceResolver{resolver: res},
+		scheduler.MultiSchedulerConfig{TickWait: 5 * time.Second, ScanDeadline: time.Minute})
+	start := time.Now()
+	ms.ScanTimeouts(context.Background())
+	if took := time.Since(start); took > 4*time.Second {
+		t.Fatalf("the tick waited %s on the hung build, want about the pool's InitTimeout", took)
+	}
+	if n := pool.RefCount("ws-a"); n != 0 {
+		t.Fatalf("ws-a holds %d references after its build timed out, want 0", n)
+	}
+	if st.runStatusForTest() == domain.RunStatusCancelled {
+		t.Fatal("ws-a was scanned although its build never finished")
+	}
+	ms.ScanTimeouts(context.Background())
+	if got := st.runStatusForTest(); got != domain.RunStatusCancelled {
+		t.Fatalf("the next tick did not build and scan ws-a: run %s, want cancelled", got)
+	}
+	if n := pool.RefCount("ws-a"); n != 0 {
+		t.Fatalf("ws-a refcount %d after the second tick, want 0", n)
+	}
+}
+
+func (s *timeoutStore) runStatusForTest() domain.RunStatus { return s.run.Status }
