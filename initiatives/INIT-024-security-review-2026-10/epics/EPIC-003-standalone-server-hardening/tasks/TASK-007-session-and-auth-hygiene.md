@@ -430,10 +430,20 @@ pre-auth log line, `a197c9f7`), not from codex.
 - `service/internal/gateway/handlers_git.go` with TASK-006: TASK-006 rewrites `handleGit`'s auth
   gate and adds `isUnauthorizedError` right after `validateGitAuth`; this task changes
   `validateGitAuth`'s body and adds `validatePooledGitAuth` at the same spot — keep both functions.
-  The two compose: TASK-006's push-off path now goes through the gate, and shared mode reaches
-  `validatePooledGitAuth`. TASK-006's KNOWN-LIMITATIONS residual "a server without any auth service
-  tells workspaces apart … still answers 503" no longer holds in shared mode (it is the uniform
-  401 here); narrow it to single mode.
+  The production code composes (TASK-006's push-off path goes through the gate, and shared mode
+  reaches `validatePooledGitAuth`), but **TASK-006's tests do not, as they stand** (review round 1,
+  finding 1; corrected — an earlier version of this note said "the two compose"): its shared-mode
+  fixture sets the process-level `f.srv.auth` on a pooled server, which shared mode no longer
+  consults, so three tests fail after the merge (`TestHandleGit_InvalidBearerIsNoWorkspaceOracle`
+  shared leg, `TestHandleGit_TrustedCIDRScopedToWorkspace/shared_mode`,
+  `TestHandleGit_PushNeverTakesWorkspaceBypass`: "valid bearer … status 401; want 200"). Apply the
+  fixture change below as a coordination commit on the integration branch (see "Review round 1",
+  ruling 1, for the trial merge that proves it). TASK-006's KNOWN-LIMITATIONS residual "a server
+  without any auth service tells workspaces apart … still answers 503" no longer holds in shared
+  mode (it is the uniform 401 here); narrow it to single mode.
+- `architecture/security-model.md` and `CHANGELOG.md`: this task's N-15 text says the `/git`
+  missing/malformed-header and push-off cases "are made uniform by INIT-024 TASK-006". Once both
+  are merged, drop that qualifier (state the `/git` uniformity without it).
 - `service/cmd/spine/serve_cmd.go` and `serve_config.go` with TASK-006: different functions and
   hunks (this task: the gate right after the git floor, `requireRuntimeEnv` after
   `resolveRuntimeEnv`).
@@ -441,3 +451,179 @@ pre-auth log line, `a197c9f7`), not from codex.
   service's environment; TASK-009 pins `image:` lines.
 - `CHANGELOG.md`, `KNOWN-LIMITATIONS.md`, `README.md`, `.env.example`, `docs/integration-guide.md`
   with TASK-006: separate sections; the CHANGELOG entries stack at the top.
+
+#### TASK-006 fixture change for the integrator (`service/internal/gateway/git_trusted_cidr_scope_internal_test.go`, against `96dcea55`)
+
+```diff
+diff --git a/service/internal/gateway/git_trusted_cidr_scope_internal_test.go b/service/internal/gateway/git_trusted_cidr_scope_internal_test.go
+index 7eebf31d..50a48181 100644
+--- a/service/internal/gateway/git_trusted_cidr_scope_internal_test.go
++++ b/service/internal/gateway/git_trusted_cidr_scope_internal_test.go
+@@ -109,6 +109,9 @@ type t006Fixture struct {
+ 	srv      *Server
+ 	resolver *t006Resolver
+ 	pool     *workspace.ServicePool
++	// wsAuth is, in shared mode, every workspace's own (ServiceSet) auth
++	// service; see setAuth.
++	wsAuth *auth.Service
+ }
+ 
+ // t006Server builds a gateway serving ws-a and ws-b with the given
+@@ -131,13 +134,37 @@ func t006Server(t *testing.T, trusted map[string][]string, shared, receivePack b
+ 		resolver: resolver,
+ 	}
+ 	if shared {
+-		f.pool = workspace.NewServicePool(context.Background(), resolver, workspace.PoolConfig{IdleCheckInterval: -1})
++		f.pool = workspace.NewServicePool(context.Background(), resolver, workspace.PoolConfig{
++			IdleCheckInterval: -1,
++			// Each workspace authenticates against its own ServiceSet's
++			// auth service, as in spine serve: shared mode never falls
++			// back to the process-level one (INIT-024 TASK-007).
++			Builder: func(_ context.Context, ss *workspace.ServiceSet) error {
++				ss.Auth = f.wsAuth
++				return nil
++			},
++		})
+ 		t.Cleanup(f.pool.Close)
+ 		f.srv.servicePool = f.pool
+ 	}
+ 	return f
+ }
+ 
++// setAuth installs the auth service a test's bearers validate against:
++// the server's own in single mode; in shared mode every workspace's
++// ServiceSet's, which is what spine serve checks a /git bearer against
++// (built ServiceSets are evicted so the next request picks it up).
++func (f *t006Fixture) setAuth(authSvc *auth.Service) {
++	if f.pool == nil {
++		f.srv.auth = authSvc
++		return
++	}
++	f.wsAuth = authSvc
++	for id := range f.resolver.cfgs {
++		f.pool.Evict(id)
++	}
++}
++
+ // do routes target through the real /git routes (chi, as mounted by the
+ // gateway) from remoteAddr, with headers as name, value pairs.
+ func (f *t006Fixture) do(method, target, remoteAddr string, headers ...string) *httptest.ResponseRecorder {
+@@ -202,7 +229,7 @@ func TestHandleGit_TrustedCIDRScopedToWorkspace(t *testing.T) {
+ 			}
+ 			// A bearer still reads any workspace the token admits.
+ 			authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
+-			f.srv.auth = authSvc
++			f.setAuth(authSvc)
+ 			if w := f.do(http.MethodGet, "/git/ws-b/"+t006UploadInfoRefs, runnerA, "Authorization", "Bearer "+bearer); w.Code != http.StatusOK {
+ 				t.Errorf("ws-a's runner with a bearer, ws-b: status %d; want 200", w.Code)
+ 			}
+@@ -297,7 +324,7 @@ func TestHandleGit_PushNeverTakesWorkspaceBypass(t *testing.T) {
+ 	}
+ 	// With a bearer the push advertisement is served.
+ 	authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
+-	f.srv.auth = authSvc
++	f.setAuth(authSvc)
+ 	if w := f.do(http.MethodGet, "/git/ws-a/info/refs?service=git-receive-pack", runnerA, "Authorization", "Bearer "+bearer); w.Code != http.StatusOK ||
+ 		w.Header().Get("Content-Type") != t015ReceivePackAdvertisement {
+ 		t.Errorf("ws-a's runner with a bearer, push advertisement: status %d (%s); want 200 %s", w.Code, w.Header().Get("Content-Type"), t015ReceivePackAdvertisement)
+@@ -306,7 +333,7 @@ func TestHandleGit_PushNeverTakesWorkspaceBypass(t *testing.T) {
+ 	// With receive-pack off a token-less push from the bound runner is
+ 	// the uniform 401; with a bearer it is the 403 naming the flag.
+ 	off := t006Server(t, t006Bindings, true, false)
+-	off.srv.auth = authSvc
++	off.setAuth(authSvc)
+ 	if w := off.do(http.MethodGet, "/git/ws-a/info/refs?service=git-receive-pack", runnerA); w.Code != http.StatusUnauthorized {
+ 		t.Errorf("ws-a's runner, push off, no token: status %d %q; want 401", w.Code, w.Body.String())
+ 	}
+@@ -482,7 +509,7 @@ func TestHandleGit_InvalidBearerIsNoWorkspaceOracle(t *testing.T) {
+ 	for _, shared := range []bool{true, false} {
+ 		f := t006Server(t, t006Bindings, shared, false)
+ 		authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
+-		f.srv.auth = authSvc
++		f.setAuth(authSvc)
+ 		for _, peer := range []string{t006Outsider, t006RunnerA} {
+ 			for _, h := range []string{"Bearer junk", "Basic eDp5", "Bearer ", "bearer", "Token " + bearer} {
+ 				ref := f.do(http.MethodGet, "/git/ws-missing/"+t006UploadInfoRefs, peer+":40000", "Authorization", h)
+```
+
+### Review round 1 (2026-10-25; 1 P2, 6 P3; rulings by the coordinator)
+
+Head after the round: `9bf1e072` + this notes commit. Commits: `26889778` (finding 2), `160573e8`
+(finding 4), `f2e729d1` (findings 3, 5, 6, 7), `9bf1e072` (finding 1's comment). Deviations 1 and
+2 (AC 3's 500 → the uniform 401; AC 2 literal for a well-formed junk bearer) stand as documented;
+OQ1–OQ3 stay pending the owner.
+
+1. **P2 — TASK-006's tests after the merge.** Trial merge of TASK-006 `96dcea55` into `f2e729d1`
+   in a throwaway detached worktree under scratch (removed afterwards; no branch created or
+   touched): conflicts only in `handlers_git.go` (keep both functions) and `CHANGELOG.md` (stack
+   both entries); builds and vets. Without the fixture change, `go test ./service/internal/gateway/...`
+   fails three TASK-006 tests (`merge-gw-before.log`), all because the shared fixture sets
+   `f.srv.auth` on a pooled server. With the change above (each shared fixture's ServiceSets get
+   the auth service through the pool Builder, `setAuth` in place of the four `f.srv.auth =`
+   lines), the package is green under `-race` (`merge-gw-after.log`), both legs of
+   `TestHandleGit_InvalidBearerIsNoWorkspaceOracle` pass, `go test ./service/... ./core/evidence/`
+   is green (`merge-service-unit.log`), and the scenario-git-http job on the merge passes every
+   step with 0 skips (`TestGitHTTP_*` 90, `TestBootstrapInternalAdmin_*` 26, `TestWorkflowLifecycle_*`
+   130; `ci-merge.out`). The exact diff is in the Reconciliation section; the note's "the two
+   compose" claim is corrected there and in `validatePooledGitAuth`'s comment (`9bf1e072`).
+2. **P3 — connection-string leak at the source.** `BuildPgxpoolConfig` maps pgx's parse error
+   (`*pgconn.ParseConfigError`, which quotes the URL and masks only a userinfo password) to
+   `workspace.ErrInvalidDatabaseURL` plus the reason; `NewWorkspaceDBPool` masks the string's
+   credentials (userinfo, `password=`/`sslpassword=` in URL or key=value form, the string itself)
+   in open and ping errors (`connStringFreeError`). Tests (`dbpool_credentials_test.go`): seven
+   unparsable strings (bad sslmode with a userinfo or query password, bad connect_timeout with a
+   query password or sslpassword, key=value forms, a bad pool option) → no password, no host, the
+   reason kept; an unreachable but parsable string → the connect error carries no password;
+   **the review's case end to end** — db-mode configs with those URLs through a real
+   `ServicePool`: no `pool.Get` error and no `MultiProjectionSync` log line carries a password.
+   **Red at the base** (`red-r1-dsn-base.log`): every case leaks (`password=TOPSECRET-A2` in the
+   Get error, the URL with the host everywhere). The gateway's `describePreauthErr` stays as
+   defense in depth.
+3. **P3 — KNOWN-LIMITATIONS "Pre-authentication builds" corrected**: `Get`/`Release` refresh
+   last access, so one junk bearer per workspace per idle timeout keeps it built; a first build
+   opens the pool, sweeps secrets, seeds the bootstrap `smp-admin` rows and starts event
+   delivery; `db` mode's projection sync builds every active workspace anyway. A per-workspace
+   build rate limit or negative cache is recorded there as a **follow-up** (not in this task).
+4. **P3 — bearer shape before Resolve.** `workspaceMiddleware`, in shared mode, answers
+   `writeUniformUnauthorized` for a request without a well-formed bearer before Resolve. Every
+   route behind it is behind `authMiddleware`, whose shared path answered exactly that 401, so no
+   response changes; only the resolution (registry query, platform binding fetch, secret
+   dereference) is saved. **Routes that take no bearer and are unchanged** (they do not pass
+   through this middleware): `GET /api/v1/system/health`; the operator routes (`/api/v1/workspaces`,
+   `/api/v1/workspaces/{id}`, `.../deactivate`, `/api/v1/platform/metrics`; operator token);
+   `POST /internal/v1/workspaces/{id}/binding-invalidate` (its own bearer); and `/git/...`, which
+   must resolve before its gate because trusted-CIDR and development reads are token-less — a
+   residual now in KNOWN-LIMITATIONS ("`/git` still resolves before its gate"). No bearer-less
+   route made the change unsafe. Test: `TestWorkspaceMiddleware_PlatformBindingNoFetchWithoutBearer`
+   — a real `PlatformBindingProvider` against a counting platform server, as `spine serve` wires
+   platform-binding mode; seven malformed headers × five workspace states (bound, missing,
+   platform 500, invalid id, no header) × three routes → **0 binding fetches**, one byte-identical
+   401; a well-formed junk bearer still resolves and gets the same body. **Red at the base**
+   (`red-r1-resolve-base.log`): 63 fetches.
+5. **P3 — docs true at this head.** `security-model.md` and the CHANGELOG now say that on `/git`
+   every failure of a well-formed bearer is uniform here, and that the missing/malformed-header
+   and push-off cases are made uniform by TASK-006; the Reconciliation section tells the
+   integrator to drop that qualifier once both are merged.
+6. **P3 — `api/spec.yaml`**: `verified` = read from the authoritative branch = passed the
+   governed merge (§6.4.5); author-written evidence on a completed run shows `true`.
+7. **P3 — `docs/operator-runbook.md`** gains the `SPINE_ENV` startup-refusal row; the CHANGELOG
+   gains "Upgrade note: set `SPINE_ENV` before upgrading" (and what a formerly-unset production
+   deployment must meet once it sets `production`).
+
+**Gates at `9bf1e072`:** `go build ./...`; `go vet` plain, `-tags integration`, `-tags scenario`;
+`./dev/lint-boundaries.sh`; `go test -p 4 ./...` (40 packages ok; `r1-gate-go.log`); `-race` on
+workspace, gateway and cmd/spine; `make build` and the embed smoketest; the scenario-git-http job
+on the branch (every step, 0 skips: `TestGitHTTP_*` 87, `TestBootstrapInternalAdmin_*` 26,
+`TestWorkflowLifecycle_*` 130, the rest as before; `ci-br2.out`); git-floor in
+`golang:1.26-bookworm` (git 2.39.5) both steps plus this task's tests (`gitfloor/out-r1.log`);
+golangci-lint on the touched packages, `service/internal/workspace` included, 0 new issues (149
+vs 151 at the base), gosec 0/0; gofmt clean. **SMP gate re-run** (the workspace pool changed, though
+`service/internal/...` is not importable by SMP): build and four vets clean; race identical to
+before (only the two by-design gitread contract tests, proven at the base); testgate runtime 2143
+passed / 3 allowed skips, githttp 588 / 1; no ws_* database or role leaked.
+
+**Codex** (`codex review --base init/INIT-024-scaffold`, plain, model `gpt-6.1-sol` confirmed in
+the review sub-session JSONL): review-cycle round 1 at `9bf1e072`, session
+`01a16ae1-2908-7251-8f7d-9789eac64102`, no findings ("patch is correct").
+
+**Not run:** SMP's full Platform-DB testgate suites; GitHub CI (nothing pushed).
