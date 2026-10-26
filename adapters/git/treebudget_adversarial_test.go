@@ -570,3 +570,61 @@ func TestTreeBudget_TreeObjectOverTheAllocLimitSaysWhatItIs(t *testing.T) {
 		t.Fatalf("message: %v", err)
 	}
 }
+
+// TestTreeBudget_MacrosAreExpandedOnceAndFully (codex review after round
+// 1, P1 x2): a self-referencing macro that fans out 20 ways costs linear
+// work (it used to be ~20^8 visits, unbounded by any timeout), and a macro
+// chain of any length is followed to its end (a 12-macro chain ending in
+// `ident` used to be cut at depth 8 and measured at 1x).
+func TestTreeBudget_MacrosAreExpandedOnceAndFully(t *testing.T) {
+	loop := "[attr]loop" + strings.Repeat(" loop", 20) + "\n*.md loop\n"
+	done := make(chan float64, 1)
+	go func() { done <- git.AttributeExpansionForTest(loop, 40) }()
+	select {
+	case f := <-done:
+		if f != 1 {
+			t.Fatalf("fan-out loop: factor %v, want 1", f)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a fan-out macro loop did not finish in 5 s")
+	}
+	var chain strings.Builder
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(&chain, "[attr]m%d m%d\n", i, i+1)
+	}
+	chain.WriteString("[attr]m12 ident\n*.md m0\n")
+	if f := git.AttributeExpansionForTest(chain.String(), 40); f != 47.0/4 {
+		t.Fatalf("12-macro chain to ident: factor %v, want 11.75", f)
+	}
+	var fchain strings.Builder
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(&fchain, "[attr]f%d f%d\n", i, i+1)
+	}
+	fchain.WriteString("[attr]f12 filter=huge\n* f0\n")
+	if got := git.AttributeFiltersForTest(fchain.String()); len(got) != 1 || got[0] != "huge" {
+		t.Fatalf("12-macro chain to a filter: %v", got)
+	}
+}
+
+// TestTreeBudget_UnscannedAttributesWithAFilterDriverAreRefused (codex
+// review after round 1, P1): attributes past the scan's cap could name any
+// filter; when this host defines a smudge driver, the worst-case factor is
+// no bound, so such a tree is refused at any limit.
+func TestTreeBudget_UnscannedAttributesWithAFilterDriverAreRefused(t *testing.T) {
+	ctx := context.Background()
+	repo, base, _, _ := tbRepo(t)
+	big := tbGit(t, repo, append([]byte("*.md filter=huge\n"), bytes.Repeat([]byte("# padding\n"), 110000)...), "hash-object", "-w", "--stdin")
+	file := tbGit(t, repo, []byte("p\n"), "hash-object", "-w", "--stdin")
+	tree := tbGit(t, repo, []byte("100644 blob "+big+"\t.gitattributes\n100644 blob "+file+"\ta.md\n"), "mktree")
+	commit := tbGit(t, repo, nil, "commit-tree", tree, "-p", base, "-m", "padded")
+	st, err := git.MeasureTree(ctx, git.NewCLIClient(repo), commit)
+	if err != nil || st.Expansion != git.WorstAttributeExpansionForTest(40) {
+		t.Fatalf("no driver configured: %+v, %v", st, err)
+	}
+	tbGit(t, repo, nil, "config", "filter.huge.smudge", "cat")
+	err = (git.TreeBudget{}).Check(ctx, git.NewCLIClient(repo), commit)
+	tl := requireTreeTooLarge(t, err, git.TreeLimitTotalBytes)
+	if !math.IsInf(tl.Expansion, 1) || !strings.Contains(err.Error(), "smudge filter drivers") {
+		t.Fatalf("refusal: %v", err)
+	}
+}

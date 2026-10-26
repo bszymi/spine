@@ -20,9 +20,12 @@ package git
 //     "!name" (unspecified) or "name=value"; only a SET attribute can
 //     expand content, so unset and unspecified ones are ignored;
 //   - "[attr]name attrs..." defines a macro; a set macro name on a pattern
-//     line expands to its attributes (recursively, bounded), with the
-//     built-in macro `binary` (-diff -merge -text) predefined; a macro
-//     defined in more than one file expands to every definition;
+//     line expands to its attributes, transitively, with the built-in
+//     macro `binary` (-diff -merge -text) predefined; a macro defined in
+//     more than one file expands to every definition. Each macro is
+//     expanded at most once per scan (a worklist, no depth limit), so a
+//     chain of any length is followed to its end and a self-referencing or
+//     fan-out macro costs linear work, not exponential (codex review);
 //   - which paths a pattern matches is NOT evaluated: an expanding
 //     attribute set by any line counts for the whole tree. That is the
 //     conservative direction — the factor can only be too high — and it
@@ -64,9 +67,6 @@ const (
 	attrAll = attrCRLF | attrIdent | attrEncoding
 
 	encodingFactor = 8
-
-	// maxMacroDepth bounds macro expansion (a macro naming a macro ...).
-	maxMacroDepth = 8
 )
 
 // identFactor is ident's expansion for object ids of hexLen hex digits.
@@ -175,12 +175,17 @@ func quotedEnd(line []byte) int {
 }
 
 // evaluate returns the classes some line sets and the filter drivers some
-// line names.
+// line names. It is a worklist over attribute lists: a pattern line's
+// list, and each macro's definitions the first time the macro is set, so
+// the work is linear in the attribute text however macros nest or repeat.
 func (s *attrSet) evaluate() (attrClass, []string) {
 	var classes attrClass
 	filters := map[string]bool{}
-	var visit func(attrs []string, depth int)
-	visit = func(attrs []string, depth int) {
+	expanded := map[string]bool{}
+	work := append([][]string{}, s.lines...)
+	for len(work) > 0 {
+		attrs := work[len(work)-1]
+		work = work[:len(work)-1]
 		for _, a := range attrs {
 			if a == "" || a[0] == '-' || a[0] == '!' {
 				continue // unset or unspecified: expands nothing
@@ -212,16 +217,12 @@ func (s *attrSet) evaluate() (attrClass, []string) {
 					filters[value] = true
 				}
 			default:
-				if !hasValue && depth < maxMacroDepth {
-					for _, def := range s.macros[name] {
-						visit(def, depth+1)
-					}
+				if !hasValue && !expanded[name] {
+					expanded[name] = true
+					work = append(work, s.macros[name]...)
 				}
 			}
 		}
-	}
-	for _, attrs := range s.lines {
-		visit(attrs, 0)
 	}
 	names := make([]string, 0, len(filters))
 	for n := range filters {
@@ -239,6 +240,17 @@ var errMalformedBatch = errors.New("malformed `git cat-file --batch` output")
 func (c *CLIClient) scanAttributes(ctx context.Context, st *TreeStats, oids []string, worst string) error {
 	st.Expansion, st.ExpansionReason = 1, ""
 	if worst != "" {
+		// Unscanned attributes may name any filter (codex review): the
+		// worst case is only finite when this host defines no driver.
+		drivers, err := c.filterDrivers(ctx)
+		if err != nil {
+			return err
+		}
+		if len(drivers) > 0 {
+			st.Expansion = math.Inf(1)
+			st.ExpansionReason = worst + ", and this host's git config defines smudge filter drivers they could name"
+			return nil
+		}
 		st.Expansion = attrAll.factor(st.hexLen)
 		st.ExpansionReason = worst + "; the worst case is assumed (" + attrAll.describe(st.hexLen) + ")"
 		return nil
