@@ -50,8 +50,9 @@ gap more than a security finding (INIT-024 owner question 5). Standalone only: S
   context (the services it starts live as long as the set), so a workspace database that accepts
   the connection and never answers held every request, scan and projection sync of that workspace
   indefinitely. After 2 minutes (`PoolConfig.InitTimeout`) every caller waiting on the build gets
-  `ErrWorkspaceUnavailable` (503) and the next one builds afresh; the abandoned build's result is
-  closed when it returns.
+  `ErrWorkspaceUnavailable` (503), and so does every caller until the abandoned build returns (no
+  second build of the workspace starts beside it); then its result is closed and the next caller
+  builds afresh.
 - In `platform-binding` mode the scheduler lists workspaces from the provider's cache keys
   (`ListIDs`), reading no secret; each scan's resolve still reads the binding's secrets
   (`KNOWN-LIMITATIONS.md`, item 9).

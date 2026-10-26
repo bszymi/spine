@@ -1427,8 +1427,12 @@ What that implies, and what it leaves open:
      workspace's services is not bounded by the scan either (the build runs on the pool's lifetime
      context, which the services it starts need): the pool gives up on a build after 2 minutes
      (`PoolConfig.InitTimeout`) for every caller waiting on it — the scan, requests, the projection
-     sync — with `ErrWorkspaceUnavailable`, and the next caller builds afresh; the abandoned build
-     keeps running in the background until it returns, and its result is closed. An attempt cut by the
+     sync — with `ErrWorkspaceUnavailable`. Until the abandoned build returns, every request and scan
+     of that workspace fails at once the same way: no second build starts beside it (a late build
+     registers its database pool over the replacement's). When it returns, what it built is closed
+     and the next caller builds afresh. A build that never returns (a connection the operating system
+     never times out) keeps the workspace unavailable until the process restarts — no longer hung,
+     but not served. An attempt cut by the
      deadline records nothing — its outcome write uses the expired context — so, like a lock wait cut
      short (item 8), it does not count against the merge retry budget: a code repository whose remote
      never answers keeps its run in `committing`, retried on later ticks, each attempt held up to the

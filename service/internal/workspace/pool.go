@@ -163,6 +163,16 @@ type poolEntry struct {
 	readyClosed bool
 	initErr     error
 
+	// abandoned marks an entry whose build outlived InitTimeout (INIT-024
+	// TASK-008). It stays in p.entries, with initErr set and ready closed,
+	// until the build returns: every Get fails at once with initErr, and
+	// neither Evict nor EvictIdle removes it, so no second build of the
+	// workspace starts beside the abandoned one (a late build's
+	// NewWorkspaceDBPool would register its database pool over, and so
+	// close, the replacement's). finishAbandoned closes the late result,
+	// then removes the entry.
+	abandoned bool
+
 	// gone signals removal of this entry from p.entries. Closed exactly
 	// once by removeLocked. A concurrent Get observing an evicting entry
 	// waits on this channel so it can start a fresh initialization only
@@ -296,10 +306,12 @@ type PoolConfig struct {
 	// is bounded by the caller: a database that accepts the connection
 	// and never answers held every Get of the workspace — a request, the
 	// scheduler's scan, the projection sync — for good. Past the timeout
-	// the entry fails with an error wrapping ErrWorkspaceUnavailable and
-	// is removed, so the next Get starts afresh; the abandoned build keeps
-	// running in the background and whatever it returns is closed
-	// ("init-error"). 0 means DefaultInitTimeout.
+	// the initiator and every waiter get an error wrapping
+	// ErrWorkspaceUnavailable, and so does every Get of the workspace
+	// until the abandoned build returns: no second build starts beside
+	// it. When it returns, whatever it built is closed ("init-error") and
+	// only then is the entry removed, so the next Get builds afresh.
+	// 0 means DefaultInitTimeout.
 	InitTimeout time.Duration
 }
 
@@ -480,6 +492,14 @@ func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet,
 				return p.initializeEntry(ctx, canonicalID, *cfg, newEntry)
 			}
 
+			if entry.abandoned {
+				// Its build outlived InitTimeout and is still running:
+				// fail at once rather than start a second build beside it.
+				err := entry.initErr
+				p.mu.Unlock()
+				return nil, err
+			}
+
 			if entry.evicting {
 				// Entry is being phased out. Wait until it is fully removed
 				// from the map before starting a fresh initialization —
@@ -570,7 +590,7 @@ func (p *ServicePool) removeLocked(id string, entry *poolEntry) {
 // inserted the entry into p.entries with refCount=1 before releasing the
 // mutex.
 func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, cfg Config, entry *poolEntry) (*ServiceSet, error) {
-	ss, buildErr := p.buildWithTimeout(ctx, canonicalID, cfg)
+	ss, late, buildErr := p.buildWithTimeout(ctx, canonicalID, cfg)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -581,6 +601,9 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 		if ss != nil {
 			ss.close("shutdown")
 		}
+		if late != nil {
+			go closeLateBuild(late)
+		}
 		closedErr := fmt.Errorf("service pool is closed")
 		// Close may already have set initErr and signaled waiters; the
 		// helpers below are idempotent either way.
@@ -589,6 +612,19 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 		}
 		p.removeLocked(canonicalID, entry)
 		publishReadyLocked(entry)
+		return nil, entry.initErr
+	}
+
+	if late != nil {
+		// The build outlived InitTimeout: the entry stays, failing every
+		// Get, until the build returns (poolEntry.abandoned).
+		entry.abandoned = true
+		// The initiator's reference goes with its error: no caller holds
+		// an abandoned entry.
+		entry.refCount = 0
+		entry.initErr = fmt.Errorf("init workspace %q services: %w", canonicalID, buildErr)
+		publishReadyLocked(entry)
+		go p.finishAbandoned(canonicalID, entry, late)
 		return nil, entry.initErr
 	}
 
@@ -611,41 +647,60 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 	return ss, nil
 }
 
+// builtSet is one buildServiceSet result.
+type builtSet struct {
+	ss  *ServiceSet
+	err error
+}
+
 // buildWithTimeout runs buildServiceSet on the pool-lifetime context and
 // waits for it at most InitTimeout (see PoolConfig.InitTimeout). A build
 // that outlives the wait is abandoned: the error returned wraps
-// ErrWorkspaceUnavailable, and the set the build returns later, if any,
-// is closed with reason "init-error".
-func (p *ServicePool) buildWithTimeout(ctx context.Context, canonicalID string, cfg Config) (*ServiceSet, error) {
+// ErrWorkspaceUnavailable and late, non-nil, delivers the build's result
+// when it returns; the caller must drain it (finishAbandoned,
+// closeLateBuild).
+func (p *ServicePool) buildWithTimeout(ctx context.Context, canonicalID string, cfg Config) (*ServiceSet, <-chan builtSet, error) {
 	timeout := p.initTimeout
 	if timeout <= 0 {
 		timeout = DefaultInitTimeout
 	}
-	type built struct {
-		ss  *ServiceSet
-		err error
-	}
-	done := make(chan built, 1)
+	done := make(chan builtSet, 1)
 	go func() {
 		ss, err := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretEnvelopeMode, p.secretClient, p.dbPolicy, p.codeRepoBase)
-		done <- built{ss, err}
+		done <- builtSet{ss, err}
 	}()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case b := <-done:
-		return b.ss, b.err
+		return b.ss, nil, b.err
 	case <-timer.C:
 	}
-	observe.Logger(ctx).Error("workspace service set initialization timed out; abandoned, the next request builds it afresh",
+	observe.Logger(ctx).Error("workspace service set initialization timed out; the workspace is unavailable until the abandoned build returns",
 		"workspace_id", canonicalID, "init_timeout", timeout)
-	go func() {
-		if late := <-done; late.ss != nil {
-			late.ss.close("init-error")
-		}
-	}()
-	return nil, fmt.Errorf("%w: initialization of workspace %q services did not finish within %s",
+	return nil, done, fmt.Errorf("%w: initialization of workspace %q services did not finish within %s; unavailable until it returns",
 		ErrWorkspaceUnavailable, canonicalID, timeout)
+}
+
+// finishAbandoned waits for an abandoned build (poolEntry.abandoned),
+// closes whatever it built — its database pool is unregistered before any
+// replacement can register one — and only then removes the entry, so the
+// next Get builds afresh. A pool closed meanwhile has removed the entry
+// already; removeLocked is then a no-op.
+func (p *ServicePool) finishAbandoned(canonicalID string, entry *poolEntry, late <-chan builtSet) {
+	closeLateBuild(late)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.removeLocked(canonicalID, entry)
+	observe.Logger(p.ctx).Info("abandoned workspace service set build returned and was closed",
+		"workspace_id", canonicalID)
+}
+
+// closeLateBuild waits for an abandoned build and closes what it built.
+func closeLateBuild(late <-chan builtSet) {
+	if b := <-late; b.ss != nil {
+		b.ss.close("init-error")
+	}
 }
 
 // Release decrements the reference count for a workspace service set.
@@ -698,6 +753,12 @@ func (p *ServicePool) Evict(workspaceID string) {
 		p.evictGen[workspaceID]++
 	}
 	if entry, ok := p.entries[workspaceID]; ok {
+		if entry.abandoned {
+			// Its build is still running; finishAbandoned closes what it
+			// builds and removes the entry. Removing it here would let a
+			// second build start beside it.
+			return
+		}
 		if entry.refCount > 0 {
 			// Mark for deferred close — Release will handle cleanup.
 			entry.evicting = true
@@ -750,6 +811,9 @@ func (p *ServicePool) EvictIdle() {
 
 	now := time.Now()
 	for id, entry := range p.entries {
+		if entry.abandoned {
+			continue // finishAbandoned removes it
+		}
 		if entry.refCount == 0 && now.Sub(entry.lastAccess) > p.idleTimeout {
 			if entry.services != nil {
 				entry.services.close("idle")

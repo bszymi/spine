@@ -830,11 +830,13 @@ func TestServe_PlatformBindingModeBuildsMultiScheduler(t *testing.T) {
 	}
 }
 
-// Codex review round 3 (P2): a cold workspace whose services never finish
-// building (the build runs on the pool-lifetime context, beyond the scan's
-// deadline) no longer keeps the scheduler's scan, and so the workspace,
-// claimed for good: the pool gives up after its InitTimeout, the scan ends
-// without a reference, and the next tick builds and scans the workspace.
+// Codex review rounds 3 and 4: a cold workspace whose services never
+// finish building (the build runs on the pool-lifetime context, beyond the
+// scan's deadline) no longer keeps the scheduler's scan, and so the
+// workspace, claimed for good: the pool gives up after its InitTimeout and
+// the scan ends without a reference; while the abandoned build runs, later
+// ticks fail fast for the workspace (no second build beside it); once it
+// returns, the next tick builds and scans the workspace.
 func TestMultiScheduler_HungWorkspaceBuildDoesNotWedgeTheScan(t *testing.T) {
 	clearSchedulerEnv(t)
 	release := make(chan struct{})
@@ -865,23 +867,35 @@ func TestMultiScheduler_HungWorkspaceBuildDoesNotWedgeTheScan(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	ms := scheduler.NewMultiScheduler(&schedulerWorkspacePool{pool: pool}, schedulerWorkspaceResolver{resolver: res},
 		scheduler.MultiSchedulerConfig{TickWait: 5 * time.Second, ScanDeadline: time.Minute})
-	start := time.Now()
-	ms.ScanTimeouts(context.Background())
-	if took := time.Since(start); took > 4*time.Second {
-		t.Fatalf("the tick waited %s on the hung build, want about the pool's InitTimeout", took)
+	for tick := 1; tick <= 2; tick++ { // the build times out, then the abandoned build still runs
+		start := time.Now()
+		ms.ScanTimeouts(context.Background())
+		if took := time.Since(start); took > 4*time.Second {
+			t.Fatalf("tick %d waited %s on the hung build, want about the pool's InitTimeout or less", tick, took)
+		}
+		if n := pool.RefCount("ws-a"); n != 0 {
+			t.Fatalf("tick %d: ws-a holds %d references, want 0", tick, n)
+		}
 	}
-	if n := pool.RefCount("ws-a"); n != 0 {
-		t.Fatalf("ws-a holds %d references after its build timed out, want 0", n)
+	mu.Lock()
+	if builds != 1 {
+		t.Fatalf("builds = %d while the first still runs, want 1", builds)
 	}
-	if st.runStatusForTest() == domain.RunStatusCancelled {
-		t.Fatal("ws-a was scanned although its build never finished")
+	mu.Unlock()
+	releaseOnce.Do(func() { close(release) })
+	deadline := time.Now().Add(5 * time.Second)
+	for pool.ActiveCount() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the abandoned build was not drained")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	ms.ScanTimeouts(context.Background())
 	if got := st.runStatusForTest(); got != domain.RunStatusCancelled {
-		t.Fatalf("the next tick did not build and scan ws-a: run %s, want cancelled", got)
+		t.Fatalf("the tick after the abandoned build drained did not build and scan ws-a: run %s, want cancelled", got)
 	}
 	if n := pool.RefCount("ws-a"); n != 0 {
-		t.Fatalf("ws-a refcount %d after the second tick, want 0", n)
+		t.Fatalf("ws-a refcount %d after the scan, want 0", n)
 	}
 }
 
