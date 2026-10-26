@@ -143,14 +143,13 @@ func (s *attrSet) add(text []byte) {
 		if len(line) == 0 || line[0] == '#' {
 			continue
 		}
+		// The pattern: a C-quoted string, or — as git falls back to when
+		// the quote does not close — everything up to the first blank
+		// (git's blanks are space, tab, CR and LF).
 		var pattern, rest []byte
-		if line[0] == '"' {
-			end := quotedEnd(line)
-			if end < 0 {
-				continue // an unterminated quoted pattern: git drops the line
-			}
+		if end := quotedEnd(line); line[0] == '"' && end >= 0 {
 			pattern, rest = line[:end+1], line[end+1:]
-		} else if i := bytes.IndexAny(line, " \t"); i >= 0 {
+		} else if i := bytes.IndexAny(line, " \t\r"); i >= 0 {
 			pattern, rest = line[:i], line[i:]
 		} else {
 			pattern = line
@@ -169,8 +168,11 @@ func (s *attrSet) add(text []byte) {
 }
 
 // quotedEnd returns the index of the quote that closes the C-quoted
-// string line starts with, or -1.
+// string line starts with, or -1 (also when line does not start with one).
 func quotedEnd(line []byte) int {
+	if len(line) == 0 || line[0] != '"' {
+		return -1
+	}
 	for i := 1; i < len(line); i++ {
 		switch line[i] {
 		case '\\':
@@ -199,6 +201,14 @@ func (s *attrSet) evaluate() (attrClass, []string) {
 				continue // unset or unspecified: expands nothing
 			}
 			name, value, hasValue := strings.Cut(a, "=")
+			// A macro may carry any name, a built-in one included
+			// (`[attr]text ident`), and git expands it as well as applying
+			// the built-in meaning (codex review): every set name with a
+			// definition is expanded, whatever it also means.
+			if defs, ok := s.macros[name]; ok && !expanded[name] {
+				expanded[name] = true
+				work = append(work, defs...)
+			}
 			switch name {
 			case "text":
 				if !hasValue || value == "auto" {
@@ -223,11 +233,6 @@ func (s *attrSet) evaluate() (attrClass, []string) {
 			case "filter":
 				if hasValue && value != "" {
 					filters[value] = true
-				}
-			default:
-				if !hasValue && !expanded[name] {
-					expanded[name] = true
-					work = append(work, s.macros[name]...)
 				}
 			}
 		}

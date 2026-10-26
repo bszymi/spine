@@ -49,6 +49,7 @@ func TestTreeBudget_AttributeExpansionIsCounted(t *testing.T) {
 		{"ident", "* ident\n", true},
 		{"macro", "[attr]stamp ident\n*.md stamp\n", true},
 		{"nul-terminated", "* ident\x00hidden\n", true},
+		{"built-in-named macro", "[attr]text ident\n* text\n", true},
 		{"encoding", "*.md working-tree-encoding=UTF-32\n", true},
 		{"eol only (2x fits)", "* text eol=crlf\n", false},
 		{"no expanding attribute", "*.png binary\n", false},
@@ -195,6 +196,11 @@ func TestTreeBudget_AttributeParsing(t *testing.T) {
 		{"* ident\x00hidden\n", ident},       // a NUL ends the line, as in git (codex review)
 		{"*.x binary\x00\n* ident\n", ident}, // and the next line is still read
 		{"* text\x00 ident\n", 2},
+		{"[attr]text ident\n* text\n", 2 * ident},  // a macro named like a built-in (codex review)
+		{"[attr]ident filter=x\n* ident\n", ident}, // its filter is found too (below)
+		{"*\rident\n", ident},                      // CR is a blank between pattern and attributes
+		{"\"unterminated ident\n", ident},          // an unclosed quote falls back to a blank split
+		{"\"a b\" -ident\n", 1},
 	} {
 		if got := git.AttributeExpansionForTest(tc.text, 40); got != tc.want {
 			t.Errorf("%q: factor %v, want %v", tc.text, got, tc.want)
@@ -202,6 +208,9 @@ func TestTreeBudget_AttributeParsing(t *testing.T) {
 	}
 	if got := git.AttributeFiltersForTest("* filter=lfs\n*.x -filter\n"); len(got) != 1 || got[0] != "lfs" {
 		t.Errorf("filters = %v, want [lfs]", got)
+	}
+	if got := git.AttributeFiltersForTest("[attr]text filter=x\n* text\n"); len(got) != 1 || got[0] != "x" {
+		t.Errorf("a filter behind a built-in-named macro: %v, want [x]", got)
 	}
 }
 
