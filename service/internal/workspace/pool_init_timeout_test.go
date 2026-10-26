@@ -13,6 +13,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -171,4 +172,37 @@ func TestServicePool_AbandonedEntryHoldsNoReference(t *testing.T) {
 	if n := pool.RefCount("ws-slow"); n != 0 {
 		t.Fatalf("abandoned entry refcount = %d, want 0", n)
 	}
+}
+
+// Codex review round 5: the build runs in its own goroutine, out of reach
+// of the caller's recovery, so a panic in it (here the builder hook) is
+// recovered and returned as an initialization error instead of ending the
+// process; the entry is removed and the next Get builds again.
+func TestServicePool_BuildPanicIsAnInitializationError(t *testing.T) {
+	var builds atomic.Int32
+	res := &multiConfigResolver{configs: map[string]Config{"ws-p": {ID: "ws-p", RepoPath: t.TempDir(), Status: StatusActive}}}
+	pool := NewServicePool(context.Background(), res, PoolConfig{
+		IdleCheckInterval: -1,
+		Builder: func(context.Context, *ServiceSet) error {
+			if builds.Add(1) == 1 {
+				panic("builder hook failed")
+			}
+			return nil
+		},
+	})
+	t.Cleanup(pool.Close)
+	_, err := pool.Get(context.Background(), "ws-p")
+	if !errors.Is(err, ErrWorkspaceUnavailable) {
+		t.Fatalf("Get whose build panicked = %v, want ErrWorkspaceUnavailable", err)
+	}
+	if strings.Contains(err.Error(), "builder hook failed") {
+		t.Fatalf("the panic value reached the error: %v", err)
+	}
+	if n := pool.ActiveCount(); n != 0 {
+		t.Fatalf("%d entries after the panicked build, want 0", n)
+	}
+	if _, err := pool.Get(context.Background(), "ws-p"); err != nil {
+		t.Fatalf("Get after the panicked build = %v, want a fresh build", err)
+	}
+	pool.Release("ws-p")
 }

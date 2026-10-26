@@ -39,9 +39,11 @@ type isoStore struct {
 	// blockUntilDone holds every step-timeout listing until its context
 	// ends, like a git command waiting on a remote that never answers.
 	blockUntilDone bool
-	scans          atomic.Int32
-	active         atomic.Int32 // step-timeout listings in progress
-	peak           atomic.Int32
+	// scanDelay makes every step-timeout listing take this long.
+	scanDelay time.Duration
+	scans     atomic.Int32
+	active    atomic.Int32 // step-timeout listings in progress
+	peak      atomic.Int32
 }
 
 func (s *isoStore) ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error) {
@@ -63,6 +65,9 @@ func (s *isoStore) ListActiveStepExecutions(ctx context.Context) ([]domain.StepE
 	if s.blockUntilDone {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	if s.scanDelay > 0 {
+		time.Sleep(s.scanDelay)
 	}
 	return nil, nil
 }

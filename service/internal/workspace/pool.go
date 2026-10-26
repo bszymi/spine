@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -666,6 +667,22 @@ func (p *ServicePool) buildWithTimeout(ctx context.Context, canonicalID string, 
 	}
 	done := make(chan builtSet, 1)
 	go func() {
+		// The build runs in its own goroutine, out of reach of the
+		// caller's recovery (net/http's per request, MultiScheduler's per
+		// scan): a panic in it — the builder hook included — would end the
+		// process every tenant shares (codex review round 5). It is
+		// recovered here, logged with its stack, and delivered as a build
+		// error; the services built before the panic are not closed (their
+		// closers are local to buildServiceSet).
+		defer func() {
+			if r := recover(); r != nil {
+				observe.Logger(ctx).Error("workspace service set build panicked; recovered as an initialization error",
+					"workspace_id", canonicalID, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+				// The panic value stays in the log: the error may reach a
+				// response.
+				done <- builtSet{err: fmt.Errorf("%w: building workspace %q services panicked", ErrWorkspaceUnavailable, canonicalID)}
+			}
+		}()
 		ss, err := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretEnvelopeMode, p.secretClient, p.dbPolicy, p.codeRepoBase)
 		done <- builtSet{ss, err}
 	}()

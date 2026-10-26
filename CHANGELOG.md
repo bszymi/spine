@@ -50,9 +50,11 @@ gap more than a security finding (INIT-024 owner question 5). Standalone only: S
   context (the services it starts live as long as the set), so a workspace database that accepts
   the connection and never answers held every request, scan and projection sync of that workspace
   indefinitely. After 2 minutes (`PoolConfig.InitTimeout`) every caller waiting on the build gets
-  `ErrWorkspaceUnavailable` (503), and so does every caller until the abandoned build returns (no
+  `ErrWorkspaceUnavailable` (a request answers the usual "failed to initialize workspace services"),
+  and so does every caller until the abandoned build returns (no
   second build of the workspace starts beside it); then its result is closed and the next caller
-  builds afresh.
+  builds afresh. The build now runs in its own goroutine; a panic in it (the builder hook included)
+  is recovered and returned as an initialization error, with its stack in the log.
 - In `platform-binding` mode the scheduler lists workspaces from the provider's cache keys
   (`ListIDs`), reading no secret; each scan's resolve still reads the binding's secrets
   (`KNOWN-LIMITATIONS.md`, item 9).
@@ -88,7 +90,8 @@ Review the active runs, their timeouts and the configured orphan threshold befor
     free, none of its scans ending — before it returns; the stalled scan keeps running and later
     ticks skip its workspace until it ends. A tick that keeps making progress is never cut short.
     A scan a tick stopped waiting for is not counted against a later tick's
-    `MaxConcurrentWorkspaces`.
+    `MaxConcurrentWorkspaces`, and the workspaces a stalled tick left undispatched come first in the
+    next tick of the same kind, so one that stalls every tick cannot starve those after it.
   - A workspace is scanned by one scan at a time: a tick skips (with a Warn) a workspace whose scan
     of any kind is still running, including a workspace the resolver lists twice.
   - A panic in a workspace's scan is recovered (Error log with `scan`, `workspace_id`, `panic` and

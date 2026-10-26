@@ -184,3 +184,43 @@ func TestMultiScheduler_ScanDeadlineEndsAnAbandonedScan(t *testing.T) {
 		t.Fatalf("no Error naming the cancelled scan:\n%s", out)
 	}
 }
+
+// Regression (codex review round 5; red at b5448ea7): with one slot, a
+// workspace first in the list whose scan outlasts TickWait, but ends
+// before the next tick, stalled every tick's dispatch, and every tick
+// started at the top of the list again, so the workspace after it was
+// never scanned. A stalled tick now leaves a cursor and the next tick of
+// the same kind starts with the workspaces it left undispatched.
+func TestMultiScheduler_StalledDispatchResumesWhereItStopped(t *testing.T) {
+	slow := &isoStore{scanDelay: 60 * time.Millisecond}
+	healthy := &isoStore{}
+	ms := NewMultiScheduler(&msPool{sets: map[string]ServiceSet{"a-slow": {Store: slow}, "b-healthy": {Store: healthy}}},
+		msResolver{ids: []string{"a-slow", "b-healthy"}},
+		MultiSchedulerConfig{MaxConcurrentWorkspaces: 1, TickWait: 20 * time.Millisecond})
+	idle := func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			ms.inflightMu.Lock()
+			busy := len(ms.inflight)
+			ms.inflightMu.Unlock()
+			if busy == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("a scan never ended")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	const ticks = 6
+	for i := 0; i < ticks; i++ {
+		ms.forEachWorkspace(context.Background(), "timeout-scan", timeoutTick)
+		idle() // as at the next tick of a real interval: every scan has ended
+	}
+	if n := healthy.scans.Load(); n < ticks/2 {
+		t.Fatalf("b-healthy scanned %d times in %d ticks behind a workspace that stalls each tick's dispatch; want at least every other tick", n, ticks)
+	}
+	if n := slow.scans.Load(); n < ticks/2 {
+		t.Fatalf("a-slow scanned %d times in %d ticks; want at least every other tick", n, ticks)
+	}
+}

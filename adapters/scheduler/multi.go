@@ -93,6 +93,13 @@ type MultiScheduler struct {
 	inflightMu sync.Mutex
 	inflight   map[string]struct{}
 
+	// cursors holds, per scan kind, the first workspace a stalled tick
+	// left undispatched: the next tick of that kind starts there, so a
+	// workspace early in the list that stalls every tick cannot starve
+	// the ones after it (codex review round 5).
+	cursorMu sync.Mutex
+	cursors  map[string]string
+
 	// resumes holds, per workspace, where each budgeted scan stopped.
 	resumeMu sync.Mutex
 	resumes  map[string]*scanResume
@@ -373,6 +380,41 @@ func (ms *MultiScheduler) stopped() bool {
 	}
 }
 
+// startAtCursor rotates workspaces so the tick starts with the workspace
+// the scan kind's last stalled tick left undispatched; unchanged when
+// there is none or it is no longer listed.
+func (ms *MultiScheduler) startAtCursor(scanName string, workspaces []WorkspaceRef) []WorkspaceRef {
+	ms.cursorMu.Lock()
+	from := ms.cursors[scanName]
+	ms.cursorMu.Unlock()
+	if from == "" {
+		return workspaces
+	}
+	for i, ws := range workspaces {
+		if ws.WorkspaceID() == from {
+			out := make([]WorkspaceRef, 0, len(workspaces))
+			out = append(out, workspaces[i:]...)
+			return append(out, workspaces[:i]...)
+		}
+	}
+	return workspaces
+}
+
+// setCursor records (or, with "", clears) where the scan kind's next tick
+// starts.
+func (ms *MultiScheduler) setCursor(scanName, wsID string) {
+	ms.cursorMu.Lock()
+	defer ms.cursorMu.Unlock()
+	if wsID == "" {
+		delete(ms.cursors, scanName)
+		return
+	}
+	if ms.cursors == nil {
+		ms.cursors = map[string]string{}
+	}
+	ms.cursors[scanName] = wsID
+}
+
 // claim marks wsID as having a scan running; false when it already has one.
 func (ms *MultiScheduler) claim(wsID string) bool {
 	ms.inflightMu.Lock()
@@ -434,8 +476,9 @@ func (t *tickPending) list() []string {
 // no scan of the tick ending, it stops waiting (the tenant isolation on
 // MultiScheduler). A scan still running then is left running and its
 // workspace stays claimed, so later ticks skip it; workspaces not yet
-// dispatched wait for the next tick, which no longer counts the stalled
-// scans against its slots. Stop and ctx's cancellation also end the wait.
+// dispatched wait for the next tick of the same kind, which starts with
+// them (the scan kind's cursor) and no longer counts the stalled scans
+// against its slots. Stop and ctx's cancellation also end the wait.
 // A workspace whose previous scan is still running is skipped. Each
 // workspace's context carries a soft budget (withSoftBudget) that its scan
 // loops check between items; neither the budget nor TickWait ever cancels
@@ -463,6 +506,8 @@ func (ms *MultiScheduler) forEachWorkspace(ctx context.Context, scanName string,
 	stall := time.NewTimer(wait)
 	defer stall.Stop()
 
+	workspaces = ms.startAtCursor(scanName, workspaces)
+
 	sem := make(chan struct{}, limit)
 	// Buffered for every scan this tick can start, so a scan that ends
 	// after the tick stopped waiting never blocks on it.
@@ -489,7 +534,8 @@ dispatch:
 			// any longer (the timer has fired; waiting below again would
 			// wait for good).
 			ms.unclaim(wsID)
-			log.Error("workspace scans made no progress within the tick's wait; they continue in the background, later ticks skip these workspaces until they end, and the remaining workspaces wait for the next tick",
+			ms.setCursor(scanName, wsID)
+			log.Error("workspace scans made no progress within the tick's wait; they continue in the background, later ticks skip these workspaces until they end, and the remaining workspaces wait for the next tick, which starts with them",
 				"scan", scanName, "workspace_ids", pending.list(), "remaining", len(workspaces)-i,
 				"max_concurrent_workspaces", limit, "tick_wait", wait)
 			return
@@ -511,6 +557,12 @@ dispatch:
 			defer func() { <-sem }()
 			ms.runWorkspace(ctx, scanName, wsID, fn)
 		}()
+	}
+
+	if !ms.stopped() && ctx.Err() == nil {
+		// Every listed workspace was offered a slot (or skipped as still
+		// running): the next tick starts at the top of the list again.
+		ms.setCursor(scanName, "")
 	}
 
 	for n := 0; n < started; n++ {

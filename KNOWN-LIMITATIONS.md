@@ -1438,7 +1438,7 @@ What that implies, and what it leaves open:
      never answers keeps its run in `committing`, retried on later ticks, each attempt held up to the
      deadline (only that workspace waits). On shutdown a stalled scan is waited for only until the 10 s
      shutdown deadline. As many tenants stalling in one tick as there are slots delay the others by one
-     wait.
+     wait: the workspaces that tick left undispatched come first in the next tick of the same kind.
    - **Each tick lists every candidate row.** The scans read, per workspace and per tick, every
      unfinished step execution (`ListActiveStepExecutions`, `adapters/store/postgres_steps.go`), every
      run past its timeout, every stale active run and every committing run (`postgres_runs.go`), with
