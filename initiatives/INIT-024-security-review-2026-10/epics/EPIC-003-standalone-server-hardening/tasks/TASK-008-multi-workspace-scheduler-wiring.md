@@ -337,6 +337,57 @@ from each review sub-session's JSONL (`source: {"subagent":"review"}`, `cwd` = t
   db-mode integration test driving one tick of each loop):
   `WORKSPACE_RESOLVER=db SPINE_REGISTRY_DATABASE_URL=… SPINE_INSECURE_LOCAL=1 ./bin/spine serve`.
 
+### Review round 1 (orchestrator review of `db9a2d0b`: 1 P2, 7 P3) and codex rounds 3–5
+
+Commits: `a2004887` (the review's findings), `eabf106e` (codex round 3), `b5448ea7` (codex round
+4), `e8c111fb` (codex round 5), then this notes commit. Red runs used `git archive`s of the
+previous head in the scratch dir (`red-db9-r1.log`, `red-b544-r5.log`).
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| **P2** negative `SPINE_ORPHAN_THRESHOLD` reached the shared-mode scheduler unchanged; the first orphan tick failed every active run | Fixed per the ruling. Shared modes: a negative value refuses to start, naming the variable (OQ4's direction); `0`/unset is the 30-day default. Single mode: still ignored (AC 6), now with a startup Warn. `NewMultiScheduler` takes `<= 0` as the default. CHANGELOG line corrected | `TestMultiScheduler_NegativeOrphanThresholdFailsNoFreshRun` — **red at `db9a2d0b`**: "threshold -720h0m0s: a fresh active run was failed as an orphan (1 calls)"; `TestServe_SharedModeRefusesANegativeOrphanThreshold` — red: "= <nil>, want a refusal naming SPINE_ORPHAN_THRESHOLD"; `TestServe_SingleModeIgnoresANegativeOrphanThresholdWithAWarn` — red: no Warn; `TestMultiSchedulerConfigFromEnv` rows (−720h, −1ns refuse; 0 default). All green on the branch |
+| P3 an abandoned (stalled) scan kept its pool reference; Get after Evict blocked every request for the workspace until restart | Fixed: every scan runs under `MultiSchedulerConfig.ScanDeadline` (default `DefaultScanDeadline` = 10 min, twice the 5-minute shared-tree sequence bound; config field only, no variable). Past it the scan's context is cancelled and an Error names it. Cancellation path checked: `newGitCmd` = `exec.CommandContext` with SIGTERM + 10 s `WaitDelay`; a probe confirmed git removes its remote helper on SIGTERM. Classification: the cancelled push is `GitError{Permanent, op "push", message ""}`, but the engine's outcome write uses the same expired context, so nothing is recorded — the attempt is uncounted and the run retried on a later tick, the "cut short by the caller" class of item 8. A shared-tree sequence (the primary merge and push) runs detached (`WithoutCancel`) within its own 5-minute bound. Remaining window documented (item 9) | `TestMultiScheduler_StalledScanReleasesItsPoolReferenceAtTheDeadline` (real git push to a TCP remote that never answers; ref 1 after the stalled tick; Get after Evict returns after the 1 s deadline; the push error logged above); `TestMultiScheduler_ScanDeadlineEndsAnAbandonedScan` (reference released at the deadline, Error logged, workspace scanned again) |
+| P3 a set-but-empty variable refused to start | Fixed: empty or blank (after TrimSpace) means unset, in every mode | `TestMultiSchedulerConfigFromEnv` rows "empty/blank max/budget is unset" |
+| P3 deactivation lag stated as 60 s for every mode | Documented per mode in item 9: db 60 s TTL; platform-binding 5-minute TTL, up to 35 min with `StaleGrace` while the platform errors; the invalidation webhook reaches one replica; a 403 (or unreadable-secret) workspace stays listed with an Error and a platform fetch per scan | — |
+| P3 platform-binding `List` read three secrets per cached workspace per tick to keep the id | Fixed (contained in the provider): `PlatformBindingProvider.ListIDs` (cache keys, sorted, no secret read, no platform call); the scheduler's resolver adapter uses any resolver's `ListIDs` (`workspaceIDLister`). Remaining cost (each scan's resolve reads the binding's three secrets) documented | `TestPlatformBindingProvider_ListIDsReadsNoSecret` (0 secret reads and 0 platform hits for ListIDs; List reads 6), `TestSchedulerWorkspaceResolver_PrefersIDsWithoutConfigs` |
+| P3 no upgrade note | CHANGELOG "Upgrading (shared-mode operators)": runs past `timeout_at` cancelled, steps past their timeout failed (waiting/assigned measured from creation), orphans failed, `SPINE_ORPHAN_THRESHOLD` becomes live; review active runs first | — |
+| P3 "at most one TickWait, once" comment | Reworded (multi.go type doc): once for a scan that never ends; one wait per dispatching tick (every other tick) for one that ends just after each wait. Item 9 says the same | — |
+| P3 unbounded per-tick listings | Documented in item 9 (`ListActiveStepExecutions`, the run listings; no `LIMIT`; paging a follow-up) | — |
+
+Codex on the fixes (plain `codex review --base init/INIT-024-scaffold`; model read from each review
+sub-session's JSONL):
+
+| Round | Session | Model | Findings | Disposition |
+|---|---|---|---|---|
+| 3 (on `a2004887`) | `01a17422-148a-71e0-bb90-4c1adc9c9f16` | `gpt-6.1-sol` | P2: the scan deadline does not bound a cold workspace's build (`initializeEntry` builds on the pool-lifetime context; a database that never answers `Ping` held every Get) | Fixed `eabf106e`: `PoolConfig.InitTimeout` (default `DefaultInitTimeout` 2 min): past it every waiter gets `ErrWorkspaceUnavailable`; the build keeps the lifetime context its long-lived services need. Tests `TestServicePool_InitializationTimesOut`, `TestMultiScheduler_HungWorkspaceBuildDoesNotWedgeTheScan` |
+| 4 (on `eabf106e`) | `01a17429-1bcf-7e43-bb75-2f08edf7206b` | `gpt-6.1-sol` | **P1**: a replacement build could finish beside the abandoned one; the late `NewWorkspaceDBPool` → `registerPool` then closes the replacement's live database pool | Fixed `b5448ea7`: the timed-out entry stays, marked `abandoned`, until its build returns — every Get fails at once, `Evict`/`EvictIdle` leave it, no second build starts, it holds no reference; when the build returns its result is closed **before** the entry is removed. Tests: a Get made from inside the late set's closer still fails (no replacement before the close); `TestServicePool_AbandonedEntryHoldsNoReference`, `TestServicePool_CloseDrainsAnAbandonedBuild`, updated scheduler test |
+| 5 (on `b5448ea7`) | `01a177cc-a8ce-7441-b37e-70ab9cff1f17` | `gpt-6.1-sol` | P2: a workspace that stalls each tick's dispatch but ends before the next tick starves every later workspace (each tick restarts at the top); P2: the build goroutine is out of reach of the caller's recovery, so a build or builder panic ends the process | Fixed `e8c111fb`: a per-scan-kind dispatch cursor (the next tick of that kind starts with the workspaces a stalled tick left undispatched); the build goroutine recovers a panic (Error with stack; error wraps `ErrWorkspaceUnavailable`, panic value kept out of it). `TestMultiScheduler_StalledDispatchResumesWhereItStopped` — **red at `b5448ea7`**: "b-healthy scanned 0 times in 6 ticks"; `TestServicePool_BuildPanicIsAnInitializationError` — **red at `b5448ea7`**: `panic: builder hook failed` (test binary dies). Both green |
+
+The ruling's cap (3 codex rounds) is reached; **no codex round has run on `e8c111fb`**. Command:
+`cd /Users/bartoszszymichowski/42sid/i23/s24-T008/spine && codex review --base init/INIT-024-scaffold`.
+
+New behaviour outside `MultiScheduler` (standalone only; SMP's import graph contains
+`adapters/scheduler` through `core/engine` and no `service/...` package, checked with `go list
+-deps`): the pool's init bound and abandoned-entry handling and the build-panic recovery affect every
+caller of `ServicePool.Get` in shared mode (requests, git, projection sync), not just the scheduler
+— a workspace whose build hangs now fails its requests after 2 minutes instead of holding them, and
+stays unavailable until the hung build returns (documented in item 9 and the CHANGELOG).
+
+Gates on `e8c111fb` (round 1 cycle): `go vet` plain / `-tags integration` / `-tags scenario` clean;
+`gofmt -l` on changed files clean; `go test -race -count=5 -p 4` on `adapters/scheduler`,
+`service/cmd/spine`, `service/internal/workspace` ok; workspace and cmd/spine `-tags integration
+-race` ok; golangci-lint `--new-from-rev=init/INIT-024-scaffold` on the three packages, plain and
+integration: 0 issues, `--enable-only=gosec` 0; the scenario-git-http job locally: every step rc 0,
+0 failures, 0 skips, `TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces` pass, no `ws_*` left;
+`go test -p 4 ./...`: 40 packages ok, exit 0. SMP compatibility gate (from `i23/s24-T008/smp`,
+`../spine` = `e8c111fb`, under the shared heavy-suite lock): `go build ./...` ok; `go vet` plain,
+`-tags integration`, `-tags scenario ./scenariotest/...`, `-tags faultinject` clean; `go test -race
+-p 4` on the §5 packages: 11 ok, `gitread` failing only on the same two by-design contract tests
+proven at the base in the first round; `dev/testgate` Spine-runtime leg PASS (2143 passed, 3
+allowed skips) and githttp leg PASS (588 passed, 1 allowed skip); no `ws_*` databases or roles left;
+SMP's import graph (`go list -deps`) holds `adapters/scheduler` and no `service/...` package:
+**inert**.
+
 ### Files shared with other INIT-024 tasks (for integration)
 
 - `service/cmd/spine/serve_wiring.go` (TASK-006): this task adds the `MultiScheduler` field to
@@ -348,3 +399,7 @@ from each review sub-session's JSONL (`source: {"subagent":"review"}`, `cwd` = t
   9 / two env rows and the shared-mode bullet.
 - `serve_lifecycle.go`, `serve_scheduler*.go`, `adapters/scheduler/*`: this task only;
   `serve_resolver.go`: one comment.
+- `service/internal/workspace/pool.go` (review round 1: `InitTimeout`, `buildWithTimeout`,
+  `finishAbandoned`, the `abandoned` entry state in `Get`/`Evict`/`EvictIdle`) — TASK-007's N-15
+  (no pre-auth ServiceSet build; a build failure answered as 401) touches the same Get/build path
+  from the gateway side; reconcile there. `platform_binding_provider.go`: `ListIDs` added.
