@@ -17,12 +17,16 @@ change.
 
 - **Checkout budget in standalone.** `spine serve` now measures every tree its git client is about
   to write — `EnterBranch` (before the worktree directory exists), `Checkout`, `Merge` and
-  `MergeBound` (target and source), `ResetBranch`'s `read-tree -m -u` and its `--reset -u`
-  fallback, the shared tree's restore (`reset --hard` of HEAD and the switch home), and `Clone` (now `--no-checkout`, measured, then
-  `reset --hard`) — and refuses one over 200,000 entries, 2 GiB of blob bytes (after the expansion
-  the tree's own `.gitattributes` can apply: `ident`, `text`/`eol`, `working-tree-encoding`) or
-  16 MiB of summed path bytes, before anything is written or any ref moves. The measure streams
-  `git ls-tree -r -t -l -z` (object headers only) and stops at the first crossing. New variables:
+  `MergeBound` (by the merge's RESULT tree, computed with `git merge-tree --write-tree` on the
+  target tip, plus the target when the switch to it is a checkout), `ResetBranch`'s
+  `read-tree -m -u` and its `--reset -u` fallback, the shared tree's restore (`reset --hard` of
+  HEAD and the switch home), and `Clone` (now `--no-checkout`, measured, then `reset --hard`) —
+  and refuses one over 200,000 entries, 2 GiB of blob bytes (after the expansion the tree's own
+  `.gitattributes` can apply, parsed: `ident`, `text`/`eol=crlf`, `working-tree-encoding`; a
+  `filter=` with a host-defined smudge driver is refused outright) or 16 MiB of summed path bytes,
+  before anything is written or any ref moves. The measure streams `git ls-tree -r -t -l -z`
+  (object headers only) and stops at the first crossing. `spine serve` now needs git >= 2.38 and
+  logs a Warn at start for a workspace tree already over the budget. New variables:
   `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`, `SPINE_GIT_TREE_MAX_PATH_BYTES` (a
   positive integer each; there is no off switch, and an invalid value refuses to start).
 - **Pre-receive tree limits.** With `SPINE_GIT_RECEIVE_PACK_ENABLED` on, the git HTTP endpoint
@@ -44,8 +48,10 @@ change.
   larger than the defaults — a monorepo over 200,000 entries or 2 GiB — needs the limits raised.
 - A `pre-receive` hook Spine did not write in a served repository is never replaced: pushes are
   refused (`500 push gate unavailable`) until it is moved aside. Hooks under a custom
-  `core.hooksPath` do not run for pushes served by Spine. A tag pointing at a blob cannot be pushed
-  (not measurable).
+  `core.hooksPath` do not run for pushes served by Spine (one Warn per repository names them).
+  Blob and tree tips (a tag of a key) are admitted unmeasured.
+- A code-repository clone the budget refuses is a permanent (413-class) error, remembered per
+  remote and budget for 10 minutes instead of being fetched again on every access.
 - With the deadline on, `EnterBranch` adds its worktree `--no-checkout` and fills it with
   `reset --hard`, so a worktree's `post-checkout` hook no longer runs.
 
@@ -64,8 +70,11 @@ change.
   `*MutateTimeoutError` (matches `context.DeadlineExceeded`) inside
   `*GitError{Kind: ErrKindPermanent, Message: MutateTimeoutMessage}`, `CheckoutLimits`,
   `CLIClient.CheckoutLimits()`, `SetDefaultCheckoutLimits` / `DefaultCheckoutLimits`,
-  `EnterBranchWithLimits`, and the constants `DefaultTreeMaxEntries`, `DefaultTreeMaxTotalBytes`,
-  `DefaultTreeMaxPathBytesTotal`, `DefaultMutateTimeout`. No interface gains a method.
+  `EnterBranchWithLimits`, `CheckBudgetGitVersion` / `MinBudgetGitVersion` (a budgeted merge needs
+  git >= 2.38), `TreeObjectTooLargeMessage`, and the constants `DefaultTreeMaxEntries`,
+  `DefaultTreeMaxTotalBytes`, `DefaultTreeMaxPathBytesTotal`, `DefaultMutateTimeout`;
+  `TreeStats.ExpansionReason` and `TreeTooLargeError.Stored` / `Reason`. No interface gains a
+  method.
 - An embedder that runs its own checkouts and merges (SMP: `gitread.CheckTreeDiff`,
   `boundRunBranchCheckout`, `RealGitOperator.MergeBound`, the `/git/{workspace}` gateway) can hold
   them to the same budget with `git.TreeBudget{…}.Check(ctx, client, sha)` before the command, or

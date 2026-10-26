@@ -9,7 +9,9 @@ package githttp
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -225,4 +227,93 @@ func objectExists(t *testing.T, repo, oid string) bool {
 	cmd := exec.Command("git", "-C", repo, "cat-file", "-e", oid)
 	cmd.Env = nulGitEnv(t)
 	return cmd.Run() == nil
+}
+
+// TestBudgetHook_TagsArePeeledAndTreesMeasuredOnce (review round 1, P3):
+// an operator's `git push --tags` carrying a tag of a blob is admitted
+// (nothing checks a blob out), and many tags of one commit cost one
+// measure of its tree, not one per tag.
+func TestBudgetHook_TagsArePeeledAndTreesMeasuredOnce(t *testing.T) {
+	repo, _, _, _ := nulRepo(t, "")
+	h := budgetHandler(t, repo)
+	actor := &domain.Actor{ActorID: "actor-operator", Role: domain.RoleOperator}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := WithRepoPath(r.Context(), repo)
+		ctx = WithEvents(ctx, &nulEmitter{})
+		ctx = domain.WithActor(ctx, actor)
+		h.ServeHTTP(w, r.WithContext(ctx))
+	}))
+	defer srv.Close()
+	url := srv.URL + "/"
+	work := budgetClone(t, url)
+	key := nulGit(t, work, []byte("-----BEGIN PGP PUBLIC KEY BLOCK-----\n"), "hash-object", "-w", "--stdin")
+	nulGit(t, work, nil, "tag", "-a", "-m", "key", "gpg-key", key)
+	for i := 0; i < 5; i++ {
+		nulGit(t, work, nil, "tag", "-a", "-m", "r", fmt.Sprintf("v1.%d", i), "HEAD")
+	}
+	if out, err := gitPush(t, work, url, "--tags"); err != nil {
+		t.Fatalf("--tags push with a blob tag refused: %v\n%s", err, out)
+	}
+	if !nulRefExists(t, repo, "refs/tags/gpg-key") || !nulRefExists(t, repo, "refs/tags/v1.4") {
+		t.Fatal("tags did not land")
+	}
+
+	// In-process, so the measures can be counted: five tags of one commit
+	// and the branch are one tree.
+	var measured []string
+	measureHookForTest = func(tree string) { measured = append(measured, tree) }
+	t.Cleanup(func() { measureHookForTest = nil })
+	head := nulGit(t, repo, nil, "rev-parse", "refs/heads/main")
+	var in strings.Builder
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&in, "%s %s refs/tags/v1.%d\n", zeroSHA, nulGit(t, repo, nil, "rev-parse", fmt.Sprintf("refs/tags/v1.%d", i)), i)
+	}
+	fmt.Fprintf(&in, "%s %s refs/heads/again\n", zeroSHA, head)
+	fmt.Fprintf(&in, "%s %s refs/tags/gpg-key\n", zeroSHA, nulGit(t, repo, nil, "rev-parse", "refs/tags/gpg-key"))
+	t.Chdir(repo)
+	t.Setenv("GIT_DIR", ".")
+	var stderr bytes.Buffer
+	if err := PreReceiveHookMain(context.Background(), nil, strings.NewReader(in.String()), &stderr); err != nil {
+		t.Fatalf("hook: %v %s", err, stderr.String())
+	}
+	if len(measured) != 1 {
+		t.Fatalf("measured %d trees (%v), want 1", len(measured), measured)
+	}
+}
+
+// TestBudgetHook_WarnsOnceWhenHooksPathIsOverridden (review round 1, P3):
+// a core.hooksPath in the repository's config is overridden for pushes
+// served here; the first push logs one Warn naming the hooks that will
+// not run, later pushes do not repeat it.
+func TestBudgetHook_WarnsOnceWhenHooksPathIsOverridden(t *testing.T) {
+	repo, _, _, _ := nulRepo(t, "")
+	custom := t.TempDir()
+	if err := os.WriteFile(filepath.Join(custom, "post-receive"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(custom, "update.sample"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nulGit(t, repo, nil, "config", "core.hooksPath", custom)
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := budgetHandler(t, repo)
+	url := budgetServer(t, h, repo)
+	work := budgetClone(t, url)
+	for i := 0; i < 2; i++ {
+		nulGit(t, work, nil, "commit", "-q", "--allow-empty", "-m", fmt.Sprint(i))
+		if out, err := gitPush(t, work, url, fmt.Sprintf("HEAD:refs/heads/f%d", i)); err != nil {
+			t.Fatalf("push %d: %v\n%s", i, err, out)
+		}
+	}
+	got := logs.String()
+	if n := strings.Count(got, "core.hooksPath points pushes"); n != 1 {
+		t.Fatalf("warned %d times, want once:\n%s", n, got)
+	}
+	if !strings.Contains(got, "post-receive") || strings.Contains(got, "update.sample") {
+		t.Fatalf("the warning does not name exactly the hooks that will not run:\n%s", got)
+	}
 }

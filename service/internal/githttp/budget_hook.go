@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +59,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/observe"
 )
 
 // budgetHookMarker is the line that identifies a pre-receive hook Spine
@@ -105,8 +107,8 @@ const (
 	EnvTreeMaxPathBytes = "SPINE_GIT_TREE_MAX_PATH_BYTES"
 )
 
-// envForLimit maps a crossed limit to its `spine serve` variable.
-func envForLimit(l git.TreeLimit) string {
+// EnvForTreeLimit maps a crossed limit to its `spine serve` variable.
+func EnvForTreeLimit(l git.TreeLimit) string {
 	switch l {
 	case git.TreeLimitEntries:
 		return EnvTreeMaxEntries
@@ -230,6 +232,7 @@ func (h *Handler) installBudgetHook(ctx context.Context, repoPath string) (strin
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", fmt.Errorf("create %s: %w", dir, err)
 	}
+	h.warnOverriddenHooks(ctx, repoPath, dir)
 	path := filepath.Join(dir, "pre-receive")
 	switch fi, err := os.Lstat(path); {
 	case errors.Is(err, fs.ErrNotExist):
@@ -269,6 +272,55 @@ func (h *Handler) installBudgetHook(ctx context.Context, repoPath string) (strin
 		return "", err
 	}
 	return dir, nil
+}
+
+// warnOverriddenHooks logs, once per repository and handler lifetime, a
+// Warn when the hooks directory git would use for this repository — a
+// core.hooksPath in its own, the global or the system config — is not
+// the one pushes served here are pinned to, naming the hooks there that
+// will therefore not run for them (review round 1). Pushes still go
+// through the budget hook; this only makes the override visible.
+func (h *Handler) warnOverriddenHooks(ctx context.Context, repoPath, pinned string) {
+	h.mu.Lock()
+	if h.hooksWarned == nil {
+		h.hooksWarned = map[string]bool{}
+	}
+	done := h.hooksWarned[repoPath]
+	h.hooksWarned[repoPath] = true
+	h.mu.Unlock()
+	if done {
+		return
+	}
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-path", "hooks") //nolint:gosec // G204: fixed argv
+	cmd.Dir = repoPath
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+	effective := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(effective) {
+		effective = filepath.Join(repoPath, effective)
+	}
+	if a, err := filepath.Abs(effective); err == nil {
+		effective = a
+	}
+	if filepath.Clean(effective) == filepath.Clean(pinned) {
+		return
+	}
+	var hooks []string
+	if ents, err := os.ReadDir(effective); err == nil {
+		for _, e := range ents {
+			if e.IsDir() || strings.HasSuffix(e.Name(), ".sample") {
+				continue
+			}
+			if fi, err := e.Info(); err == nil && fi.Mode().Perm()&0o111 != 0 {
+				hooks = append(hooks, e.Name())
+			}
+		}
+	}
+	observe.Logger(ctx).Warn("core.hooksPath points pushes served by Spine away from this repository's hooks directory; they are pinned to the checkout-budget hook's directory, so the hooks in core.hooksPath do not run for them",
+		"repo_path", repoPath, "core_hooks_path", effective, "pinned_hooks_dir", pinned, "hooks_not_run", hooks)
 }
 
 // readHead reads at most limit bytes of path.
@@ -323,7 +375,9 @@ func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, std
 	in := &io.LimitedReader{R: stdin, N: maxHookInputBytes + 1}
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 4096), maxHookLineBytes)
-	measured := map[string]bool{}
+	type tip struct{ oid, ref string }
+	var tips []tip
+	seen := map[string]bool{}
 	n := 0
 	for sc.Scan() {
 		n++
@@ -332,18 +386,11 @@ func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, std
 			return refuse("ref update %d is malformed", n)
 		}
 		newOID, ref := f[1], f[2]
-		if strings.Trim(newOID, "0") == "" || measured[newOID] {
-			continue // a delete writes nothing; a tip already measured passed
+		if strings.Trim(newOID, "0") == "" || seen[newOID] {
+			continue // a delete writes nothing; a repeated tip is typed once
 		}
-		_, err := budget.Measure(ctx, c, newOID)
-		var tl *git.TreeTooLargeError
-		switch {
-		case errors.As(err, &tl):
-			return refuse("%q: %s (%s); raise %s to admit it", ref, git.TreeTooLargeMessage, tl.Error(), envForLimit(tl.Limit))
-		case err != nil:
-			return refuse("%q: the pushed tree could not be measured against the checkout budget within %s (a commit or tree is required); refused (fail closed)", ref, *timeout)
-		}
-		measured[newOID] = true
+		seen[newOID] = true
+		tips = append(tips, tip{newOID, ref})
 	}
 	if in.N <= 0 {
 		return refuse("the ref updates exceed %d bytes", maxHookInputBytes)
@@ -351,5 +398,106 @@ func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, std
 	if err := sc.Err(); err != nil {
 		return refuse("cannot read the ref updates: %v", err)
 	}
+	if len(tips) == 0 {
+		return nil
+	}
+	oids := make([]string, len(tips))
+	for i, t := range tips {
+		oids[i] = t.oid
+	}
+	trees, err := tipTrees(ctx, oids)
+	if err != nil {
+		return refuse("the pushed objects could not be typed (%v); refused (fail closed)", err)
+	}
+	// Only a tip that is (or peels to) a commit is ever checked out; a
+	// blob or tree tip (a tag of a GPG key, say) is admitted unmeasured
+	// (review round 1). Tips that share a tree — many tags of one commit,
+	// a branch and its tag — are measured once.
+	measured := map[string]bool{}
+	for i, t := range tips {
+		tree := trees[i]
+		if tree == "" || measured[tree] {
+			continue
+		}
+		if measureHookForTest != nil {
+			measureHookForTest(tree)
+		}
+		_, err := budget.Measure(ctx, c, tree)
+		var tl *git.TreeTooLargeError
+		switch {
+		case errors.As(err, &tl):
+			hint := fmt.Sprintf("raise %s above %d to admit it, or reduce the tree", EnvForTreeLimit(tl.Limit), tl.Seen)
+			if math.IsInf(tl.Expansion, 1) {
+				hint = "no limit admits it"
+			}
+			return refuse("%q: %s (%s); %s", t.ref, git.TreeTooLargeMessage, tl.Error(), hint)
+		case err != nil:
+			var ge *git.GitError
+			if errors.As(err, &ge) && ge.Message == git.TreeObjectTooLargeMessage {
+				return refuse("%q: %s", t.ref, git.TreeObjectTooLargeMessage)
+			}
+			return refuse("%q: the pushed tree could not be measured against the checkout budget within %s; refused (fail closed)", t.ref, *timeout)
+		}
+		measured[tree] = true
+	}
 	return nil
+}
+
+// measureHookForTest, when set, is called before each tree the hook
+// measures.
+var measureHookForTest func(tree string)
+
+// tipTrees types every pushed tip in one `git cat-file --batch-check`
+// and returns, per tip, the tree to measure: the commit's tree for a
+// commit or a tag that peels to one, "" for a tip that is (or peels to)
+// a blob or a tree. A missing or unparsable object is an error.
+func tipTrees(ctx context.Context, oids []string) ([]string, error) {
+	var in strings.Builder
+	for _, oid := range oids {
+		// The tip's own type, what it peels to, and that commit's tree.
+		fmt.Fprintf(&in, "%s\n%s^{}\n%s^{tree}\n", oid, oid, oid)
+	}
+	cmd := exec.CommandContext(ctx, "git", "cat-file", "--batch-check") //nolint:gosec // G204: fixed argv; the input is validated object ids
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
+	cmd.Stdin = strings.NewReader(in.String())
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 3*len(oids) {
+		return nil, fmt.Errorf("cat-file printed %d lines for %d queries", len(lines), 3*len(oids))
+	}
+	field := func(line string) (oid, typ string, ok bool) {
+		f := strings.Fields(line)
+		if len(f) == 3 && git.IsFullObjectName(f[0]) {
+			return f[0], f[1], true
+		}
+		return "", "", false
+	}
+	out := make([]string, len(oids))
+	for i := range oids {
+		if _, _, ok := field(lines[3*i]); !ok {
+			return nil, fmt.Errorf("pushed object %d is missing", i+1)
+		}
+		_, peeled, ok := field(lines[3*i+1])
+		if !ok {
+			return nil, fmt.Errorf("pushed object %d does not peel", i+1)
+		}
+		switch peeled {
+		case git.TreeEntryCommit:
+			tree, typ, ok := field(lines[3*i+2])
+			if !ok || typ != git.TreeEntryTree {
+				return nil, fmt.Errorf("pushed commit %d has no tree", i+1)
+			}
+			out[i] = tree
+		case git.TreeEntryBlob, git.TreeEntryTree:
+			// Nothing Spine checks out.
+		default:
+			return nil, fmt.Errorf("pushed object %d peels to a %q", i+1, peeled)
+		}
+	}
+	return out, nil
 }

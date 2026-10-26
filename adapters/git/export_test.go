@@ -144,8 +144,23 @@ func ResetDefaultCheckoutLimitsForTest() {
 // AttributeExpansionForTest is the worst-case checkout expansion factor
 // of a .gitattributes text, for object ids of hexLen hex digits.
 func AttributeExpansionForTest(text string, hexLen int) float64 {
-	return attributeClasses([]byte(text)).factor(hexLen)
+	set := newAttrSet()
+	set.add([]byte(text))
+	classes, _ := set.evaluate()
+	return classes.factor(hexLen)
 }
+
+// AttributeFiltersForTest returns the filter names a .gitattributes text
+// sets.
+func AttributeFiltersForTest(text string) []string {
+	set := newAttrSet()
+	set.add([]byte(text))
+	_, filters := set.evaluate()
+	return filters
+}
+
+// WorstAttributeExpansionForTest is the worst-case factor.
+func WorstAttributeExpansionForTest(hexLen int) float64 { return attrAll.factor(hexLen) }
 
 // ReadTreeForTest runs ResetBranch's two-tree switch (`read-tree -m -u
 // from to`) through runWith, under the client's mutate deadline.
@@ -153,3 +168,6 @@ func (c *CLIClient) ReadTreeForTest(ctx context.Context, from, to string) error 
 	_, _, err := c.runWith(ctx, "reset_branch", runOpts{}, "read-tree", "-m", "-u", "--end-of-options", from, to)
 	return err
 }
+
+// CheckBudgetGitVersionOutputForTest exposes the budget's git floor parser.
+func CheckBudgetGitVersionOutputForTest(line string) error { return checkBudgetGitVersionOutput(line) }

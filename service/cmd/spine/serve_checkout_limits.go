@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -68,6 +69,14 @@ func installCheckoutLimits(log *slog.Logger) error {
 	l, err := loadCheckoutLimits()
 	if err != nil {
 		return err
+	}
+	// The budget measures a merge's result with `git merge-tree
+	// --write-tree` (git >= 2.38); on an older git every merge would be
+	// refused, so refuse to start instead.
+	vctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := git.CheckBudgetGitVersion(vctx); err != nil {
+		return fmt.Errorf("git checkout budget: %w", err)
 	}
 	git.SetDefaultCheckoutLimits(l)
 	log.Info("git checkout budget on",

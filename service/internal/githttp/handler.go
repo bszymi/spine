@@ -91,8 +91,11 @@ type Handler struct {
 
 	// budgetHook is the checkout-budget pre-receive hook every
 	// receive-pack POST installs and pins (INIT-024 TASK-003,
-	// budget_hook.go). Set only when receive-pack is enabled.
-	budgetHook budgetHook
+	// budget_hook.go). Set only when receive-pack is enabled. hooksWarned
+	// (under mu) records the repositories whose overridden core.hooksPath
+	// was already logged.
+	budgetHook  budgetHook
+	hooksWarned map[string]bool
 }
 
 // Config configures the git HTTP handler.

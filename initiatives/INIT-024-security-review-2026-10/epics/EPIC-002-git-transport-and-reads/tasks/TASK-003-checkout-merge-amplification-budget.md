@@ -132,9 +132,11 @@ before a checkout.
   SMP's `CheckTreeDiff` today caps changed paths (`SMP_GIT_MAX_DIFF_PATHS=100000`) and tree-object
   size but never sums blob bytes, so it admits ~400 GiB. SMP may call `git.MeasureTree`, or keep
   its own measure plus a differential test against `git.TreeBudget.Check`.
-- **Shared at the bump:** Spine's `CLIClient` refuses an over-budget tree. In practice SMP reaches
-  Spine's `EnterBranch` only in place (branch `""`, a measured no-op), so the behaviour SMP picks
-  up is the availability of `git.MeasureTree`; its own checkouts stay SMP's responsibility.
+- **Nothing changes at the bump** (as built; Deviation 1): the budget is library opt-in — a
+  `CLIClient` without `WithTreeBudget` / `WithMutateTimeout`, in a process that never calls
+  `git.SetDefaultCheckoutLimits`, behaves exactly as before — and default-on only in `spine
+  serve`. What SMP picks up is the availability of `git.MeasureTree` / `git.TreeBudget.Check`; its
+  own checkouts stay SMP's responsibility.
 - The SMP companion task owns the receiver-side budget at SMP's `/git/{workspace}` gateway.
 
 ## Decisions
@@ -193,8 +195,10 @@ record both runs.
 
 ## Compatibility
 
-- **Shared behaviour change** (initiative §7b): Spine's git client now refuses an over-budget
-  checkout or merge, by default.
+- **Not a shared behaviour change** (as built; Deviation 1): the library budget is opt-in, with
+  the zero value = today's behaviour; it is on by default only in `spine serve`, which refuses an
+  over-budget checkout, merge (measured by its result tree), clone or push. The initiative §7b
+  row for TASK-003 should say so (TASK-010).
 - New env vars at `spine serve`: `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`,
   `SPINE_GIT_TREE_MAX_PATH_BYTES`, `SPINE_GIT_MUTATE_TIMEOUT`.
 - `MeasureTree`, `TreeBudget`, `WithTreeBudget`, `WithMutateTimeout` and `ErrTreeTooLarge` are
@@ -279,11 +283,11 @@ of the test drops the two lines that configure a hook the base does not have
 
 | # | Attempt | Result |
 |---|---|---|
-| 1 | **`.gitattributes` expansion** inside the byte budget: `ident` (4 → 47 bytes per `$Id$`, 71 with SHA-256), `text eol=crlf` (2x), `working-tree-encoding=UTF-32` (4x) | **Real, fixed.** Measured on git 2.54: 50,000 stored bytes under `* ident text eol=crlf` wrote 490,000; 16,008 under `* ident` wrote 188,148. The measure reads the tree's `.gitattributes` (<= 64 files, <= 64 KiB each; more, larger or a symlinked one = worst case 188x / 284x) and applies the worst-case product of the classes they mention (loose substring match, so macros count); merges use the union of both sides. `TestTreeBudget_AttributeExpansionIsCounted` (ident, macro, UTF-32 refused; eol-only and `binary` admitted; the factor bounds what git really wrote) — **red:** "admitted a tree that wrote 188148 bytes" (ident), 188169 (macro), 64178 (UTF-32). `TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase`. |
+| 1 | **`.gitattributes` expansion** inside the byte budget: `ident` (4 → 47 bytes per `$Id$`, 71 with SHA-256), `text eol=crlf` (2x), `working-tree-encoding=UTF-32` (4x) | **Real, fixed.** Measured on git 2.54: 50,000 stored bytes under `* ident text eol=crlf` wrote 490,000; 16,008 under `* ident` wrote 188,148. The measure reads the tree's `.gitattributes` and applies the worst-case product of the expanding attributes they set. *(Superseded in review round 1: the first version's loose substring match and its jump to the worst case above 64 files refused legitimate trees; see "Review round 1", ruling 2.)* `TestTreeBudget_AttributeExpansionIsCounted` (ident, macro, UTF-32 refused; eol-only and `binary` admitted; the factor bounds what git really wrote) — **red:** "admitted a tree that wrote 188148 bytes" (ident), 188169 (macro), 64178 (UTF-32). `TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase`. |
 | 2 | **`worktree add` vs the deadline**: worktree add writes the tree in a child `git reset --hard` the SIGTERM never reaches | **Real, fixed** (the AC 7 worktree subtest took 5.1 s against a 300 ms deadline): with a deadline the worktree is added `--no-checkout` and filled by our own deadlined `reset --hard`. |
 | 3 | **`Clone`** writes the remote's default branch unmeasured (a code repository registered by a workspace admin) | **Real, fixed:** `--no-checkout`, measure HEAD, `reset --hard`; a refusal removes the clone. `TestClone_RefusesOverBudgetTree` — **red:** fails at the base. Codex rounds 1–2 hardened this path. |
 | 4 | **Hook recursion**: the hook execs `os.Executable()`, which in any test binary is the test binary — handed `git-hook pre-receive` it ran its whole suite inside git, recursively (found by the first full githttp run: 660 s, nested `remote: --- FAIL` lines) | **Fixed** by the package-`init` entry (`HookProcessEnv`, Deviation 4): every binary that can serve a push runs the hook before `main`/`TestMain`. The full githttp suite (every existing push test now passes through the real hook) runs in ~10 s. |
-| 5 | merge vs checkout vs worktree add vs read-tree vs restore | All measured before the command: `TestTreeBudget_ResetBranchIsBounded`, `TestTreeBudget_InPlaceRestoreIsBounded` (red: both fail at the base); the restore's own `reset --hard` of a moved HEAD was codex round 3's find. `CommitFilesOnto`'s private-index `read-tree` (no `-u`) writes only an index of a bound, already-measured commit. |
+| 5 | merge vs checkout vs worktree add vs read-tree vs restore | Checkouts, worktrees, read-trees and restores are measured before the command: `TestTreeBudget_ResetBranchIsBounded`, `TestTreeBudget_InPlaceRestoreIsBounded` (red: both fail at the base); the restore's own `reset --hard` of a moved HEAD was codex round 3's find. **Merges were not** (corrected in review round 1): each side was measured, never the union a merge leaves, so a result reached ~2x every limit and two merges from one base walked `main` over the budget — now the merge's result tree is measured (review round 1, ruling 1). `CommitFilesOnto`'s private-index `read-tree` (no `-u`) writes only an index of a bound, already-measured commit. |
 | 6 | many small files / one huge blob / deep trees / long paths | entries / bytes / path bytes (AC 1 tests); a deep tree's paths sum quadratically, so depth is bounded too. |
 | 7 | packed vs loose, deltas | Sizes come from object headers (for a delta, its result-size header), independent of representation; AC 5 measures objects as pushed (pack, in quarantine), the adapter tests loose objects. |
 | 8 | symlinks / gitlinks | Counted as entries (`TestTreeBudget_GitlinksAndSymlinksCount`); a symlinked `.gitattributes` is the worst case. |
@@ -297,8 +301,10 @@ of the test drops the two lines that configure a hook the base does not have
 
 1. **Library opt-in, not default-on** (orchestrator ruling: INIT-024 rule 2 binds). The zero value
    of a client (no `WithTreeBudget` / `WithMutateTimeout`, no `SetDefaultCheckoutLimits`) measures
-   nothing, starts no extra process and keeps every argv (`TestTreeBudget_OffStartsNoProcess`
-   records the argv of Checkout/Merge/MergeBound/EnterBranch: no `ls-tree`). `spine serve` sets the
+   nothing, starts no extra process and keeps every argv (the argv itself is pinned by the
+   existing `TestRefGrammar_ArgvShape`, which passes unchanged; `TestTreeBudget_OffStartsNoProcess`
+   and `TestMerge_NoBudgetRunsNoMergeTree` only assert that no `ls-tree` / `merge-tree` runs —
+   corrected in review round 1). `spine serve` sets the
    process default. So the initiative §7b Rule 4 row for TASK-003 ("Spine's client refuses an
    over-budget tree") is **not** a shared-behaviour change at the bump — SMP behaviour is unchanged
    until it opts in. TASK-010 should reconcile §7b and §5.
@@ -386,7 +392,8 @@ against `a560c210` (RULES; identical in the TASK-001 gate); `dev/testgate` Spine
   `errors.Is(err, git.ErrTreeTooLarge)`; `errors.As(err, &*git.TreeTooLargeError)` gives `Limit`,
   `Max`, `Seen`, `Expansion` for the message (it never contains the sha). Measure a commit or tree id
   SMP already resolved, so the measured object is the one it then checks out. For a merge, check
-  both sides (`TreeBudget.Check` each; the union-of-attributes rule is internal to the client path).
+  its RESULT: compute it with `git merge-tree --write-tree <target-tip> <source>` (git >= 2.38)
+  and `TreeBudget.Check` that tree — the client path does exactly this (review round 1).
   The measure inherits the process environment, so it also works inside a pre-receive hook (git's
   quarantine variables).
 - **Optional:** `gitread.WithCLIOptions(git.WithTreeBudget(b), git.WithMutateTimeout(d))` turns the
@@ -402,3 +409,35 @@ against `a560c210` (RULES; identical in the TASK-001 gate); `dev/testgate` Spine
   OQ1's tighter alternative (50k / 512 MiB).
 - **Differential test:** if SMP keeps its own byte sum in `gitread.CheckTreeDiff`, pin it against
   `git.TreeBudget.Check` on the same fixtures (the PoC bomb, an `ident` tree, a deep tree).
+
+### Review round 1 (2026-10-26; security + correctness lenses on `9263fbd1`; 0 P1)
+
+| Ruling | Finding | What was done | Tests (mutation / red) |
+|---|---|---|---|
+| 1 | P2 (both): merges measured by side, never by result — ~2x each limit; two admitted merges from one base push `main` over budget and everything wedges, deletes can't repair it | `treebudget_merge.go`: `checkMergeBudget` computes the result with `git merge-tree --write-tree --no-messages --name-only` on the target tip read **inside the working-tree hold** the merge already takes (`lockTree`; a governed merge's `WithWorkingTree` sequence) and measures that tree on all three limits before the switch; `sameMergeBase` re-reads HEAD after the switch and refuses (transient) a tip that moved. The target is measured alone only when the switch to it is a checkout (HEAD elsewhere); a result equal to the target's tree (up-to-date replay) is not measured; the source is never measured alone (it is never what a merge writes; on a fast-forward it *is* the result). Wired into `Merge` and `mergeSHA` (MergeBound / Merge with SourceSHA). Ordering guarantee: every in-process writer of a tree takes the same per-path hold, so a second merge waits for the first and computes on its result (`TestMerge_ConcurrentMergesSeeEachOther`); an out-of-process writer is caught by the post-switch tip check, except one that moves the checked-out branch between that check and `git merge` (KNOWN-LIMITATIONS). `git.CheckBudgetGitVersion` (>= 2.38); `spine serve` refuses to start below it. Startup warning: `workspace.WarnIfOverCheckoutBudget` measures HEAD once — at `spine serve` start (single mode) and when a shared-mode workspace's services are built — in a goroutine, and logs one Warn naming the limit, its variable and the remedy. KNOWN-LIMITATIONS "Bound", new "A merge is measured by its result", "Not atomic…", "An over-budget home branch…" rewritten; self-review row 5 corrected. | `TestMerge_ResultTreeIsMeasured` (correctness repro, Merge + MergeBound: two 61-entry branches from one base, MaxEntries 100 → second refused, main ≤ 100, no `d2/`, tree clean) — **red at `9263fbd1`** ("err = <nil>, want ErrTreeTooLarge", both paths; `red-rr1.log`); `TestMerge_DisjointSidesAreMeasuredTogether` (security repro: two disjoint 60 KiB sides, 64 KiB → refused; and path bytes); `TestMerge_RepairOfAnOverBudgetMainIsAdmitted` (121-entry main, MaxEntries 100: growing merge refused, up-to-date replay admitted, deleting merge admitted → ≤ 100) — the disjoint-sides, repair and concurrent tests also fail at `9263fbd1`; `TestMerge_SwitchToAnOverBudgetTargetIsMeasured`; `TestMerge_ConcurrentMergesSeeEachOther`; `TestMerge_TargetMovedAfterTheMeasureIsRefused` (both paths); `TestMerge_NoBudgetRunsNoMergeTree`; `TestCheckBudgetGitVersion`; `TestWarnIfOverCheckoutBudget`. Mutations, each caught: drop the result measure (6 tests fail), measure the target always (repair fails), drop the switch measure (2 fail), drop the up-to-date skip (repair fails), drop the moved-tip check (moved-tip fails). |
+| 2 | P2: `.gitattributes` heuristic (substring match; 188x above 64 files) | `treebudget_attrs.go`: every `.gitattributes` read in one `git cat-file --batch` (read bounds applied) up to 1 MiB of attribute text (each file at size + 64); parsed: comments, C-quoted patterns, `-a`/`!a`/`a=false`-style values ignored, whole names only (`text`, `text=auto`, `eol=crlf`, legacy `crlf`, `ident`, `working-tree-encoding` ≠ UTF-8, `filter`), `[attr]` macros expanded recursively (depth 8, cycles cut; every definition), built-in `binary`. Past the cap or for a symlinked `.gitattributes` → worst case with the reason. A `filter=<name>` whose smudge/process driver the git config defines → refused at any limit (`Expansion` +Inf), read with the clone's own environment for a budgeted clone (`measureEnv`). The refusal names the stored size, the factor and the attributes (`TreeTooLargeError.Stored/Reason`); the hook names the size it needs. | `TestTreeBudget_AttributeParsing` (26 cases incl. the "accidentally" comment, macros, cycles, quoted patterns, unsets), `TestTreeBudget_ReviewReproductionsAreAdmitted` (65 dirs of `* text=auto` → x2 admitted; "accidentally" + `*.bin -text` → x1 admitted — **red at `9263fbd1`**: refused "up to 188x" and "up to 23.5x"), `TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase` (70 harmless files read; > 1 MiB and symlink → worst case + reason), `TestTreeBudget_RefusalNamesTheFactor`, `TestTreeBudget_FilterDriverIsUnbounded`, `TestTreeBudget_AttributeExpansionIsCounted` (real `ident`, UTF-32 refused; `eol=crlf` x2 admitted) unchanged. |
+| 3 | P3: `limits.go` path-budget comment false; tree object > `GIT_ALLOC_LIMIT` unmeasurable | Comment corrected (one NUL per entry; ~16.2 MiB listing at both defaults; N-6); 16 MiB kept (OQ1). The alloc refusal now returns `TreeObjectTooLargeMessage` (says raising `SPINE_GIT_TREE_*` does not help; the allocation limit is 4x the per-blob limit; no `spine serve` knob, `WithMaxBlobBytes` / `WithMaxGitAllocBytes` for embedders); residual in KNOWN-LIMITATIONS. | `TestTreeBudget_TreeObjectOverTheAllocLimitSaysWhatItIs` |
+| 4 | P3: hook refuses blob tags; dedupe by commit id | `tipTrees`: one `git cat-file --batch-check` types every tip (`<oid>`, `<oid>^{}`, `<oid>^{tree}`); commit or tag-of-commit → its tree measured once per tree id; blob/tree tips admitted. | `TestGitHookPreReceive_AdmitsWithinBudget` (raw blob + tag of a blob), `TestBudgetHook_TagsArePeeledAndTreesMeasuredOnce` (`--tags` push with a GPG-key blob tag through the handler; 5 tags + a branch of one commit → 1 measure) |
+| 5 | P3: hooksPath override silent | `warnOverriddenHooks`: once per repo per handler, `git rev-parse --git-path hooks` (repo/global/system `core.hooksPath`) vs the pinned dir → one Warn naming the executable, non-sample hooks that will not run. | `TestBudgetHook_WarnsOnceWhenHooksPathIsOverridden` |
+| 6 | P3: refused clone refetched on every access | `gitpool`: an `ErrTreeTooLarge` clone failure → `domain.ErrPayloadTooLarge` (permanent, wraps the git error), remembered for 10 min keyed by clone URL + process budget; expired entries dropped; another remote or a changed budget is a fresh attempt. | `TestClient_CheckoutBudgetRefusalIsRememberedForATime` (3 accesses → 1 clone; after TTL, after a budget change, another remote → new attempts) |
+| 7 | P3 docs | README env table, `.env.example` (4 vars), `docs/git-push-guide.md` §5 (`spine: push refused …`, unmeasurable, `500 push gate unavailable`), this artifact's Compatibility and SMP impact (library opt-in; default-on only in `spine serve`), integration guide §7 (blob tips, hooksPath Warn, git >= 2.38, startup Warn), CHANGELOG. | — |
+| 8 | P3 (security P3-2): clone fetch neither size-bounded nor deadlined | **Documented, not changed**: git has no fetch-side `maxInputSize`, and a fixed deadline on the network part would fail legitimate large clones (the mutate deadline is 2 min). KNOWN-LIMITATIONS names the operator controls (code-repo base on its own filesystem/quota, egress policy, who may register code repos) and the refusal cache. | — |
+| 9 | false claims | Deviation 1 now cites `TestRefGrammar_ArgvShape`; the limits.go entry figures say which count (1,961 budget entries / 21,420,845 bytes for Spine HEAD, 1,624 files at a560c210). | — |
+
+**Handoffs (recorded, not implemented):**
+- **TASK-004:** collides in `cli.go` `runSink` (deadline block; env moved to `commandEnv`), the
+  `opClasses` map (gofmt realigned every line; `measure_tree` added), the `limits.go` const block
+  after `minSinkGrowth` and its header. It should NOT reuse `treeListingSink` as is (`ls-tree -l`
+  specific, keeps no paths): move its NUL-record core — bounded carry, stop + cancel on the first
+  refusal, unterminated-output check — into `listing.go` and build both on it (per-record caps
+  differ: 4096 vs the remaining path budget). Its kept-bytes / listing cap must be >= the path
+  budget + one byte per entry + a margin, or be derived from the budget (the 16 MiB path default
+  plus 200,000 NULs is ~16.2 MiB). Its premise "budget-bounded listings" does not hold for SMP
+  (the budget is opt-in there).
+- **TASK-005:** collides in `handler.go` `ServeHTTP` (hook install before `prereceive`, the CGI
+  `Env` append), `NewHandler` (`newBudgetHook`) and the `Handler` struct (`budgetHook`,
+  `hooksWarned`); `ensureReceivePackConfig` is untouched. The hook is a fresh process whose CGI
+  environment is built from scratch and that carries only budget flags (no DB, actor or run), so
+  N-9 needs a callback channel; per-push data must go through `cgiHandler.Env`, because the
+  per-repo script is shared and rewritten on every push (concurrent pushes would race on it).
+  Moving the semaphore slot after the command read would put the hook install outside the slot.

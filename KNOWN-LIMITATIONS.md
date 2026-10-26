@@ -1117,14 +1117,23 @@ The following limitations have been resolved:
   occurrence (a 4,470-byte pack made `EnterBranch` write ~200 MB at `a560c210`, and two levels of
   1000 entries reach terabytes). A `git.CLIClient` that carries a checkout budget now measures the
   tree before every command that writes one — `EnterBranch` (before the worktree's directory
-  exists), `Checkout`, `Merge` and `MergeBound` (target and source), `ResetBranch`'s
-  `read-tree -m -u` and its `read-tree --reset -u` fallback, the shared tree's restore (its
-  `reset --hard` of HEAD and its switch to the home branch), and `Clone` (made `--no-checkout`, measured, then `reset --hard`) — and refuses
-  one over it with a permanent error matching `git.ErrTreeTooLarge` before anything is written or
-  moved. The limits: 200,000 entries (files, links, gitlinks and directories), 2 GiB of blob bytes
-  and 16 MiB of summed path bytes (`git.TreeBudget`; owner question 1, defaults pending the
-  owner). The measure reads object headers through a streamed `git ls-tree -r -t -l -z` that stops
-  at the first crossing, so measuring a bomb costs about its first 200,000 entries.
+  exists), `Checkout`, `Merge` and `MergeBound`, `ResetBranch`'s `read-tree -m -u` and its
+  `read-tree --reset -u` fallback, the shared tree's restore (its `reset --hard` of HEAD and its
+  switch to the home branch), and `Clone` (made `--no-checkout`, measured, then `reset --hard`) —
+  and refuses one over it with a permanent error matching `git.ErrTreeTooLarge` before anything is
+  written or moved. The limits: 200,000 entries (files, links, gitlinks and directories), 2 GiB of
+  blob bytes and 16 MiB of summed path bytes (`git.TreeBudget`; owner question 1, defaults pending
+  the owner). The measure reads object headers through a streamed `git ls-tree -r -t -l -z` that
+  stops at the first crossing, so measuring a bomb costs about its first 200,000 entries.
+- **A merge is measured by its result** (review round 1). `git merge-tree --write-tree` computes
+  the tree the merge will leave (merge-ort, as `git merge` runs it; conflict markers included) on
+  the target tip read inside the working-tree hold the merge takes, and that tree is measured on
+  every limit before the switch; after the switch the tip is checked again (a moved tip is a
+  transient refusal). The target is measured on its own only when the switch to it is a checkout
+  (HEAD on another branch); an up-to-date replay (result = target tree) is not measured. So two
+  merges from one base can no longer walk `main` over the budget, and a repair merge that brings
+  an over-budget `main` back under it is admitted. This needs git >= 2.38: `spine serve` refuses
+  to start on an older git, and a budgeted library merge on one is refused.
 - **On in standalone, off for embedders.** `spine serve` installs the budget and a 2-minute
   deadline on every local mutating git command as the process default
   (`git.SetDefaultCheckoutLimits`; `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`,
@@ -1138,42 +1147,67 @@ The following limitations have been resolved:
 - **Pushes are measured at pre-receive.** With receive-pack on, the git HTTP endpoint installs a
   pre-receive hook (`<git-dir>/hooks/pre-receive`, running the hidden `spine git-hook pre-receive`
   of the same binary) and pins `core.hooksPath` to its directory for the receive-pack it runs. Every
-  pushed tip that is not a delete is measured after the pack is unpacked into git's quarantine and
-  before any ref moves; over the budget, or not measurable (a missing object, a tag of a blob, the
-  request's `OpTimeout`), the whole push is refused with a `remote:` line naming the limit and its
-  variable, and the quarantined objects are discarded. Consequences: a pre-receive hook Spine did
-  not write is never replaced — pushes are refused until it is moved aside; hooks kept under a
-  custom `core.hooksPath` do not run for pushes served by Spine; and a tag pointing at a blob can
-  no longer be pushed.
+  pushed tip is typed in one `git cat-file --batch-check` after the pack is unpacked into git's
+  quarantine and before any ref moves: a commit (or a tag of one) has its tree measured, each tree
+  once however many tips share it; a blob or tree tip (a tag of a GPG key, say) is admitted
+  unmeasured, since nothing Spine runs checks one out; a delete is skipped. Over the budget, or
+  not measurable (a missing object, the request's `OpTimeout`), the whole push is refused with a
+  `remote:` line naming the limit, its variable and the size it needs, and the quarantined objects
+  are discarded. Consequences: a pre-receive hook Spine did not write is never replaced — pushes
+  are refused until it is moved aside; hooks kept under a custom `core.hooksPath` (repository,
+  global or system config) do not run for pushes served by Spine, which logs one Warn per
+  repository naming them.
 - **Checkout-time expansion by attributes.** A tree's own `.gitattributes` can rewrite content on
   checkout: `ident` turns each 4-byte `$Id$` into 47 bytes (71 with SHA-256), `text`/`eol=crlf`
-  doubles a file of newlines, `working-tree-encoding` re-encodes (UTF-32 4x). The byte limit is
-  applied to the stored bytes times the worst-case factor of the attribute classes the tree's
-  `.gitattributes` mention (a loose substring match: 2 for text/eol/crlf, 11.75 for ident, 8 for
-  an encoding, multiplied), and, for a merge, of both sides together. More than 64
-  `.gitattributes` files, one over 64 KiB, or a symbolic link named `.gitattributes` is taken as
-  the worst case (188x; 284x with SHA-256). Not measured: clean/smudge filter *drivers* (`filter=<name>` runs only a
-  driver the host's git config defines — git-lfs would fetch arbitrary content; Spine configures
-  none) and the host's own `core.autocrlf` (at most 2x).
-- **Not atomic with the command.** A branch measured by name is looked up, measured and then
-  checked out by git, which reads the ref again; a branch that moves in between is written at its
-  new tip. In standalone every pushed tip passes the same budget at pre-receive, so a branch cannot
-  move to an over-budget tree there; `MergeBound` merges the exact measured commit. A merge
-  writes at most both measured trees (2x the byte limit in the worst case), and the totals bound
-  one tree at a time: concurrent worktrees of different branches each get the full budget (no
-  per-tenant disk quota; out of scope).
+  doubles a file of newlines, `working-tree-encoding` re-encodes (UTF-32 4x). Every
+  `.gitattributes` of the tree is read in one `git cat-file --batch` (up to 1 MiB of attribute
+  text, each file counted at its size + 64 bytes) and parsed — comments, quoted patterns, unset
+  (`-a`) and unspecified (`!a`) attributes, `[attr]` macros and the built-in `binary` — and the byte
+  limit is applied to the stored bytes times the worst-case factor of the expanding attributes some
+  line sets (2 for text/eol=crlf/crlf, 11.75 for ident, 8 for a non-UTF-8 encoding, multiplied);
+  which paths a pattern matches is not evaluated, so the factor can only be too high. Past the
+  1 MiB, or for a symbolic link named `.gitattributes`, the worst case (188x; 284x with SHA-256) is
+  taken and the refusal says why; every refusal names the stored size, the factor and the
+  attributes. A `filter=<name>` whose smudge (or process) driver the host's git config defines —
+  git-lfs would fetch arbitrary content — is refused at any limit (Spine configures none; a
+  `filter=` with no driver is inert). Not measured: the host's own `core.autocrlf` (at most 2x).
+- **Not atomic with a checkout by name.** A branch measured by name is looked up, measured and
+  then checked out by git, which reads the ref again; a branch that moves in between is written at
+  its new tip. In standalone every pushed tip passes the same budget at pre-receive, so a branch
+  cannot move to an over-budget tree there; a merge re-checks the tip it measured, and
+  `MergeBound` merges the exact measured commit. A writer outside the process that moves the
+  checked-out branch between the merge's post-switch check and `git merge` (git refuses pushes to
+  it by default) is not covered. The totals bound one tree at a time: concurrent worktrees of
+  different branches each get the full budget (no per-tenant disk quota; out of scope).
 - **Mutate deadline.** On expiry the command is SIGTERMed (git removes its locks) and the call
   fails with a permanent error wrapping `git.MutateTimeoutError`. With a deadline, `EnterBranch`
   adds the worktree `--no-checkout` and runs the `reset --hard` that fills it itself, because
   `worktree add` writes the tree in a child git the SIGTERM does not reach; the post-checkout hook
-  is then not run. `push` and the network part of `clone` are not deadlined by it (their time is
-  the network's; a governed merge's push stays bounded by the sequence timeout). A smudge filter
-  the host configured keeps running after its git is stopped.
+  is then not run. `push` is not deadlined by it (a governed merge's push stays bounded by the
+  sequence timeout). A smudge filter the host configured keeps running after its git is stopped.
+- **A clone's fetch is neither size-bounded nor deadlined** (security review P3-2). A clone's
+  checkout is measured and deadlined, but the download before it is the remote's: a registered
+  code-repository remote serving a huge pack fills the code-repository disk while it downloads (git
+  has no fetch-side counterpart of `receive.maxInputSize`, and a fixed deadline would fail
+  legitimate large clones). Operator controls: put `SPINE_CODE_REPO_BASE` on its own filesystem or
+  quota, restrict which hosts code-repository remotes may name (egress policy), and limit who may
+  register code repositories. A clone the budget refuses is remembered per remote and budget for
+  10 minutes (a permanent 413-class error), so an over-budget remote is not fetched again on every
+  access.
 - **An over-budget home branch blocks the shared tree.** When the standalone tree's HEAD or home
-  branch is itself over the budget (moved there without a measured checkout — an operator's
-  `update-ref`, a push to the checked-out branch under a non-default `receive.denyCurrentBranch`),
-  every restore refuses with nothing reset, so every sequence on that workspace fails until the
-  branch is fixed or the limits raised: fail closed rather than fill the disk.
+  branch is itself over the budget — a repository already over the defaults at upgrade, a limit
+  lowered below the existing tree, or a ref moved without a measured checkout (an operator's
+  `update-ref`, a push to the checked-out branch under a non-default `receive.denyCurrentBranch`)
+  — every restore refuses with nothing reset, so sequences on that workspace fail until the tree is
+  reduced (a merge whose result fits is admitted) or the limits raised: fail closed rather than
+  fill the disk. `spine serve` logs one Warn per workspace tree that is over the budget when it
+  starts (or builds the workspace's services), naming the limit and the remedy.
+- **One tree object over the git allocation limit is unmeasurable** (review round 1). A single
+  directory whose tree object exceeds `GIT_ALLOC_LIMIT` (4x the per-blob read limit, 16 MiB by
+  default — about 150,000 entries with long names) cannot be listed, so the tree is refused with
+  `git.TreeObjectTooLargeMessage`. Raising `SPINE_GIT_TREE_*` does not help; `spine serve` has no
+  setting for the allocation limit (an embedder raises it with `git.WithMaxBlobBytes` /
+  `git.WithMaxGitAllocBytes`).
 - **Refusals are permanent.** A refused governed merge is a permanent merge failure for the run
   (retrying cannot shrink the tree); a refused branch-scoped write fails with `git_error`. One
   budget covers every client of the process, code-repository clones and merges included, so a

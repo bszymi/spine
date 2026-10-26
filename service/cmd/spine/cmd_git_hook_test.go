@@ -90,7 +90,7 @@ func TestGitHookPreReceive_RefusesOverBudgetTip(t *testing.T) {
 // TestGitHookPreReceive_AdmitsWithinBudget: tips within the budget, a
 // delete and a repeated tip all pass (exit zero, no output).
 func TestGitHookPreReceive_AdmitsWithinBudget(t *testing.T) {
-	dir, small, _, _ := ghRepo(t)
+	dir, small, _, blob := ghRepo(t)
 	in := zero40 + " " + small + " refs/heads/a\n" +
 		zero40 + " " + small + " refs/heads/b\n" +
 		small + " " + zero40 + " refs/heads/gone\n"
@@ -104,19 +104,24 @@ func TestGitHookPreReceive_AdmitsWithinBudget(t *testing.T) {
 	if out, err := runPreReceive(t, dir, ""); err != nil {
 		t.Fatalf("empty input: %v\n%s", err, out)
 	}
+	// A blob tip, and an annotated tag of one, are admitted unmeasured:
+	// no Spine path checks a blob out (review round 1).
+	tag := ghGit(t, dir, []byte("object "+blob+"\ntype blob\ntag key\ntagger a <a@x.invalid> 0 +0000\n\nkey\n"), "hash-object", "-t", "tag", "-w", "--stdin")
+	in = zero40 + " " + blob + " refs/tags/raw\n" + zero40 + " " + tag + " refs/tags/key\n"
+	if out, err := runPreReceive(t, dir, in, ghBudget...); err != nil {
+		t.Fatalf("blob tips: %v\n%s", err, out)
+	}
 }
 
-// TestGitHookPreReceive_RefusesUnmeasurable: a tip that names no tree-ish
-// (a blob), a missing object, a malformed line or bad flags are all
-// refused — fail closed.
+// TestGitHookPreReceive_RefusesUnmeasurable: a missing object, a
+// malformed line or bad flags are all refused — fail closed.
 func TestGitHookPreReceive_RefusesUnmeasurable(t *testing.T) {
-	dir, small, _, blob := ghRepo(t)
+	dir, small, _, _ := ghRepo(t)
 	missing := strings.Repeat("ab", 20)
 	for _, tc := range []struct {
 		name, in string
 		flags    []string
 	}{
-		{"blob tip", zero40 + " " + blob + " refs/heads/x\n", ghBudget},
 		{"missing object", zero40 + " " + missing + " refs/heads/x\n", ghBudget},
 		{"malformed line", small + " refs/heads/x\n", ghBudget},
 		{"abbreviated id", zero40 + " " + small[:12] + " refs/heads/x\n", ghBudget},

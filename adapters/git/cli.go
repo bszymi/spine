@@ -157,6 +157,10 @@ type CLIClient struct {
 	treeBudget    *TreeBudget
 	mutateTimeout time.Duration
 	measureHook   func(MeasureTrace)
+	// measureEnv, when set, is appended to the environment of the
+	// measure's git-config read (filterDrivers): a budgeted Clone's
+	// checkout client passes the clone's own environment.
+	measureEnv []string
 }
 
 // CLIOption configures a CLIClient.
@@ -632,7 +636,8 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 // deadline.
 func (c *CLIClient) checkoutClone(ctx context.Context, path string, created bool, limits CheckoutLimits, cfgArgs, env []string) error {
 	cc := &CLIClient{repoPath: path, maxBlobBytes: c.maxBlobBytes, maxOutputBytes: c.maxOutputBytes,
-		maxGitAllocBytes: c.maxGitAllocBytes, treeBudget: limits.Budget, mutateTimeout: limits.MutateTimeout}
+		maxGitAllocBytes: c.maxGitAllocBytes, treeBudget: limits.Budget, mutateTimeout: limits.MutateTimeout,
+		measureEnv: env}
 	// A refused or failed clone is removed: all of it when Clone created
 	// the directory; otherwise everything in it — git clones only into an
 	// empty directory, so all of it is the clone's, including whatever a
@@ -799,11 +804,13 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 //
 // The whole call (lookup, switch, merge) holds the working tree.
 //
-// With a checkout budget (INIT-024 TASK-003) the target's tree and the
-// source commit's tree are measured after the lookup and before the
-// switch; either over the budget is refused (ErrTreeTooLarge) with
-// nothing switched, merged or moved. The abort path measures nothing: it
-// restores the state the merge started from.
+// With a checkout budget (INIT-024 TASK-003) the merge's RESULT tree is
+// computed (`git merge-tree --write-tree`) on the target tip and measured
+// after the lookup and before the switch, and the target's own tree when
+// the switch to it is a checkout (treebudget_merge.go); over the budget
+// it is refused (ErrTreeTooLarge) with nothing switched, merged or moved.
+// The abort path measures nothing: it restores the state the merge
+// started from.
 func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, error) {
 	if opts.Strategy == "abort" || opts.Source == "--abort" {
 		if opts.Target != "" {
@@ -854,32 +861,17 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 	if err != nil {
 		return MergeResult{}, err
 	}
-	if err := c.checkMergeTrees(ctx, opts.Target, target, source); err != nil {
+	ours, err := c.checkMergeBudget(ctx, opts.Target, target, source)
+	if err != nil {
 		return MergeResult{}, err
 	}
 	if err := c.switchTo(ctx, target); err != nil {
 		return MergeResult{}, err
 	}
+	if err := c.sameMergeBase(ctx, ours); err != nil {
+		return MergeResult{}, err
+	}
 	return c.runMerge(ctx, opts, source)
-}
-
-// checkMergeTrees is the checkout budget of a merge of source (an object
-// id, or "HEAD") into target (short; "" merges into the checked-out
-// branch, whose tree is already written): both trees measured together
-// (checkTrees). No budget: nil and no git process.
-func (c *CLIClient) checkMergeTrees(ctx context.Context, targetValue, target, source string) error {
-	if c.CheckoutLimits().Budget == nil {
-		return nil
-	}
-	revs := []string{source}
-	if target != "" {
-		oid, err := c.resolveBranchOID(ctx, "merge", "target", targetValue, target)
-		if err != nil {
-			return err
-		}
-		revs = append([]string{oid}, revs...)
-	}
-	return c.checkTrees(ctx, "merge", revs...)
 }
 
 // errMergeTargetRequired is Merge's refusal of an implicit target.

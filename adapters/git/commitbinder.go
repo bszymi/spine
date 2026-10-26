@@ -502,10 +502,12 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 	if err := c.verifyCommitOID(ctx, "merge", "source sha", opts.SourceSHA); err != nil {
 		return MergeResult{}, err
 	}
-	// The checkout budget (INIT-024 TASK-003): the bound commit's tree
-	// and the target's, before the switch — over it, nothing is switched
-	// or merged and the target does not move. No budget: no process.
-	if err := c.checkMergeTrees(ctx, opts.Target, target, opts.SourceSHA); err != nil {
+	// The checkout budget (INIT-024 TASK-003): the merge's result tree on
+	// the target tip (and the target's tree when the switch is a
+	// checkout), before the switch — over it, nothing is switched or
+	// merged and the target does not move. No budget: no process.
+	ours, err := c.checkMergeBudget(ctx, opts.Target, target, opts.SourceSHA)
+	if err != nil {
 		return MergeResult{}, err
 	}
 	var base string
@@ -524,6 +526,10 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 			return MergeResult{}, err
 		}
 		base = strings.TrimSpace(head)
+	}
+	// The merge must run on the tip whose result was measured.
+	if ours != "" && base != ours {
+		return MergeResult{}, errMergeTargetMoved()
 	}
 	res, err := c.runMerge(ctx, opts, opts.SourceSHA)
 	if err != nil {

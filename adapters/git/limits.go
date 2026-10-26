@@ -131,9 +131,12 @@ const (
 // (treebudget.go). They apply only to a client that carries a budget
 // (WithTreeBudget, or SetDefaultCheckoutLimits, which `spine serve`
 // calls): an unset field of an enabled TreeBudget means its default.
-// Measured at a560c210 with `git ls-tree -r -l HEAD`: Spine is 1,624
-// entries / 21 MB, SMP 3,708 / 33 MB, so the defaults are ~50x the
-// entries and ~60x the bytes of the largest real tree.
+// Measured with the budget's own count (`ls-tree -r -t`, directories
+// included): Spine's HEAD at this task is 1,961 entries / 21,420,845
+// bytes, SMP 3addd44b 4,393 entries / 33 MB (`git ls-tree -r -l` alone,
+// files only, gives Spine 1,624 at a560c210 and SMP 3,708), so the
+// defaults are ~45x the entries and ~60x the bytes of the largest real
+// tree.
 const (
 	// DefaultTreeMaxEntries caps the entries of a tree — files,
 	// symbolic links, gitlinks and directories — each of which costs an
@@ -141,13 +144,18 @@ const (
 	DefaultTreeMaxEntries int64 = 200_000
 	// DefaultTreeMaxTotalBytes caps the summed sizes of a tree's blobs,
 	// after the checkout-time expansion its .gitattributes can apply
-	// (treebudget.go, attributeExpansion).
+	// (treebudget_attrs.go).
 	DefaultTreeMaxTotalBytes int64 = 2 << 30
 	// DefaultTreeMaxPathBytesTotal caps the summed full-path bytes of a
 	// tree's entries. It also bounds the depth of a tree (a path of
-	// depth d costs O(d^2) summed) and keeps every admitted tree's
-	// listing within DefaultMaxOutputBytes territory, so TASK-004's
-	// listings cannot be wedged by a tree this budget admits.
+	// depth d costs O(d^2) summed). It does NOT keep an admitted tree's
+	// listing within DefaultMaxOutputBytes (review round 1): a
+	// `ls-tree -r --name-only -z` adds one NUL per entry to the path
+	// bytes, so a tree near both defaults (16 MiB of paths, 200,000
+	// entries) lists to ~16.2 MiB and ListFiles refuses it (N-6, INIT-024
+	// TASK-004, whose listing cap must be at least this path budget plus
+	// one byte per entry and a margin, or be derived from the budget).
+	// The default stays 16 MiB pending owner question 1.
 	DefaultTreeMaxPathBytesTotal int64 = 16 << 20
 	// DefaultMutateTimeout is the wall-clock deadline `spine serve`
 	// gives every local mutating git command (owner question 2: 2 min).

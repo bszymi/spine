@@ -184,6 +184,13 @@ type Pool struct {
 	cache map[string]cachedClient
 	sf    singleflight.Group
 
+	// refusals remembers clones the checkout budget refused (INIT-024
+	// TASK-003 review round 1), keyed by remote and budget, so an
+	// over-budget code repository is not fetched in full, measured and
+	// deleted again on every access. Under refusalsMu.
+	refusalsMu sync.Mutex
+	refusals   map[string]cloneRefusal
+
 	cloneCount    atomic.Int64
 	cacheHits     atomic.Int64
 	cacheMisses   atomic.Int64
@@ -327,6 +334,54 @@ func (p *Pool) clientForRepo(ctx context.Context, repo *repository.Repository) (
 	return client, nil
 }
 
+// cloneRefusalTTL is how long a clone the checkout budget refused is
+// remembered: long enough that a busy workspace does not refetch an
+// over-budget remote on every access, short enough that a remote fixed
+// upstream is cloned again without a restart.
+const cloneRefusalTTL = 10 * time.Minute
+
+// cloneRefusal is a remembered checkout-budget refusal of a clone.
+type cloneRefusal struct {
+	err   error
+	until time.Time
+}
+
+// refusalKey keys a refusal by the remote and the process checkout
+// budget (git.SetDefaultCheckoutLimits, which `spine serve` sets): a
+// changed budget, or a binding pointing at another remote, is a fresh
+// attempt. A cloner given its own budget is covered by the TTL alone.
+func refusalKey(cloneURL string) string {
+	b := "none"
+	if l := git.DefaultCheckoutLimits(); l.Budget != nil {
+		b = fmt.Sprintf("%d/%d/%d", l.Budget.MaxEntries, l.Budget.MaxTotalBytes, l.Budget.MaxPathBytesTotal)
+	}
+	return cloneURL + "\x00" + b
+}
+
+func (p *Pool) cachedRefusal(cloneURL string) error {
+	p.refusalsMu.Lock()
+	defer p.refusalsMu.Unlock()
+	key := refusalKey(cloneURL)
+	r, ok := p.refusals[key]
+	if !ok {
+		return nil
+	}
+	if !p.now().Before(r.until) {
+		delete(p.refusals, key)
+		return nil
+	}
+	return r.err
+}
+
+func (p *Pool) rememberRefusal(cloneURL string, err error) {
+	p.refusalsMu.Lock()
+	defer p.refusalsMu.Unlock()
+	if p.refusals == nil {
+		p.refusals = map[string]cloneRefusal{}
+	}
+	p.refusals[refusalKey(cloneURL)] = cloneRefusal{err: err, until: p.now().Add(cloneRefusalTTL)}
+}
+
 // ensureClone makes sure a Git working tree exists at repo.LocalPath,
 // invoking the cloner if not. Concurrent callers with the same target
 // path are coalesced via singleflight keyed on (id, path) so callers
@@ -345,6 +400,9 @@ func (p *Pool) ensureClone(ctx context.Context, repo *repository.Repository, cre
 	if strings.TrimSpace(repo.CloneURL) == "" {
 		return domain.NewError(domain.ErrPrecondition,
 			fmt.Sprintf("repository %q has no clone_url and no local clone", repo.ID))
+	}
+	if err := p.cachedRefusal(repo.CloneURL); err != nil {
+		return err
 	}
 
 	// DoChan (rather than Do) so duplicate waiters can honour their
@@ -385,6 +443,18 @@ func (p *Pool) ensureClone(ctx context.Context, repo *repository.Repository, cre
 		}
 		start := p.now()
 		if err := p.cloner.Clone(cloneCtx, repo.CloneURL, repo.LocalPath, cred); err != nil {
+			if errors.Is(err, git.ErrTreeTooLarge) {
+				// Permanent until the remote or the budget changes: a
+				// retry would fetch the whole remote again only to be
+				// refused. Remembered for cloneRefusalTTL.
+				refused := domain.NewErrorWithCause(domain.ErrPayloadTooLarge,
+					fmt.Sprintf("repository %q is over the git checkout budget and is not cloned", repo.ID), err)
+				p.rememberRefusal(repo.CloneURL, refused)
+				p.logger.Warn("gitpool: clone refused by the checkout budget",
+					"repository_id", repo.ID, "local_path", repo.LocalPath, "error", err,
+					"retry_after", cloneRefusalTTL.String())
+				return nil, refused
+			}
 			p.logger.Error("gitpool: clone failed",
 				"repository_id", repo.ID,
 				"local_path", repo.LocalPath,

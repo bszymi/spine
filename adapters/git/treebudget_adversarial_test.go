@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,33 +104,39 @@ func TestTreeBudget_AttributeExpansionIsCounted(t *testing.T) {
 	}
 }
 
-// TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase: more
-// .gitattributes than the scan reads, one larger than it reads, or a
-// symbolic link named .gitattributes (older git reads through it) are
-// taken as the worst case, never as "no attributes".
+// TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase: the scan
+// reads every .gitattributes file in one batch (review round 1: no jump
+// to the worst case at 65 files). Only past its total cap of attribute
+// text, or for a symbolic link named .gitattributes (older git reads
+// through it), is the worst case assumed — and the reason says so.
 func TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase(t *testing.T) {
 	ctx := context.Background()
 	repo, base, _, _ := tbRepo(t)
-	worst := git.AttributeExpansionForTest("text ident encoding", 40)
+	worst := git.WorstAttributeExpansionForTest(40)
 	harmless := tbGit(t, repo, []byte("*.png binary\n"), "hash-object", "-w", "--stdin")
-	big := tbGit(t, repo, bytes.Repeat([]byte("# padding\n"), 7000), "hash-object", "-w", "--stdin")
+	// Two files of 600,000 bytes each: 1.2 MB of attribute text.
+	big1 := tbGit(t, repo, append([]byte("*.png binary\n"), bytes.Repeat([]byte("# padding\n"), 60000)...), "hash-object", "-w", "--stdin")
+	big2 := tbGit(t, repo, append([]byte("*.jpg binary\n"), bytes.Repeat([]byte("# padding\n"), 60000)...), "hash-object", "-w", "--stdin")
 	file := tbGit(t, repo, []byte("data\n"), "hash-object", "-w", "--stdin")
 
-	many := func() string {
-		var mk strings.Builder
-		for i := 0; i < 70; i++ {
-			sub := tbGit(t, repo, []byte("100644 blob "+harmless+"\t.gitattributes\n"), "mktree")
-			fmt.Fprintf(&mk, "040000 tree %s\td%03d\n", sub, i)
-		}
-		return tbGit(t, repo, []byte(mk.String()), "mktree")
+	var mk strings.Builder
+	for i := 0; i < 70; i++ {
+		sub := tbGit(t, repo, []byte("100644 blob "+harmless+"\t.gitattributes\n"), "mktree")
+		fmt.Fprintf(&mk, "040000 tree %s\td%03d\n", sub, i)
 	}
+	many := tbGit(t, repo, []byte(mk.String()), "mktree")
+	sub := tbGit(t, repo, []byte("100644 blob "+big2+"\t.gitattributes\n"), "mktree")
+	overCap := tbGit(t, repo, []byte("100644 blob "+big1+"\t.gitattributes\n040000 tree "+sub+"\tsub\n100644 blob "+file+"\tf\n"), "mktree")
+	link := tbGit(t, repo, []byte("120000 blob "+file+"\t.GitAttributes\n"), "mktree")
+
 	for _, tc := range []struct {
-		name string
-		tree string
+		name, tree string
+		want       float64
+		reason     string
 	}{
-		{"too many", many()},
-		{"too large", tbGit(t, repo, []byte("100644 blob "+big+"\t.gitattributes\n100644 blob "+file+"\tf\n"), "mktree")},
-		{"symbolic link", tbGit(t, repo, []byte("120000 blob "+file+"\t.GitAttributes\n"), "mktree")},
+		{"70 harmless files are read", many, 1, ""},
+		{"over the text cap", overCap, worst, "exceed the 1048576 bytes the scan reads"},
+		{"symbolic link", link, worst, "symbolic link named .gitattributes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			commit := tbGit(t, repo, nil, "commit-tree", tc.tree, "-p", base, "-m", tc.name)
@@ -137,13 +144,139 @@ func TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if st.Expansion != worst {
-				t.Fatalf("expansion = %v, want the worst case %v", st.Expansion, worst)
+			if st.Expansion != tc.want || !strings.Contains(st.ExpansionReason, tc.reason) {
+				t.Fatalf("expansion = %v (%q), want %v (%q)", st.Expansion, st.ExpansionReason, tc.want, tc.reason)
 			}
 		})
 	}
 	if worst < 90 {
 		t.Fatalf("worst-case factor %v is below ident x crlf x encoding", worst)
+	}
+}
+
+// TestTreeBudget_AttributeParsing (review round 1, P2): attributes are
+// parsed, not substring-matched — comments, unset (-attr) and unspecified
+// (!attr) attributes, attr=false-style values, patterns and other names
+// that merely contain a word expand nothing; whole set attributes,
+// [attr] macros (recursively, with cycles cut) and quoted patterns do.
+func TestTreeBudget_AttributeParsing(t *testing.T) {
+	ident := 47.0 / 4
+	for _, tc := range []struct {
+		text string
+		want float64
+	}{
+		{"# this file is not accidentally normalised\n*.bin -text\n", 1},
+		{"* text=auto\n", 2},
+		{"* text\n", 2},
+		{"* eol=crlf\n", 2},
+		{"* eol=lf\n", 1},
+		{"* crlf=input\n", 1},
+		{"* crlf\n", 2},
+		{"* text=false\n", 1},
+		{"*.c ident\n", ident},
+		{"* -ident !text -crlf\n", 1},
+		{"* ident=false\n", 1},
+		{"identity/*.md binary\n", 1},
+		{"*.x binary\n", 1},
+		{"   # indented comment ident\n", 1},
+		{"\"a quoted ident path\" ident\n", ident},
+		{"\"a quoted path\" -ident\n", 1},
+		{"[attr]stamp ident\n*.md stamp\n", ident},
+		{"[attr]stamp ident\n*.md -stamp\n", 1},
+		{"[attr]a b\n[attr]b ident\n* a\n", ident},
+		{"[attr]a b\n[attr]b a\n* a\n", 1},
+		{"[attr]unused ident\n", 1},
+		{"* working-tree-encoding=UTF-8\n", 1},
+		{"* working-tree-encoding=utf8\n", 1},
+		{"* working-tree-encoding=UTF-16\n", 8},
+		{"* text eol=crlf ident\r\n", 2 * ident},
+		{"* filter=lfs diff=lfs merge=lfs -text\n", 1},
+	} {
+		if got := git.AttributeExpansionForTest(tc.text, 40); got != tc.want {
+			t.Errorf("%q: factor %v, want %v", tc.text, got, tc.want)
+		}
+	}
+	if got := git.AttributeFiltersForTest("* filter=lfs\n*.x -filter\n"); len(got) != 1 || got[0] != "lfs" {
+		t.Errorf("filters = %v, want [lfs]", got)
+	}
+}
+
+// TestTreeBudget_ReviewReproductionsAreAdmitted (review round 1, P2): the
+// two trees the substring heuristic refused — 65 directories each with
+// `* text=auto` (taken as the 188x worst case past 64 files), and a
+// comment containing "accidentally" (read as `ident`) beside `*.bin -text`
+// — are measured at their real factors (2 and 1) and admitted.
+func TestTreeBudget_ReviewReproductionsAreAdmitted(t *testing.T) {
+	ctx := context.Background()
+	repo, base, _, _ := tbRepo(t)
+	budget := git.TreeBudget{MaxEntries: 1000, MaxTotalBytes: 64 << 10, MaxPathBytesTotal: 1 << 20}
+	data := tbGit(t, repo, bytes.Repeat([]byte("y"), 20<<10), "hash-object", "-w", "--stdin")
+	auto := tbGit(t, repo, []byte("* text=auto\n"), "hash-object", "-w", "--stdin")
+	var mk strings.Builder
+	for i := 0; i < 65; i++ {
+		sub := tbGit(t, repo, []byte("100644 blob "+auto+"\t.gitattributes\n"), "mktree")
+		fmt.Fprintf(&mk, "040000 tree %s\td%03d\n", sub, i)
+	}
+	mk.WriteString("100644 blob " + data + "\tdata.bin\n")
+	sixtyFive := tbGit(t, repo, []byte(mk.String()), "mktree")
+	comment := tbGit(t, repo, []byte("# binaries are not accidentally normalised\n*.bin -text\n"), "hash-object", "-w", "--stdin")
+	commented := tbGit(t, repo, []byte("100644 blob "+comment+"\t.gitattributes\n100644 blob "+data+"\tdata.bin\n"), "mktree")
+	for _, tc := range []struct {
+		name, tree string
+		want       float64
+	}{
+		{"65 dirs of text=auto", sixtyFive, 2},
+		{"accidentally", commented, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			commit := tbGit(t, repo, nil, "commit-tree", tc.tree, "-p", base, "-m", tc.name)
+			st, err := budget.Measure(ctx, git.NewCLIClient(repo), commit)
+			if err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			if st.Expansion != tc.want {
+				t.Fatalf("expansion = %v (%s), want %v", st.Expansion, st.ExpansionReason, tc.want)
+			}
+		})
+	}
+}
+
+// TestTreeBudget_RefusalNamesTheFactor (review round 1, P2): a refusal
+// applied with an expansion says the stored size, the factor and which
+// attribute it comes from, so an operator is not told to raise the limit
+// 188-fold for a tree that stores a fraction of it.
+func TestTreeBudget_RefusalNamesTheFactor(t *testing.T) {
+	ctx := context.Background()
+	repo, base, _, _ := tbRepo(t)
+	c := tbAttrCommit(t, repo, base, "* ident\n", bytes.Repeat([]byte("$Id$"), 4000))
+	err := git.TreeBudget{MaxTotalBytes: 64 << 10}.Check(ctx, git.NewCLIClient(repo), c)
+	tl := requireTreeTooLarge(t, err, git.TreeLimitTotalBytes)
+	if tl.Stored != 16008 || tl.Expansion != 47.0/4 || !strings.Contains(tl.Reason, "ident") {
+		t.Fatalf("refusal = %+v", tl)
+	}
+	for _, want := range []string{"16008 bytes stored", "x11.75: ident x11.75", "65536-byte"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message %q lacks %q", err, want)
+		}
+	}
+}
+
+// TestTreeBudget_FilterDriverIsUnbounded (review round 1): a filter=<name>
+// whose smudge driver the host's git config defines writes whatever the
+// driver produces, so the tree is refused at any limit and the refusal
+// says why; the same attribute with no driver configured is inert.
+func TestTreeBudget_FilterDriverIsUnbounded(t *testing.T) {
+	ctx := context.Background()
+	repo, base, _, _ := tbRepo(t)
+	c := tbAttrCommit(t, repo, base, "* filter=fetch\n", []byte("pointer\n"))
+	if err := (git.TreeBudget{}).Check(ctx, git.NewCLIClient(repo), c); err != nil {
+		t.Fatalf("no driver configured: %v", err)
+	}
+	tbGit(t, repo, nil, "config", "filter.fetch.smudge", "cat")
+	err := (git.TreeBudget{}).Check(ctx, git.NewCLIClient(repo), c)
+	tl := requireTreeTooLarge(t, err, git.TreeLimitTotalBytes)
+	if !math.IsInf(tl.Expansion, 1) || !strings.Contains(err.Error(), `filter="fetch"`) || !strings.Contains(err.Error(), "cannot admit it at any setting") {
+		t.Fatalf("refusal: %v (%+v)", err, tl)
 	}
 }
 
@@ -318,7 +451,11 @@ func TestClone_CheckoutKeepsTheCloneEnvironment(t *testing.T) {
 		t.Fatalf("the host's smudge filter ran in an isolated clone's checkout: %v", err)
 	}
 
-	ambient := git.NewCLIClient("", git.WithTreeBudget(smallBudget))
+	// The control: a deadline-only client also splits the clone, and its
+	// reset runs with the host environment, so the filter runs. (A budgeted
+	// client with ambient credentials refuses such a tree outright: the
+	// host defines a smudge driver for it — TestTreeBudget_FilterDriverIsUnbounded.)
+	ambient := git.NewCLIClient("", git.WithMutateTimeout(time.Minute))
 	amb := filepath.Join(t.TempDir(), "amb")
 	if err := ambient.Clone(ctx, "file://"+src, amb); err != nil {
 		t.Fatalf("ambient clone: %v", err)
@@ -404,5 +541,32 @@ func TestTreeBudget_RestoreMeasuresHEADBeforeItsReset(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repo, "docs")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the restore wrote the bomb: %v", err)
+	}
+}
+
+// TestTreeBudget_TreeObjectOverTheAllocLimitSaysWhatItIs (review round 1,
+// P3): one tree object larger than GIT_ALLOC_LIMIT (here one directory of
+// 10,000 long names, ~1.3 MB, against the 1 MiB floor a 64 KiB per-blob
+// limit gives) cannot be listed at all. The refusal says so, and that the
+// tree limits are not the knob.
+func TestTreeBudget_TreeObjectOverTheAllocLimitSaysWhatItIs(t *testing.T) {
+	ctx := context.Background()
+	repo, base, _, _ := tbRepo(t)
+	blob := tbGit(t, repo, []byte("x"), "hash-object", "-w", "--stdin")
+	var mk strings.Builder
+	long := strings.Repeat("n", 90)
+	for i := 0; i < 10000; i++ {
+		fmt.Fprintf(&mk, "100644 blob %s\t%s%05d\n", blob, long, i)
+	}
+	tree := tbGit(t, repo, []byte(mk.String()), "mktree")
+	commit := tbGit(t, repo, nil, "commit-tree", tree, "-p", base, "-m", "wide")
+	c := git.NewCLIClient(repo, git.WithMaxBlobBytes(64<<10))
+	_, err := git.TreeBudget{MaxEntries: 1 << 40, MaxTotalBytes: 1 << 40, MaxPathBytesTotal: 1 << 40}.Measure(ctx, c, commit)
+	var ge *git.GitError
+	if !errors.As(err, &ge) || ge.Message != git.TreeObjectTooLargeMessage || !errors.Is(err, git.ErrOutputTooLarge) || errors.Is(err, git.ErrTreeTooLarge) {
+		t.Fatalf("err = %v, want the tree-object refusal", err)
+	}
+	if !strings.Contains(err.Error(), "raising the tree limits does not help") {
+		t.Fatalf("message: %v", err)
 	}
 }
