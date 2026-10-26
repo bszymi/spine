@@ -15,7 +15,8 @@ package git
 // them the way git reads attribute lines, conservatively:
 //
 //   - blank lines and lines whose first non-blank byte is '#' are
-//     comments; a pattern is the first field, or a C-quoted string;
+//     comments; a NUL ends a line, as it does for git's C-string parser;
+//     a pattern is the first field, or a C-quoted string;
 //   - each attribute after the pattern is "name" (set), "-name" (unset),
 //     "!name" (unspecified) or "name=value"; only a SET attribute can
 //     expand content, so unset and unspecified ones are ignored;
@@ -130,8 +131,15 @@ func (s *attrSet) add(text []byte) {
 		} else {
 			line, text = text, nil
 		}
+		// git parses an attribute line as a C string: a NUL ends it (and,
+		// reading a blob, ends the whole file; reading a worktree file,
+		// only the line). Ending the line at a NUL and reading on is the
+		// superset of both (codex review).
+		if i := bytes.IndexByte(line, 0); i >= 0 {
+			line = line[:i]
+		}
 		line = bytes.TrimRight(line, "\r")
-		line = bytes.TrimLeft(line, " \t")
+		line = bytes.TrimLeft(line, " \t\r")
 		if len(line) == 0 || line[0] == '#' {
 			continue
 		}

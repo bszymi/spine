@@ -48,6 +48,7 @@ func TestTreeBudget_AttributeExpansionIsCounted(t *testing.T) {
 	}{
 		{"ident", "* ident\n", true},
 		{"macro", "[attr]stamp ident\n*.md stamp\n", true},
+		{"nul-terminated", "* ident\x00hidden\n", true},
 		{"encoding", "*.md working-tree-encoding=UTF-32\n", true},
 		{"eol only (2x fits)", "* text eol=crlf\n", false},
 		{"no expanding attribute", "*.png binary\n", false},
@@ -191,6 +192,9 @@ func TestTreeBudget_AttributeParsing(t *testing.T) {
 		{"* working-tree-encoding=UTF-16\n", 8},
 		{"* text eol=crlf ident\r\n", 2 * ident},
 		{"* filter=lfs diff=lfs merge=lfs -text\n", 1},
+		{"* ident\x00hidden\n", ident},       // a NUL ends the line, as in git (codex review)
+		{"*.x binary\x00\n* ident\n", ident}, // and the next line is still read
+		{"* text\x00 ident\n", 2},
 	} {
 		if got := git.AttributeExpansionForTest(tc.text, 40); got != tc.want {
 			t.Errorf("%q: factor %v, want %v", tc.text, got, tc.want)
