@@ -188,13 +188,18 @@ type governanceGuard struct {
 const CommitMetaGovernanceBlockedTarget = "spine.governance.blocked_target"
 
 // CommitMetaGovernanceStartedBy is the reserved commit_meta key naming the
-// actor who started a workflow-lifecycle planning run (review round 1).
-// startWorkflowPlanningRun writes the body the caller sent onto the run
-// branch, so that actor authored the run's content, yet no step execution
-// or assignment records them; the lifecycle exemption's separation-of-
-// duties check needs them (reviewerIsNotAuthor). Written once, at start,
-// only while the guard and the exemption are on; reserved, so workflow
-// outcomes can never set it and TASK-005 keeps it across bindings.
+// actor who started a planning-mode run (INIT-023 TASK-006 review round 1;
+// generalised from workflow-lifecycle runs by INIT-024 TASK-001). Every
+// planning starter writes the content the caller sent onto the run branch
+// (StartPlanningRun the artifact, startWorkflowPlanningRun the workflow
+// body), so that actor authored the run's content, yet no step execution
+// or assignment records them. Two checks need them: separation of duties
+// (runAuthor, for every planning run) and the lifecycle exemption
+// (reviewerIsNotAuthor). Written once, at start, before the content, by
+// recordPlanningStarter, only while separation of duties is on or the
+// guard and the exemption are on; reserved, so workflow outcomes can never
+// set it, TASK-005 keeps it across bindings, and mergeCommitMeta keeps it
+// with binding off too.
 const CommitMetaGovernanceStartedBy = "spine.governance.started_by"
 
 // errGovernanceTargetBlocked is the cause of the error for a merge refused
@@ -810,25 +815,106 @@ func (o *Orchestrator) reviewerIsNotAuthor(ctx context.Context, run *domain.Run,
 	return true, ""
 }
 
-// recordLifecycleStarter records who started a workflow-lifecycle planning
-// run (CommitMetaGovernanceStartedBy), for the lifecycle exemption's
-// separation-of-duties check. Only while the guard and the exemption are
-// on (the zero value writes nothing). No actor on ctx, or a failed write,
-// records nothing — the run then gets no exemption, and its workflow edit
-// needs an operator approval (fail toward approval); the run itself starts
-// as before.
-func (o *Orchestrator) recordLifecycleStarter(ctx context.Context, runID string) {
-	if o.governance == nil || !o.governance.cfg.ExemptWorkflowLifecycleTaskPath {
-		return
+// requirePlanningStarter is every planning starter's first check under
+// separation of duties (INIT-024 TASK-001): the run's content is written by
+// the caller, so the caller must be known before anything exists — no run
+// row, no branch, no git read (so an unauthenticated caller also learns
+// nothing about the repository). The actor comes from domain.ActorFromContext
+// only: observe.ActorID is a logging value, never authority (Decision 3).
+// ErrUnauthorized, not a wiring error (owner question 2 default): the
+// standalone gateway binds the authenticated actor for every request, so
+// only an unauthenticated (dev-mode) or misbuilt caller reaches this. With
+// the policy off it checks nothing (the zero value starts as before).
+//
+// With a step-entry resolver installed (StepEntryPolicy.Actors — an embedder
+// whose actors are not all rows in Spine's actor table) the starter must
+// also resolve through it, exactly as a bind would (entryActor: the
+// resolver's answer must echo the id). Separation of duties compares the
+// recorded starter with the actor later bound to the review byte for byte,
+// so a starter recorded under any other identifier for the same person (an
+// embedder's platform user id instead of its workspace step-entry handle)
+// would never match, and that person could review their own content: N-3
+// silently reopened, with no fail-closed signal (INIT-024 TASK-001 review
+// round 1). An id the resolver does not know is ErrUnauthorized; any other
+// resolver error keeps its code (ErrUnavailable stays 503), so the start
+// fails closed. Without a resolver the binding paths look actors up in
+// Spine's own actor table, where the gateway's authenticated actor already
+// lives, so nothing more is checked.
+func (o *Orchestrator) requirePlanningStarter(ctx context.Context) error {
+	if !o.entryPolicy.SeparationOfDuties {
+		return nil
 	}
 	a := domain.ActorFromContext(ctx)
 	if a == nil || a.ActorID == "" {
-		return
+		return domain.NewError(domain.ErrUnauthorized,
+			"a planning run under separation of duties needs an authenticated starter")
 	}
-	if err := o.mergeRunCommitMeta(ctx, runID, map[string]string{CommitMetaGovernanceStartedBy: a.ActorID}); err != nil {
-		observe.Logger(ctx).Warn("governance guard: the lifecycle run's starter was not recorded; its workflow edit will need an operator approval",
-			"run_id", runID, "error", err)
+	if o.entryPolicy.Actors == nil {
+		return nil
 	}
+	if _, err := o.entryActor(ctx, a.ActorID); err != nil {
+		var se *domain.SpineError
+		if errors.As(err, &se) && se.Code == domain.ErrNotFound {
+			return domain.NewError(domain.ErrUnauthorized,
+				"a planning run under separation of duties needs a starter the step-entry actor resolver binds; the context's actor id does not resolve")
+		}
+		return err
+	}
+	return nil
+}
+
+// recordPlanningStarter records who started a planning-mode run
+// (CommitMetaGovernanceStartedBy) in the store and in run (the run the
+// start returns). Every planning starter calls it from its
+// onBranch callback, after the run row exists (CreateRun does not persist
+// commit_meta, so the record must be a commit_meta write) and BEFORE it
+// writes the caller's content: no content reaches a run branch without its
+// author on record. It writes only while one of its readers is on (the zero
+// value makes no store call):
+//
+//   - separation of duties (runAuthor counts the starter as a run author):
+//     a missing actor is ErrUnauthorized (requirePlanningStarter already
+//     refused it before the run existed; this is defence in depth), and a
+//     failed write is returned, so the caller aborts the start before any
+//     content is written;
+//   - the governance guard's lifecycle exemption (reviewerIsNotAuthor): as
+//     before INIT-024, no actor, or a failed write, records nothing — the
+//     run then gets no exemption, and its workflow edit needs an operator
+//     approval (fail toward approval); the run itself starts as before.
+//
+// The exemption reads the key only for workflow-lifecycle runs; writing it
+// for other planning runs under the guard is inert, and keeps such a run
+// reviewable if separation of duties is turned on later.
+func (o *Orchestrator) recordPlanningStarter(ctx context.Context, run *domain.Run) error {
+	sod := o.entryPolicy.SeparationOfDuties
+	if !sod && (o.governance == nil || !o.governance.cfg.ExemptWorkflowLifecycleTaskPath) {
+		return nil
+	}
+	a := domain.ActorFromContext(ctx)
+	if a == nil || a.ActorID == "" {
+		if sod {
+			return domain.NewError(domain.ErrUnauthorized,
+				"a planning run under separation of duties needs an authenticated starter")
+		}
+		return nil
+	}
+	if err := o.mergeRunCommitMeta(ctx, run.RunID, map[string]string{CommitMetaGovernanceStartedBy: a.ActorID}); err != nil {
+		if sod {
+			return fmt.Errorf("record the planning run's starter: %w", err)
+		}
+		observe.Logger(ctx).Warn("governance guard: the planning run's starter was not recorded; if it is a workflow-lifecycle run, its workflow edit will need an operator approval",
+			"run_id", run.RunID, "error", err)
+		return nil
+	}
+	// Mirror the write into the run the start returns (a fresh map: the
+	// caller's may be shared with a store).
+	meta := make(map[string]string, len(run.CommitMeta)+1)
+	for k, v := range run.CommitMeta {
+		meta[k] = v
+	}
+	meta[CommitMetaGovernanceStartedBy] = a.ActorID
+	run.CommitMeta = meta
+	return nil
 }
 
 // completedAfter orders completed executions by completion time, then by
@@ -876,7 +962,9 @@ type commitMetaMerger interface {
 // mergeRunCommitMeta writes patch over the run's commit_meta, keeping
 // every other key. The read-modify-write fallback is safe only because
 // the guard writes only committing runs, where routeStepOutcome (whose
-// writes replace the map) does not run; concurrent engine writes to the
+// writes replace the map) does not run, and recordPlanningStarter writes
+// only a pending run before its entry step exists, where no step outcome
+// can be routed yet; concurrent engine writes to the
 // same run in committing (a scheduler attempt's consumption marker and an
 // operator decision) can lose one another's keys there — stores should
 // implement commitMetaMerger (*store.PostgresStore does).

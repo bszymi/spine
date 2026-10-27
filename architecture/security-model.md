@@ -188,8 +188,31 @@ F3 separation-of-duties amplifier). The engine now enforces these through an
 | `EnforceExecutionMode` | Engine-owned steps (`type: internal` or `mode: spine_only`) can never be assigned or claimed (409); `automated_only` / `ai_only` / `human_only` bind only `automated_system` / `ai_agent` / `human` actors (409). |
 | `EnforcePreconditions` | The engine evaluates the step's preconditions at assign and claim (412), strictly ([Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2); activation uses the same strict evaluator, so a failing step stays `waiting` and is not dispatched. |
 | `RequireSkillsOnAssign` | `required_skills` on assign (409; 503 if no skill lookup is wired). |
-| `SeparationOfDuties` | A run author cannot be bound to the run's `review` steps, and a live reviewer cannot take its author steps (403; 503 if the assignment ledger cannot be read) — by assignment, claim or engine auto-selection (which leaves the step `waiting`). The candidate listing does not offer an actor what this rule would refuse. Within a process a run's check and bind are serialised. See [Actor Model](/architecture/actor-model.md) §7.3. |
+| `SeparationOfDuties` | A run author cannot be bound to the run's `review` steps, and a live reviewer cannot take its author steps (403; 503 if the assignment ledger cannot be read) — by assignment, claim or engine auto-selection (which leaves the step `waiting`). A run author is an actor bound to an author execution of the run, or, for a planning-mode run, the actor who started it (INIT-024 TASK-001; below). The candidate listing does not offer an actor what this rule would refuse. Within a process a run's check and bind are serialised. See [Actor Model](/architecture/actor-model.md) §7.3. |
 | `TerminateStepsOnCancel` | Cancelling or failing a run (including the scheduler's run timeout) moves its live executions to `skipped` / `run_terminated` and cancels their active assignments. Safe only together with `EnforceRunStatus`. |
+
+**The planning starter is a run author (INIT-024 TASK-001, review finding N-3).** A
+planning-mode run (`StartPlanningRun`: `POST /runs` with `mode: planning` or
+`POST /artifacts/entry`; `StartWorkflowPlanningRun` / `StartWorkflowUpdatePlanningRun`:
+`POST` / `PUT /workflows` below operator) writes the caller's content onto its branch at start,
+and the caller is bound to no execution. Under `SeparationOfDuties`:
+
+- every planning start needs an authenticated actor on the context (`domain.WithActor`; the
+  gateway binds it for every authenticated request). Without one the start is refused with
+  `ErrUnauthorized` (401) before any run row, branch or git read exists. An embedder with an
+  `Actors` resolver must put the id it binds on the context: an id the resolver does not resolve
+  is refused the same way;
+- the engine records that actor in the run's `commit_meta` (`spine.governance.started_by`, the key
+  the ADR-016 lifecycle exemption already reads) before it writes the content; a failed record
+  aborts the start (branch deleted, run marked failed);
+- the recorded starter is a run author, so it cannot be bound to the run's `review` steps (403,
+  naming `(run start)`), whoever submitted the draft;
+- a planning run with no recorded starter — started before the upgrade, or while the policy was
+  off — can be reviewed by **nobody** (403, `(run start: starter not recorded)`): cancel and restart
+  it, or run `SPINE_STEP_ENTRY_POLICY=legacy` for the migration window (`KNOWN-LIMITATIONS.md`).
+
+The comparison is exact, like every separation-of-duties compare. A standard run's starter wrote
+no content and is not an author.
 
 Checks run in a fixed order and nothing is written before a bind is refused.
 An embedder whose actors are not all rows in Spine's actor table supplies an

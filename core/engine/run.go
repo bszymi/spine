@@ -214,6 +214,12 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	if o.artifactWriter == nil {
 		return nil, domain.NewError(domain.ErrUnavailable, "artifact writer not configured")
 	}
+	// Separation of duties counts the starter as a run author (INIT-024
+	// TASK-001): no starter, no run — refused before anything is read or
+	// persisted.
+	if err := o.requirePlanningStarter(ctx); err != nil {
+		return nil, err
+	}
 	if artifactContent == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "artifact_content is required")
 	}
@@ -270,43 +276,63 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	runID := fmt.Sprintf("run-%s", traceID[:8])
 	branchName := generateBranchNameWithSuffix(domain.RunModePlanning, parsed.ID, artifactPath, runID)
 
+	run := &domain.Run{
+		RunID:                runID,
+		TaskPath:             artifactPath,
+		WorkflowPath:         binding.Workflow.Path,
+		WorkflowID:           binding.Workflow.ID,
+		WorkflowVersion:      binding.CommitSHA,
+		WorkflowVersionLabel: binding.VersionLabel,
+		Status:               domain.RunStatusPending,
+		Mode:                 domain.RunModePlanning,
+		CurrentStepID:        binding.Workflow.EntryStep,
+		BranchName:           branchName,
+		AffectedRepositories: []string{domain.PrimaryRepositoryID},
+		PrimaryRepository:    true,
+		TraceID:              traceID,
+		CreatedAt:            time.Now(),
+	}
 	return o.startRunCommon(ctx, startRunParams{
-		run: &domain.Run{
-			RunID:                runID,
-			TaskPath:             artifactPath,
-			WorkflowPath:         binding.Workflow.Path,
-			WorkflowID:           binding.Workflow.ID,
-			WorkflowVersion:      binding.CommitSHA,
-			WorkflowVersionLabel: binding.VersionLabel,
-			Status:               domain.RunStatusPending,
-			Mode:                 domain.RunModePlanning,
-			CurrentStepID:        binding.Workflow.EntryStep,
-			BranchName:           branchName,
-			AffectedRepositories: []string{domain.PrimaryRepositoryID},
-			PrimaryRepository:    true,
-			TraceID:              traceID,
-			CreatedAt:            time.Now(),
-		},
+		run:   run,
 		wfDef: binding.Workflow,
 		onBranch: func(ctx context.Context, branch string) error {
-			log := observe.Logger(ctx)
+			// The starter is on record before their content is on the
+			// branch (INIT-024 TASK-001). A failed record under separation
+			// of duties aborts the start like a failed write: the branch is
+			// deleted, and — new failure, so only with the policy on — the
+			// pending row is marked failed rather than left for recovery
+			// to activate.
+			if err := o.recordPlanningStarter(ctx, run); err != nil {
+				o.deletePlanningBranch(ctx, branch, "planning")
+				o.failOrphanPlanningRun(ctx, runID)
+				return err
+			}
 			branchCtx := artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
 			branchCtx = observe.WithTraceID(branchCtx, traceID)
 			branchCtx = observe.WithRunID(branchCtx, runID)
 			if _, err := o.artifactWriter.Create(branchCtx, artifactPath, artifactContent); err != nil {
-				if delErr := o.git.DeleteBranch(ctx, branch); delErr != nil {
-					log.Warn("failed to clean up planning branch", "branch", branch, "error", delErr)
-				}
-				if autoPushEnabled() {
-					if delErr := o.git.DeleteRemoteBranch(ctx, "origin", branch); delErr != nil {
-						log.Warn("auto-push: failed to clean up remote planning branch", "branch", branch, "error", delErr)
-					}
-				}
+				o.deletePlanningBranch(ctx, branch, "planning")
 				return fmt.Errorf("create artifact on branch: %w", err)
 			}
 			return nil
 		},
 	})
+}
+
+// deletePlanningBranch removes a planning run's branch (and, with
+// auto-push, its remote copy) after its start failed on the branch. Best
+// effort: a failure is logged and the caller's error is what is returned.
+// label names the run kind in the log ("planning", "workflow planning").
+func (o *Orchestrator) deletePlanningBranch(ctx context.Context, branch, label string) {
+	log := observe.Logger(ctx)
+	if delErr := o.git.DeleteBranch(ctx, branch); delErr != nil {
+		log.Warn("failed to clean up "+label+" branch", "branch", branch, "error", delErr)
+	}
+	if autoPushEnabled() {
+		if delErr := o.git.DeleteRemoteBranch(ctx, "origin", branch); delErr != nil {
+			log.Warn("auto-push: failed to clean up remote "+label+" branch", "branch", branch, "error", delErr)
+		}
+	}
 }
 
 // StartWorkflowPlanningRun creates a planning-mode run governing the
@@ -352,6 +378,12 @@ const workflowPlanningBaseRef = "HEAD"
 func (o *Orchestrator) startWorkflowPlanningRun(ctx context.Context, workflowID, body string, update bool) (*StartRunResult, error) {
 	if o.workflowWriter == nil {
 		return nil, domain.NewError(domain.ErrUnavailable, "workflow writer not configured")
+	}
+	// As in StartPlanningRun (INIT-024 TASK-001): refused before the
+	// pre-checks, so an actor-less caller also learns nothing about which
+	// workflows exist.
+	if err := o.requirePlanningStarter(ctx); err != nil {
+		return nil, err
 	}
 	if workflowID == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "workflow id is required")
@@ -430,44 +462,44 @@ func (o *Orchestrator) startWorkflowPlanningRun(ctx context.Context, workflowID,
 		write, verb = o.workflowWriter.Update, "update"
 	}
 
+	run := &domain.Run{
+		RunID:                runID,
+		TaskPath:             path,
+		WorkflowPath:         binding.Workflow.Path,
+		WorkflowID:           binding.Workflow.ID,
+		WorkflowVersion:      binding.CommitSHA,
+		WorkflowVersionLabel: binding.VersionLabel,
+		Status:               domain.RunStatusPending,
+		Mode:                 domain.RunModePlanning,
+		CurrentStepID:        binding.Workflow.EntryStep,
+		BranchName:           branchName,
+		AffectedRepositories: []string{domain.PrimaryRepositoryID},
+		PrimaryRepository:    true,
+		TraceID:              traceID,
+		CreatedAt:            time.Now(),
+	}
 	return o.startRunCommon(ctx, startRunParams{
-		run: &domain.Run{
-			RunID:                runID,
-			TaskPath:             path,
-			WorkflowPath:         binding.Workflow.Path,
-			WorkflowID:           binding.Workflow.ID,
-			WorkflowVersion:      binding.CommitSHA,
-			WorkflowVersionLabel: binding.VersionLabel,
-			Status:               domain.RunStatusPending,
-			Mode:                 domain.RunModePlanning,
-			CurrentStepID:        binding.Workflow.EntryStep,
-			BranchName:           branchName,
-			AffectedRepositories: []string{domain.PrimaryRepositoryID},
-			PrimaryRepository:    true,
-			TraceID:              traceID,
-			CreatedAt:            time.Now(),
-		},
+		run:   run,
 		wfDef: binding.Workflow,
 		onBranch: func(ctx context.Context, branch string) error {
-			log := observe.Logger(ctx)
+			// The caller writes the body: separation of duties (INIT-024
+			// TASK-001) and the lifecycle exemption (INIT-023 TASK-006) need
+			// them on record, before the body is on the branch. A failed
+			// record under separation of duties aborts the start like a
+			// failed write.
+			if err := o.recordPlanningStarter(ctx, run); err != nil {
+				o.deletePlanningBranch(ctx, branch, "workflow planning")
+				o.failOrphanPlanningRun(ctx, runID)
+				return err
+			}
 			branchCtx := workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
 			branchCtx = observe.WithTraceID(branchCtx, traceID)
 			branchCtx = observe.WithRunID(branchCtx, runID)
 			if _, err := write(branchCtx, workflowID, body); err != nil {
-				if delErr := o.git.DeleteBranch(ctx, branch); delErr != nil {
-					log.Warn("failed to clean up workflow planning branch", "branch", branch, "error", delErr)
-				}
-				if autoPushEnabled() {
-					if delErr := o.git.DeleteRemoteBranch(ctx, "origin", branch); delErr != nil {
-						log.Warn("auto-push: failed to clean up remote workflow planning branch", "branch", branch, "error", delErr)
-					}
-				}
-				o.failOrphanWorkflowRun(ctx, runID)
+				o.deletePlanningBranch(ctx, branch, "workflow planning")
+				o.failOrphanPlanningRun(ctx, runID)
 				return fmt.Errorf("%s workflow on branch: %w", verb, err)
 			}
-			// The caller wrote the body: the lifecycle exemption's
-			// separation of duties needs them (INIT-023 TASK-006).
-			o.recordLifecycleStarter(ctx, runID)
 			return nil
 		},
 	})
@@ -506,19 +538,24 @@ func (o *Orchestrator) workflowPlanningPreCheck(ctx context.Context, path string
 	return nil
 }
 
-// failOrphanWorkflowRun marks a workflow planning run whose branch write
-// failed as failed (design-check L1). startRunCommon persists the run
+// failOrphanPlanningRun marks a planning run whose start failed on its
+// branch as failed (design-check L1). startRunCommon persists the run
 // before onBranch runs, so without this the record stays pending with its
 // branch deleted: scheduler recovery promotes pending runs to active, and
-// the standalone gateway's one-open-lifecycle-run rule would then answer
-// 409 for that workflow until an operator cancelled the orphan. Best
-// effort: a failed transition is logged and the writer's error is still
-// what the caller sees. The transition is a compare-and-swap from pending,
-// through the existing RunStore method (no new store method).
-func (o *Orchestrator) failOrphanWorkflowRun(ctx context.Context, runID string) {
+// for a workflow planning run the standalone gateway's
+// one-open-lifecycle-run rule would then answer 409 for that workflow
+// until an operator cancelled the orphan. Used for every workflow planning
+// failure on the branch and for a failed starter record (INIT-024
+// TASK-001, reachable only under separation of duties); a generic planning
+// run whose artifact write fails keeps its pre-INIT-024 behaviour (the row
+// is left for recovery, which embedders rely on). Best effort: a failed
+// transition is logged and the caller's error is still what the caller
+// sees. The transition is a compare-and-swap from pending, through the
+// existing RunStore method (no new store method).
+func (o *Orchestrator) failOrphanPlanningRun(ctx context.Context, runID string) {
 	applied, err := o.store.TransitionRunStatus(context.WithoutCancel(ctx), runID, domain.RunStatusPending, domain.RunStatusFailed)
 	if err != nil || !applied {
-		observe.Logger(ctx).Warn("workflow planning run start failed; could not mark the run failed",
+		observe.Logger(ctx).Warn("planning run start failed; could not mark the run failed",
 			"run_id", runID, "applied", applied, "error", err)
 	}
 }
