@@ -182,7 +182,9 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 		//    configured" (503) or a store error (500) carries a
 		//    retryable/server-side signal that operators and
 		//    clients need; collapsing it to 401 would misreport
-		//    the failure as bad credentials.
+		//    the failure as bad credentials. Single mode only: in
+		//    shared mode validatePooledGitAuth answers every
+		//    failure with the uniform 401 (INIT-024 TASK-007).
 		//  - Except a 401 itself, which is always the uniform one
 		//    (INIT-024 TASK-006 adversarial review): its message
 		//    ("invalid token", "invalid authorization header format",

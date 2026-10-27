@@ -134,10 +134,9 @@ workspace, missing auth service, unknown, expired or revoked token, suspended ac
 error — is one `401` with one body on `/api/v1`, so a caller cannot tell an existing workspace from
 a missing one by status or message; a request without a well-formed bearer is refused before the
 workspace is even resolved. On `/git` the same holds for every failure of a well-formed bearer
-(build failure, missing auth service, token-store error, every token state). The `/git` cases of a
-missing or malformed `Authorization` header, and of a push while receive-pack is off (a `403` for
-an existing workspace), are made uniform by INIT-024 TASK-006, not by this change. The cause is
-logged server-side.
+(build failure, missing auth service, token-store error, every token state), for a missing or
+malformed `Authorization` header, and for a push while receive-pack is off (the `403` naming the
+flag is shown only to a caller authenticated for the workspace). The cause is logged server-side.
 
 ---
 

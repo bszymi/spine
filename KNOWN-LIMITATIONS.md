@@ -953,10 +953,12 @@ The following limitations have been resolved:
   (TASK-006 owner question 2).
 - **Residual: `SPINE_GIT_HTTP_DEV_NO_AUTH` is not workspace-scoped.** The development flag (accepted
   only with `SPINE_ENV=development`) lets every client read every workspace, in every mode.
-- **Residual: a server without any auth service tells workspaces apart.** The one known exception
-  to the uniform `401` above: a resolved workspace whose process and workspace auth services are
-  both missing answers `503` "authentication not configured" to a caller presenting a bearer, where
-  a missing workspace answers `401` — a misconfiguration signal kept on purpose for operators.
+- **Residual: a single-mode server without an auth service tells workspaces apart.** The one
+  known exception to the uniform `401` above, in single mode only: when the server has no auth
+  service, a resolved workspace answers `503` "authentication not configured" to a caller
+  presenting a bearer, where a missing workspace answers `401` — a misconfiguration signal kept on
+  purpose for operators. In shared mode a workspace whose ServiceSet has no auth service answers
+  the uniform `401` like every other refusal (INIT-024 TASK-007); the cause is logged at `Error`.
 - **Residual: TCP-level proxies are invisible.** A proxy that relays connections without adding a
   header — Docker's userland proxy for a published port, which connects from the bridge gateway
   (`x.y.z.1`), or an L4 load balancer — looks like a direct peer. Never put such an address in

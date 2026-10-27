@@ -29,9 +29,9 @@ fields only.
   workspace, missing auth service, unknown, expired or revoked token, suspended actor, token-store
   error — is one `401` with one body, and a request without a well-formed bearer is refused before
   the workspace is resolved (no registry query or platform binding fetch). On `/git` in shared mode
-  every failure of a well-formed bearer is the uniform `401` too, where a build failure or a
-  missing auth service answered `503` and a token-store error `500`; the `/git` cases of a missing
-  or malformed header and of a push with receive-pack off are made uniform by INIT-024 TASK-006.
+  every refusal of a caller not authenticated for the workspace is the uniform `401` too: a missing
+  or malformed header, a push with receive-pack off, and every failure of a well-formed bearer,
+  where a build failure or a missing auth service answered `503` and a token-store error `500`.
   Causes are logged at `Warn`/`Error`.
 - **A workspace connection string never reaches an error or a log.** pgx's parse error quotes the
   workspace's `database_url` and masks only a userinfo password, so a password given as a query
@@ -108,14 +108,14 @@ Closes review finding N-2 (P2, standalone shared mode). No runtime schema change
   a junk or malformed bearer got the auth error's own message (`invalid token`, `invalid
   authorization header format`, `token expired`, ...) only for a workspace that exists. Every
   authentication failure now gets the uniform message. A `503`/`500` for a resolved workspace is
-  still surfaced.
+  still surfaced in single mode; in shared mode TASK-007 (above) makes it the uniform `401` too.
 - **With push off, the flag's `403` is for authenticated callers only (review round 1).** A push
   request (`info/refs?service=git-receive-pack`, `POST git-receive-pack`) with
   `SPINE_GIT_RECEIVE_PACK_ENABLED` off skipped the auth gate whenever the workspace resolved, so it
   answered `403` for an existing workspace and `401` otherwise. It now meets the auth gate: a caller
   authenticated for the workspace gets the `403` naming the flag, and any other caller the uniform
-  `401`, whatever the workspace's state. The one known remaining difference is the `503` of a
-  workspace with no auth service at all (`KNOWN-LIMITATIONS.md`).
+  `401`, whatever the workspace's state. The one known remaining difference is the single-mode
+  `503` of a server with no auth service at all (`KNOWN-LIMITATIONS.md`).
 
 ### Changed (operators)
 

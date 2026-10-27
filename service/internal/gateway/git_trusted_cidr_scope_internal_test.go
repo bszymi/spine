@@ -109,6 +109,9 @@ type t006Fixture struct {
 	srv      *Server
 	resolver *t006Resolver
 	pool     *workspace.ServicePool
+	// wsAuth is, in shared mode, every workspace's own (ServiceSet) auth
+	// service; see setAuth.
+	wsAuth *auth.Service
 }
 
 // t006Server builds a gateway serving ws-a and ws-b with the given
@@ -131,11 +134,35 @@ func t006Server(t *testing.T, trusted map[string][]string, shared, receivePack b
 		resolver: resolver,
 	}
 	if shared {
-		f.pool = workspace.NewServicePool(context.Background(), resolver, workspace.PoolConfig{IdleCheckInterval: -1})
+		f.pool = workspace.NewServicePool(context.Background(), resolver, workspace.PoolConfig{
+			IdleCheckInterval: -1,
+			// Each workspace authenticates against its own ServiceSet's
+			// auth service, as in spine serve: shared mode never falls
+			// back to the process-level one (INIT-024 TASK-007).
+			Builder: func(_ context.Context, ss *workspace.ServiceSet) error {
+				ss.Auth = f.wsAuth
+				return nil
+			},
+		})
 		t.Cleanup(f.pool.Close)
 		f.srv.servicePool = f.pool
 	}
 	return f
+}
+
+// setAuth installs the auth service a test's bearers validate against:
+// the server's own in single mode; in shared mode every workspace's
+// ServiceSet's, which is what spine serve checks a /git bearer against
+// (built ServiceSets are evicted so the next request picks it up).
+func (f *t006Fixture) setAuth(authSvc *auth.Service) {
+	if f.pool == nil {
+		f.srv.auth = authSvc
+		return
+	}
+	f.wsAuth = authSvc
+	for id := range f.resolver.cfgs {
+		f.pool.Evict(id)
+	}
 }
 
 // do routes target through the real /git routes (chi, as mounted by the
@@ -202,7 +229,7 @@ func TestHandleGit_TrustedCIDRScopedToWorkspace(t *testing.T) {
 			}
 			// A bearer still reads any workspace the token admits.
 			authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
-			f.srv.auth = authSvc
+			f.setAuth(authSvc)
 			if w := f.do(http.MethodGet, "/git/ws-b/"+t006UploadInfoRefs, runnerA, "Authorization", "Bearer "+bearer); w.Code != http.StatusOK {
 				t.Errorf("ws-a's runner with a bearer, ws-b: status %d; want 200", w.Code)
 			}
@@ -297,7 +324,7 @@ func TestHandleGit_PushNeverTakesWorkspaceBypass(t *testing.T) {
 	}
 	// With a bearer the push advertisement is served.
 	authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
-	f.srv.auth = authSvc
+	f.setAuth(authSvc)
 	if w := f.do(http.MethodGet, "/git/ws-a/info/refs?service=git-receive-pack", runnerA, "Authorization", "Bearer "+bearer); w.Code != http.StatusOK ||
 		w.Header().Get("Content-Type") != t015ReceivePackAdvertisement {
 		t.Errorf("ws-a's runner with a bearer, push advertisement: status %d (%s); want 200 %s", w.Code, w.Header().Get("Content-Type"), t015ReceivePackAdvertisement)
@@ -306,7 +333,7 @@ func TestHandleGit_PushNeverTakesWorkspaceBypass(t *testing.T) {
 	// With receive-pack off a token-less push from the bound runner is
 	// the uniform 401; with a bearer it is the 403 naming the flag.
 	off := t006Server(t, t006Bindings, true, false)
-	off.srv.auth = authSvc
+	off.setAuth(authSvc)
 	if w := off.do(http.MethodGet, "/git/ws-a/info/refs?service=git-receive-pack", runnerA); w.Code != http.StatusUnauthorized {
 		t.Errorf("ws-a's runner, push off, no token: status %d %q; want 401", w.Code, w.Body.String())
 	}
@@ -482,7 +509,7 @@ func TestHandleGit_InvalidBearerIsNoWorkspaceOracle(t *testing.T) {
 	for _, shared := range []bool{true, false} {
 		f := t006Server(t, t006Bindings, shared, false)
 		authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
-		f.srv.auth = authSvc
+		f.setAuth(authSvc)
 		for _, peer := range []string{t006Outsider, t006RunnerA} {
 			for _, h := range []string{"Bearer junk", "Basic eDp5", "Bearer ", "bearer", "Token " + bearer} {
 				ref := f.do(http.MethodGet, "/git/ws-missing/"+t006UploadInfoRefs, peer+":40000", "Authorization", h)
