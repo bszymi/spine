@@ -161,8 +161,8 @@ func setupGitHTTPServerWithCodeRepo(opts codeRepoSetup) scenarioEngine.Step {
 					}
 					return cfg.RepoPath, nil
 				},
-				TrustedCIDRs:  []string{"127.0.0.0/8"},
-				MaxConcurrent: 5,
+				TrustedCIDRsByWorkspace: map[string][]string{"default": {"127.0.0.0/8"}, "ws-1": {"127.0.0.0/8"}},
+				MaxConcurrent:           5,
 			})
 			if err != nil {
 				return fmt.Errorf("githttp.NewHandler: %w", err)

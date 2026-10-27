@@ -61,7 +61,7 @@ spine validate --all
 ### Integrations
 
 - **Webhook / SSE / pull event delivery** — see [integration-guide §6](/docs/integration-guide.md#6-event-integration). Gated by `SPINE_EVENT_DELIVERY=true`.
-- **Git HTTP clone endpoint for runners** — see [integration-guide §7](/docs/integration-guide.md#7-git-http-serve-endpoint). Token-less clones are limited to direct peers in `SPINE_GIT_HTTP_TRUSTED_CIDRS` (never a proxy, never a Docker bridge gateway).
+- **Git HTTP clone endpoint for runners** — see [integration-guide §7](/docs/integration-guide.md#7-git-http-serve-endpoint). Token-less clones are limited to direct peers in `SPINE_GIT_HTTP_TRUSTED_CIDRS` (never a proxy, never a Docker bridge gateway), and in shared mode to the workspaces each runner address is bound to (`ws-a=172.28.1.10/32;ws-b=...`).
 
 ---
 

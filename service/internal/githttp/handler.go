@@ -53,8 +53,12 @@ type Handler struct {
 	// opTimeout is the per-request timeout for git operations.
 	opTimeout time.Duration
 
-	// trustedCIDRs are IP ranges that bypass authentication.
-	trustedCIDRs []*net.IPNet
+	// trustedByWorkspace maps a workspace ID to the IP ranges whose
+	// direct peers may read that workspace's repositories without a
+	// bearer (INIT-024 TASK-006, review finding N-2). There is no
+	// process-wide list: a trusted address opens only the workspaces it
+	// is bound to (IsTrustedIPForWorkspace).
+	trustedByWorkspace map[string][]*net.IPNet
 
 	// receivePackEnabled controls whether git-receive-pack (push) is
 	// reachable. Default false — an existing deployment upgrading past
@@ -102,10 +106,17 @@ type Config struct {
 	// Defaults to 30s.
 	OpTimeout time.Duration
 
-	// TrustedCIDRs are IP ranges (CIDR notation) that bypass authentication.
-	// Requests from these ranges can access the git endpoint without a bearer token.
-	// Example: ["172.16.0.0/12", "10.0.0.0/8"]
-	TrustedCIDRs []string
+	// TrustedCIDRsByWorkspace binds IP ranges (CIDR notation) to the
+	// workspace whose repositories their peers may clone and fetch
+	// without a bearer token, for example
+	// {"ws-a": {"172.28.1.10/32"}, "ws-b": {"172.28.1.11/32"}}. A range
+	// trusts its peers for the workspaces it is listed under and no
+	// other (INIT-024 TASK-006, review finding N-2: a process-wide list
+	// let a runner host trusted for one tenant clone every tenant's
+	// repository). It never applies to a push. Single-workspace
+	// `spine serve` binds the bare SPINE_GIT_HTTP_TRUSTED_CIDRS list to
+	// its one workspace.
+	TrustedCIDRsByWorkspace map[string][]string
 
 	// ReceivePackEnabled turns on the git push endpoint
 	// (git-receive-pack). Default false. Upgrade paths must opt in
@@ -158,13 +169,18 @@ func NewHandler(cfg Config) (*Handler, error) {
 		opTimeout = 30 * time.Second
 	}
 
-	var trustedCIDRs []*net.IPNet
-	for _, cidr := range cfg.TrustedCIDRs {
-		_, ipnet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid trusted CIDR %q: %w", cidr, err)
+	trustedByWorkspace := make(map[string][]*net.IPNet, len(cfg.TrustedCIDRsByWorkspace))
+	for workspaceID, cidrs := range cfg.TrustedCIDRsByWorkspace {
+		if workspaceID == "" {
+			return nil, errors.New("trusted CIDRs bound to an empty workspace ID")
 		}
-		trustedCIDRs = append(trustedCIDRs, ipnet)
+		for _, cidr := range cidrs {
+			_, ipnet, err := net.ParseCIDR(cidr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid trusted CIDR %q for workspace %q: %w", cidr, workspaceID, err)
+			}
+			trustedByWorkspace[workspaceID] = append(trustedByWorkspace[workspaceID], ipnet)
+		}
 	}
 
 	return &Handler{
@@ -172,7 +188,7 @@ func NewHandler(cfg Config) (*Handler, error) {
 		gitBackendPath:      backendPath,
 		sem:                 make(chan struct{}, maxConcurrent),
 		opTimeout:           opTimeout,
-		trustedCIDRs:        trustedCIDRs,
+		trustedByWorkspace:  trustedByWorkspace,
 		receivePackEnabled:  cfg.ReceivePackEnabled,
 		policy:              cfg.Policy,
 		runRefs:             cfg.RunRefs,
@@ -194,9 +210,18 @@ func (h *Handler) ReceivePackEnabled() bool {
 	return h.receivePackEnabled
 }
 
-// IsTrustedIP returns true if the IP is within a trusted CIDR range.
-func (h *Handler) IsTrustedIP(remoteAddr string) bool {
-	if len(h.trustedCIDRs) == 0 {
+// IsTrustedIPForWorkspace reports whether remoteAddr ("host:port" or a
+// bare IP) is inside a trusted CIDR bound to workspaceID (INIT-024
+// TASK-006, review finding N-2). The workspace ID is matched exactly,
+// and an address bound to another workspace — or to none — is not
+// trusted, so a runner host trusted for one tenant gets no token-less
+// read of another. The caller passes the ID of the workspace the
+// request resolved to (whose repository it will serve), never a raw
+// URL segment, and decides which peers qualify (direct peers only:
+// the gateway's gitPeerIP).
+func (h *Handler) IsTrustedIPForWorkspace(workspaceID, remoteAddr string) bool {
+	nets := h.trustedByWorkspace[workspaceID]
+	if workspaceID == "" || len(nets) == 0 {
 		return false
 	}
 	host, _, err := net.SplitHostPort(remoteAddr)
@@ -207,7 +232,7 @@ func (h *Handler) IsTrustedIP(remoteAddr string) bool {
 	if ip == nil {
 		return false
 	}
-	for _, cidr := range h.trustedCIDRs {
+	for _, cidr := range nets {
 		if cidr.Contains(ip) {
 			return true
 		}

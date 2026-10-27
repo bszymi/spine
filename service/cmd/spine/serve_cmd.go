@@ -61,6 +61,18 @@ func serveCmd() *cobra.Command {
 			if err := guardGitHTTPDevNoAuth(runtimeEnv, gitDevNoAuth); err != nil {
 				return err
 			}
+			// SPINE_GIT_HTTP_TRUSTED_CIDRS (INIT-024 TASK-006, N-2): a
+			// malformed value, or the bare list in shared mode, refuses
+			// startup here, before any registry, secret or listener is
+			// opened. The trust is bound to workspaces further down, once
+			// the resolver exists.
+			gitTrusted, err := parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS"))
+			if err != nil {
+				return fmt.Errorf("SPINE_GIT_HTTP_TRUSTED_CIDRS: %w", err)
+			}
+			if err := gitTrusted.checkMode(sharedWorkspaceResolverEnv()); err != nil {
+				return err
+			}
 
 			// SMP_ADMIN_TOKEN strength gate (INIT-023 TASK-013): checked
 			// before any store, secret or listener is opened.
@@ -152,9 +164,12 @@ func serveCmd() *cobra.Command {
 			if len(trustedProxyCIDRs) > 0 {
 				log.Info("rate limiter will honor X-Forwarded-For from trusted proxies", "cidrs", os.Getenv("SPINE_TRUSTED_PROXY_CIDRS"))
 			}
-			gitTrustedCIDRs := parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS"))
-			if overlap := overlappingCIDRs(gitTrustedCIDRs, trustedProxyCIDRs); len(overlap) > 0 {
+			if overlap := overlappingCIDRs(gitTrusted.all(), trustedProxyCIDRs); len(overlap) > 0 {
 				log.Warn("SPINE_GIT_HTTP_TRUSTED_CIDRS overlaps SPINE_TRUSTED_PROXY_CIDRS: a request from a declared proxy is never given token-less git access, so token-less clones from the overlap will be refused",
+					"overlap", overlap)
+			}
+			if overlap := crossWorkspaceCIDROverlaps(gitTrusted.ByWorkspace); len(overlap) > 0 {
+				log.Warn("SPINE_GIT_HTTP_TRUSTED_CIDRS binds overlapping CIDRs to different workspaces: an address in the overlap clones each of those workspaces token-less; give each workspace its own runner addresses",
 					"overlap", overlap)
 			}
 
@@ -170,6 +185,23 @@ func serveCmd() *cobra.Command {
 			runtimeWS := os.Getenv("SPINE_WORKSPACE_ID")
 			if runtimeWS == "" {
 				runtimeWS = "default"
+			}
+
+			// Bind the git trusted CIDRs to workspaces (INIT-024
+			// TASK-006). Shared mode is decided by the resolver actually
+			// built (a ServicePool), and the bare list is refused there
+			// again; in single mode it belongs to runtimeWS, the workspace
+			// the file resolver serves (both read SPINE_WORKSPACE_ID,
+			// default "default").
+			gitTrustedByWorkspace, err := gitTrusted.bind(wsWiring.Pool != nil, runtimeWS)
+			if err != nil {
+				return err
+			}
+			if wsWiring.Pool == nil {
+				for _, id := range unservedTrustedWorkspaces(gitTrustedByWorkspace, runtimeWS) {
+					log.Warn("SPINE_GIT_HTTP_TRUSTED_CIDRS binds a workspace this single-workspace server does not serve; the entry has no effect",
+						"workspace_id", id, "served_workspace_id", runtimeWS)
+				}
 			}
 
 			deps := serveDeps{
@@ -190,7 +222,7 @@ func serveCmd() *cobra.Command {
 				RuntimeEnv:                 runtimeEnv,
 				DevMode:                    devMode,
 				TrustedProxyCIDRs:          trustedProxyCIDRs,
-				TrustedGitHTTPCIDRs:        gitTrustedCIDRs,
+				TrustedGitHTTPCIDRs:        gitTrustedByWorkspace,
 				GitHTTPDevNoAuth:           gitDevNoAuth,
 				GitReceivePackEnabled:      parseGitReceivePackEnabled(os.Getenv("SPINE_GIT_RECEIVE_PACK_ENABLED")),
 				EventDeliveryOn:            deliveryCfg.Enabled,

@@ -6,6 +6,67 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-003 TASK-006: workspace-scoped trusted-CIDR clone)
+
+Closes review finding N-2 (P2, standalone shared mode). No runtime schema change. Standalone
+`spine serve` only: SMP runs its own `/git` gateway and embeds none of the changed packages.
+
+### Security
+
+- **Token-less git reads are bound to a workspace (N-2).** The `SPINE_GIT_HTTP_TRUSTED_CIDRS`
+  bypass was decided from the peer address alone, so in shared mode (`WORKSPACE_RESOLVER=db` or
+  `platform-binding`) a runner host trusted for one tenant — or any job it ran — cloned every
+  tenant's repository without a token, and the answer differed for missing and present
+  workspaces. The trust is now looked up under the workspace the request resolved to: an address
+  reads only the workspaces it is bound to, and any other workspace — or one that does not resolve,
+  is inactive or is unavailable — answers the same uniform `401` an untrusted caller gets. Pushes
+  are unchanged (they never took the bypass), as are the INIT-023 proxy and forwarding-header rules.
+- **Every `401` on `/git` is the uniform one (adversarial review of the above).** A caller that sent
+  a junk or malformed bearer got the auth error's own message (`invalid token`, `invalid
+  authorization header format`, `token expired`, ...) only for a workspace that exists. Every
+  authentication failure now gets the uniform message. A `503`/`500` for a resolved workspace is
+  still surfaced.
+- **With push off, the flag's `403` is for authenticated callers only (review round 1).** A push
+  request (`info/refs?service=git-receive-pack`, `POST git-receive-pack`) with
+  `SPINE_GIT_RECEIVE_PACK_ENABLED` off skipped the auth gate whenever the workspace resolved, so it
+  answered `403` for an existing workspace and `401` otherwise. It now meets the auth gate: a caller
+  authenticated for the workspace gets the `403` naming the flag, and any other caller the uniform
+  `401`, whatever the workspace's state. The one known remaining difference is the `503` of a
+  workspace with no auth service at all (`KNOWN-LIMITATIONS.md`).
+
+### Changed (operators)
+
+- `SPINE_GIT_HTTP_TRUSTED_CIDRS` takes a **per-workspace form**: entries
+  `<workspace-id>=<cidr>[,<cidr>...]` separated by `;`, e.g.
+  `SPINE_GIT_HTTP_TRUSTED_CIDRS='ws-a=172.28.1.10/32;ws-b=172.28.1.11/32,172.28.1.12/32'` (quoted:
+  an unquoted `;` ends a shell value). It is accepted in every mode. CIDRs bound to different
+  workspaces that overlap log a startup Warn.
+- The **bare list** (`172.28.1.10/32,172.28.1.11/32`) stays valid on a single-workspace server
+  (`WORKSPACE_RESOLVER` unset or `file`), where `spine serve` binds it to the one workspace
+  (`SPINE_WORKSPACE_ID`, default `default`). **In shared mode it refuses to start** (owner question
+  1 default, pending the owner), with an error naming the per-workspace form, before any registry,
+  secret or database is opened.
+- **A malformed value refuses to start** in every mode: an unparsable CIDR (a bare address without
+  a prefix length included), a workspace ID `workspace.ValidateID` refuses, a workspace named twice
+  or bound to no CIDR, or a bare entry mixed into the per-workspace form. It used to disable the
+  whole `/git` endpoint with a Warn log line.
+- Single mode: a trusted runner asking for a workspace that does not resolve now gets the uniform
+  `401` instead of `404`/`403`/`503`; a per-workspace entry for a workspace the server does not serve
+  logs a startup Warn and has no effect. The `git HTTP endpoint enabled` Info line logs
+  `trusted_cidrs_by_workspace` instead of `trusted_cidrs`. A trusted runner refused because its
+  own workspace did not resolve is logged at Info.
+- **With push off, a push without a valid token now gets `401`, not the `403` naming
+  `SPINE_GIT_RECEIVE_PACK_ENABLED`.** To see the flag message, push with a bearer for the
+  workspace (`git -c http.extraHeader="Authorization: Bearer <token>" push …`).
+
+### Changed (embedders)
+
+- None. `service/internal/githttp` (`Config.TrustedCIDRs` → `Config.TrustedCIDRsByWorkspace`,
+  `Handler.IsTrustedIP` → `Handler.IsTrustedIPForWorkspace`) is internal to the standalone server
+  and not importable outside `service/`.
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-001 TASK-002: workflow definition strictness)
 
 Three P3 findings of the 2026-10-22 review (N-4, N-5, N-7): places where a workflow definition,

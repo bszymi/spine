@@ -200,7 +200,7 @@ type serveDeps struct {
 	RuntimeEnv          string
 	DevMode             bool
 	TrustedProxyCIDRs   []*net.IPNet
-	TrustedGitHTTPCIDRs []string
+	TrustedGitHTTPCIDRs map[string][]string // workspace ID → CIDRs whose direct peers clone it token-less (INIT-024 TASK-006)
 	// GitHTTPDevNoAuth (SPINE_GIT_HTTP_DEV_NO_AUTH; serveCmd refuses it
 	// unless SPINE_ENV=development) lets /git clone and fetch skip the
 	// bearer. Pushes always need one. INIT-023 TASK-015.

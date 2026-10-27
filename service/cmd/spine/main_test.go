@@ -122,9 +122,12 @@ func TestParseGitHTTPTrustedCIDRs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseGitHTTPTrustedCIDRs(tc.raw)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("parseGitHTTPTrustedCIDRs(%q) = %v, want %v", tc.raw, got, tc.want)
+			got, err := parseGitHTTPTrustedCIDRs(tc.raw)
+			if err != nil {
+				t.Fatalf("parseGitHTTPTrustedCIDRs(%q): %v", tc.raw, err)
+			}
+			if !reflect.DeepEqual(got.Unbound, tc.want) || got.ByWorkspace != nil {
+				t.Fatalf("parseGitHTTPTrustedCIDRs(%q) = %+v, want the bare list %v", tc.raw, got, tc.want)
 			}
 		})
 	}
