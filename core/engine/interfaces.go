@@ -206,6 +206,21 @@ type GitOperator interface {
 	WriteAndStageFile(ctx context.Context, path, content string) error
 }
 
+// ChangedPathCounter is the optional capability step-output evidence
+// counts a submit's changed paths with (INIT-024 TASK-004, review finding
+// N-12). The pair it compares — the previous binding or the baseline, and
+// the head the author pushed — is the author's choice, and Diff detects
+// renames, which loads both blobs of every candidate pair (and
+// *git.CLIClient runs it without GIT_ALLOC_LIMIT, so a large legitimate
+// rename on main cannot wedge the projection). CountChangedPaths returns
+// how many paths differ with no rename detection — a rename is two paths
+// — and loads no blob. It is not part of GitOperator: branchChangeAtSubmit
+// type-asserts it and counts with Diff, as before, when the operator lacks
+// it (owner question 2 default). *git.CLIClient implements it.
+type ChangedPathCounter interface {
+	CountChangedPaths(ctx context.Context, from, to string) (int, error)
+}
+
 // CommitBinder is the optional capability SHA-bound governed merges need
 // (INIT-023 TASK-005; audit F2 merge half, P3-37). It is not part of
 // GitOperator, so embedders whose operator lacks it keep compiling and

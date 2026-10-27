@@ -71,6 +71,7 @@ import (
 //	CreateBranch        branch [eoo] <n> <HEAD | oid>^{commit}   (git branch re-DWIMs a bare start point)
 //	DeleteBranch        branch -D [eoo] <n>
 //	Diff                diff --name-status -z [eoo] <from'> <to'> --
+//	CountChangedPaths   diff --name-only -z --no-renames --ignore-submodules=none [eoo] <from'> <to'> --
 //	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
 //	ReadFile            --literal-pathspecs ls-tree -l -z --full-tree [eoo] <ref'> <path>, then cat-file -t <oid>, cat-file blob <oid>
 //	                    (rev-parse --verify --quiet [eoo] <ref'>^{tree} only after a failed ls-tree)
@@ -1069,6 +1070,52 @@ func unterminatedDiff() *GitError {
 		Err: fmt.Errorf("%w: unterminated record", errMalformedDiff)}
 }
 
+// CountChangedPaths returns how many paths differ between from and to
+// (both Rev class, validated and resolved as Diff's) without loading a
+// blob: `git diff --name-only -z --no-renames --ignore-submodules=none
+// [eoo] <from'> <to'> --`, run as a read command (INIT-024 TASK-004,
+// review finding N-12; core/engine.ChangedPathCounter).
+//
+// It is what step-output evidence counts with. The commit pair there is
+// chosen by the run-branch author, and Diff detects renames — loading both
+// blobs of every candidate pair, outside GIT_ALLOC_LIMIT (opDiff) — so the
+// author decided how much memory the git child used. Without rename
+// detection a tree diff compares object ids and reads no blob, and as a
+// read command it runs under GIT_ALLOC_LIMIT and the pinned delta-base
+// cache anyway. A rename therefore counts as two paths (a delete and an
+// add). The listing is counted as it streams and keeps no path
+// (pathCounter, listing.go), so its size is no limit; output that does
+// not parse is a permanent error.
+func (c *CLIClient) CountChangedPaths(ctx context.Context, from, to string) (int, error) {
+	const op = "count_changed_paths"
+	if err := checkRev(op, "from", from); err != nil {
+		return 0, err
+	}
+	if err := checkRev(op, "to", to); err != nil {
+		return 0, err
+	}
+	fromRev, err := c.resolveRev(ctx, op, "from", c.homeRev(from))
+	if err != nil {
+		return 0, err
+	}
+	toRev, err := c.resolveRev(ctx, op, "to", c.homeRev(to))
+	if err != nil {
+		return 0, err
+	}
+	s := &pathCounter{op: op}
+	if err := c.runListing(ctx, op, s, unterminatedCount,
+		"diff", "--name-only", "-z", "--no-renames", "--ignore-submodules=none", "--end-of-options", fromRev, toRev, "--"); err != nil {
+		return 0, err
+	}
+	return s.n, nil
+}
+
+// unterminatedCount is CountChangedPaths' refusal of output that does not
+// end in NUL.
+func unterminatedCount() *GitError {
+	return &GitError{Kind: ErrKindPermanent, Op: "count_changed_paths", Message: "unterminated `git diff -z` output"}
+}
+
 // errMalformedDiff is the cause of Diff's unparseable-output error. It
 // never echoes a path: paths are committed, attacker-chosen text.
 //
@@ -1877,6 +1924,9 @@ var opClasses = map[string]opClass{
 	"branch":       opMutate,
 	"config":       opMutate,
 	"push":         opMutate,
+	// count_changed_paths: output evidence's counter (INIT-024 TASK-004)
+	// is a read, so GIT_ALLOC_LIMIT applies.
+	"count_changed_paths": opRead,
 }
 
 func classOf(op string) opClass {
