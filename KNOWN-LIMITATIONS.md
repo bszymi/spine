@@ -93,26 +93,27 @@ This document tracks known gaps and deferred functionality.
 ### Git Push: Run-Branch Admission Is a Push-Start Check
 - With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, a run, planning or divergence branch is pushable only
   by the actor bound to its current step, or an operator (INIT-023 TASK-016). Three limits remain:
-  - **Admission time, not write time.** The gate decides when the push's command section arrives;
-    git writes the ref only after the pack has been received and processed. A push started while
-    bound can land after the actor submits the step. The window is the upload (at most the HTTP
-    `ReadTimeout`, 30 s in `spine serve`) **plus** git's processing of the received pack (index,
-    delta resolution, connectivity check), which nothing bounds: `net/http/cgi` ignores the request
-    context and does not bound `git-http-backend`, and the pusher influences the processing time
-    through the pack it sends. The review freeze is checked at the same moment, so a push started
-    before the step was submitted can still land during review. Binding the governed merge to the
-    reviewed commit (INIT-023 TASK-005; always on in `spine serve`) is the content control for that
-    window: a push that lands after the step's submit bound the head is not merged unless a later
+  - **Admission is decided twice; a narrow window remains.** The gate decides when the push's
+    command section arrives, and — since INIT-024 TASK-005 (review finding N-9) — the pre-receive
+    hook decides again once git has received and processed the pack, before any ref moves: it asks
+    the server over a per-push channel, and the server re-runs the same admission (the run active,
+    the latest execution of the step still the actor's and assigned or in progress, the review
+    freeze) against the store as it is then, with nothing remembered from the first decision. A push
+    whose step was submitted, reassigned or turned into a review or internal step while its pack was
+    in flight is refused (`remote: spine: push refused: ref-admission: …`, `pre-receive hook
+    declined`), and so is one the hook cannot get an answer for (fail closed). What remains is the
+    time between that answer and git's ref update (the hook's exit), and the upload and processing
+    before it, during which nothing is written. Branch-protection rules are still evaluated once, on
+    the command section. Binding the governed merge to the
+    reviewed commit (INIT-023 TASK-005; always on in `spine serve`) stays the content control:
+    a push that lands after the step's submit bound the head is not merged unless a later
     producer step binds it — an `automated` step (a validate or summarize) re-binds to whatever head
     it completes at unless its submitter sends `expected_head_sha` ("Governed Merge Binding" 2; the
     shipped `artifact-creation`, `adr-creation`, `document-creation` and `task-spike` workflows have
     such a step before their review, and no Spine client sends the assertion yet) — and an approval
     of a branch that moved since the previous binding is refused
     (`409 run_branch_moved_since_gate`); an embedder that does not enable merge binding keeps the
-    gap. A real bound needs `git-http-backend`
-    run in its own process group under a deadline (a deadline would also cut legitimate large
-    pushes and clones, which today outlive `OpTimeout`), or a post-unpack re-check; both are
-    INIT-023 EPIC-001 follow-ups.
+    remaining window. SMP's own git gateway does not have the re-check yet (SMP companion epic).
   - **Force-push by the bound actor is allowed.** Fast-forward-only cannot be enforced per actor
     before the pack is unpacked, and `receive.denyNonFastForwards` would also block operators.
   - ~~**Dev mode pushes are anonymous.**~~ Resolved by INIT-023 TASK-015: `SPINE_DEV_MODE` no
@@ -127,8 +128,8 @@ This document tracks known gaps and deferred functionality.
   executions for exploratory branches is a follow-up (TASK-016 owner question 6).
 - **Case-insensitive storage.** The admission folds the `spine` namespace with Unicode simple case
   folding, so case-variant spellings are operator-only on any filesystem. Branch-protection rule
-  matching does not fold; see "Served Repositories Need Case- and Normalization-Sensitive Storage"
-  below.
+  matching does not fold; on storage that does, receive-pack is refused (INIT-024 TASK-005; see
+  "Served Repositories Need Case- and Normalization-Sensitive Storage" below).
 
 ### Run-Branch API Writes and Workflow Governance: What INIT-023 TASK-014 Leaves Open
 - On the standalone gateway, an API write onto a run branch (`write_context` with a `run_id`,
@@ -222,8 +223,9 @@ This document tracks known gaps and deferred functionality.
     author: an operator who pushes commits to a run branch can then be bound to its review. That
     is within operator authority in standalone; where it matters, compare the run branch's commit
     authors with the reviewer before accepting.
-  - **A push admitted while bound can land after the step is submitted** (see "Run-Branch
-    Admission Is a Push-Start Check"); its actor still counts as an author, because it was bound.
+  - **A push admitted while bound counts its actor as an author** (see "Run-Branch Admission Is a
+    Push-Start Check"): since INIT-024 TASK-005 such a push lands only if the actor is still bound
+    when git applies it, and its actor counts as an author because it was bound.
 - **Planning runs without a recorded starter are reviewable by nobody (INIT-024 TASK-001,
   Decision 2; owner question 1 default: fail closed).** Separation of duties counts the actor who
   started a planning-mode run as a run author, from the starter the engine records at start
@@ -964,10 +966,19 @@ The following limitations have been resolved:
   (`x.y.z.1`), or an L4 load balancer — looks like a direct peer. Never put such an address in
   `SPINE_GIT_HTTP_TRUSTED_CIDRS`; the compose file no longer trusts its whole bridge subnet, and
   `docker-compose.override.yaml.example` shows runner-only recipes.
-- **Residual: process-wide git capacity.** In shared mode the git concurrency cap (5 in-flight
-  pack operations) and the per-client-IP rate limiter are process-wide: one tenant's slow clones
-  can fill every git slot and make every tenant's git requests answer `503`. They key on network
-  address and capacity, not tenant identity; a per-workspace fair share is a follow-up.
+- **Git capacity is shared fairly, within one process (INIT-024 TASK-005, review finding N-13).**
+  A git request takes one slot from three caps: its principal's — the (workspace, actor) of a token
+  request, or the (workspace, peer address) of a token-less read, never a shared empty actor — its
+  workspace's, and the process's (defaults 2 / 4 / 8: `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_ACTOR`,
+  `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_WORKSPACE`, `SPINE_GIT_HTTP_MAX_CONCURRENT`); a full cap
+  answers `503` with `Retry-After: 5`. A push takes its slot only after its command section has
+  arrived (within `SPINE_GIT_COMMAND_READ_TIMEOUT`, default 10 s) and been admitted, so a client that
+  stalls there holds none. Residuals: the caps are per replica; a fetch whose request body stalls,
+  and a push whose pack stalls, hold their own principal's slot until the server's 30 s
+  `ReadTimeout`; members of two workspaces can fill the process-wide ceiling between them; a single
+  workspace server's capacity is its per-workspace cap (4 by default; it was 5), and a runner fleet
+  sharing one token gets the per-actor cap (2) — raise the variables for it; the per-client-IP
+  rate limiter is unchanged.
 
 ### SSE: An Event With an Unsafe ID Does Not Advance the Client Cursor
 - Since INIT-023 TASK-015 (audit P3-28) an event whose ID (or type) contains a control character,
@@ -1112,10 +1123,20 @@ The following limitations have been resolved:
   `refs/HEADS/main` takes the non-branch allow the same way, and the aliasing is not ASCII-only
   (APFS also folds the Kelvin sign onto `k` and NFD onto NFC). `core.ignorecase` prevents none of
   this.
-- **Status:** a documented deployment requirement, not yet enforced. Fail-closed handling (a
-  per-repository case-sensitivity probe that refuses receive-pack, or fold-and-normalize rule
-  matching that also covers the `refs/heads/` prefix test) is an INIT-023 EPIC-001 follow-up,
-  paired with SMP's equivalent follow-up.
+- **Status: enforced (INIT-024 TASK-005, review finding N-8).** With receive-pack on, the git
+  endpoint probes each repository's storage the first time it serves it (once per repository and
+  process lifetime): in a fresh directory under `<git-common-dir>/refs` whose name starts with `.`
+  (git's ref iteration skips it; it is removed at once), it creates three pairs of names a folding
+  filesystem identifies — ASCII case, Unicode NFC/NFD and the Kelvin sign against `k` — and reads
+  them back. A repository on storage that folds any pair has receive-pack refused: the push
+  advertisement and the push answer `403` naming this requirement before the body is read, and the
+  repository's `http.receivepack` is set to `false`. Clones and fetches are served as before (owner
+  question 2). A probe that cannot answer (an unwritable `refs/` directory) refuses pushes with
+  `500 push gate unavailable` and is retried on the next request. Note that a case-sensitive APFS
+  volume is still normalization-insensitive and is refused too. A deployment that serves pushes from
+  such storage today, against this requirement, has them refused after the upgrade; move the
+  repositories to a case-sensitive, normalization-sensitive filesystem. SMP's own gateway has no
+  probe yet (SMP companion epic).
 
 ### Git Ref Arguments
 - **Grammar** (INIT-023 TASK-002; audit F10, P3-32, P3-36): the git client
