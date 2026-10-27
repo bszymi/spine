@@ -58,12 +58,21 @@ change.
   !working-tree-encoding !conflict-marker-size` as the last line of each served repository's
   `info/attributes` (operator lines kept): no end-of-line conversion, `ident` expansion, smudge
   filter or re-encoding on checkout — an LFS pointer stays a pointer.
-- **Commit-side normalisation is off** in those repositories: `git add` keeps CRLF content and
-  does not collapse `$Id: … $`.
+- **Commit-side normalisation is off** in those repositories: `git add` keeps CRLF content, does
+  not collapse `$Id: … $`, runs no clean filter (`-filter`: on a host with git-lfs, a file Spine
+  writes at an LFS path is stored as its full content, not a pointer) and does not re-encode
+  (`!working-tree-encoding`).
 - **Conflict markers are always 7 characters** in a conflicted merge, whatever
   `conflict-marker-size` a tree sets.
-- **The working tree looks modified once on upgrade** where files were checked out with
-  conversions; the shared tree's restore resets it (tracked changes are quarantined as usual).
+- **Upgrade: trees checked out with conversions are brought to their stored bytes once.** When
+  the line is first added to a repository with a work tree that was checked out with conversions
+  (a `text`/`eol`/`ident` attribute, or the host's `core.autocrlf`), its files would look modified:
+  the workspace tree (at `spine serve` start, or when a shared-mode workspace's services are
+  built), a code-repository clone the pool reuses, and a served repository on its first push each
+  have HEAD's tree measured, their tracked state quarantined into an unreferenced commit (logged at
+  Warn, as the shared tree's restore does) and `reset --hard` to the stored bytes. The shared
+  tree's restore would also repair the workspace tree on its first sequence. A tree whose file
+  already ends in the line is not touched again.
 - Not neutralised (operator configuration): a host `merge.<name>.driver` and `pull.twohead`.
 - With the deadline on, `EnterBranch` adds its worktree `--no-checkout` and fills it with
   `reset --hard`, so a worktree's `post-checkout` hook no longer runs.
@@ -78,7 +87,8 @@ change.
   <= 0 means its default; `DefaultTreeBudget()`, `Effective()`), `TreeBudget.Measure` /
   `TreeBudget.Check(ctx, *CLIClient, treeish)`, `MeasureTree(ctx, *CLIClient, treeish)`,
   `TreeStats`, `NeutralCheckoutAttributes`, `EnsureNeutralCheckoutAttributes` /
-  `HasNeutralCheckoutAttributes(ctx, repoDir)`, `ErrNeutralAttributesMissing` (a budgeted measure
+  `HasNeutralCheckoutAttributes(ctx, repoDir)`, `CLIClient.EnsureNeutralWorkTree(ctx)` (the writer
+  plus the one-time reset of a tree checked out with conversions), `ErrNeutralAttributesMissing` (a budgeted measure
   on a repository without the line), `MergeAllocRefusedMessage`, `ErrTreeTooLarge` with the typed
   cause `*TreeTooLargeError{Limit, Max, Seen}` inside `*GitError{Kind: ErrKindPermanent, Message: TreeTooLargeMessage}` (distinct
   from `ErrBlobTooLarge` and `ErrOutputTooLarge`), `WithTreeBudget`, `WithMutateTimeout`,

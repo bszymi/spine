@@ -145,15 +145,19 @@ func serveCmd() *cobra.Command {
 				gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+smpID))
 			}
 			gitClient := buildPrimaryGitClient(repoPath, gitOpts)
-			// Once at start: warn when the workspace tree is already over
-			// the checkout budget (INIT-024 TASK-003).
-			// The budget's premise: checkouts of the tree write stored bytes
-			// (neutral checkout attributes). A failure is logged; every
-			// budgeted measure then refuses (fail closed).
-			if err := git.EnsureNeutralCheckoutAttributes(ctx, repoPath); err != nil {
-				log.Error("neutral checkout attributes not set; every checkout and merge of the workspace tree will be refused", "error", err)
+			// The budget's premise (INIT-024 TASK-003): checkouts of the tree
+			// write stored bytes (neutral checkout attributes). Only the
+			// single-workspace tree this process serves itself; in shared
+			// mode buildServiceSet does it for each workspace's tree. A
+			// failure is logged and every budgeted measure then refuses
+			// (fail closed). Then, once: warn when the tree is already over
+			// the budget.
+			if wsWiring.Pool == nil {
+				if err := gitClient.EnsureNeutralWorkTree(ctx); err != nil {
+					log.Error("neutral checkout attributes not set; every checkout and merge of the workspace tree will be refused", "error", err)
+				}
+				go workspace.WarnIfOverCheckoutBudget(context.WithoutCancel(ctx), gitClient, os.Getenv("SPINE_WORKSPACE_ID"), log)
 			}
-			go workspace.WarnIfOverCheckoutBudget(context.WithoutCancel(ctx), gitClient, os.Getenv("SPINE_WORKSPACE_ID"), log)
 			if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {
 				log.Warn("failed to configure credential helper", "error", err)
 			}

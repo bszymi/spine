@@ -235,7 +235,7 @@ func (h *Handler) installBudgetHook(ctx context.Context, repoPath string) (strin
 	// The hook's measure needs the served repository to carry the neutral
 	// checkout attributes (it refuses without them), and so does every
 	// checkout of what it admits.
-	if err := git.EnsureNeutralCheckoutAttributes(ctx, repoPath); err != nil {
+	if err := git.NewCLIClient(repoPath).EnsureNeutralWorkTree(ctx); err != nil {
 		return "", fmt.Errorf("neutral checkout attributes: %w", err)
 	}
 	path := filepath.Join(dir, "pre-receive")

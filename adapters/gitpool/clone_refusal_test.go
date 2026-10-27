@@ -3,6 +3,7 @@ package gitpool_test
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -94,5 +95,80 @@ func TestClient_ReusedCloneGetsTheNeutralAttributes(t *testing.T) {
 	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{}})
 	if ok, err := git.HasNeutralCheckoutAttributes(context.Background(), access(t)); !ok || err != nil {
 		t.Fatalf("a reused clone in a budgeted process lacks the line: %v %v", ok, err)
+	}
+}
+
+// TestClient_ReusedConvertedCloneIsRenormalised (INIT-024 TASK-003 review
+// round 3, P3): a code-repository clone checked out before the upgrade
+// with conversions on (a `* text eol=crlf` attribute, or the clone's own
+// core.autocrlf) looks modified once the neutral line turns them off, and
+// code-repository clones have no home branch, so no restore resets them:
+// the first merge after the upgrade was refused ("local changes would be
+// overwritten"). The pool's first access now brings the clone to its
+// stored bytes, and the merge succeeds.
+func TestClient_ReusedConvertedCloneIsRenormalised(t *testing.T) {
+	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
+	for _, tc := range []struct {
+		name     string
+		attrs    string
+		autocrlf bool
+	}{
+		{"text eol=crlf", "* text eol=crlf\n", false},
+		{"core.autocrlf", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			git.SetDefaultCheckoutLimits(git.CheckoutLimits{})
+			base := t.TempDir()
+			local := filepath.Join(base, "code")
+			g := func(args ...string) {
+				t.Helper()
+				cmd := exec.Command("git", append([]string{"-C", local}, args...)...)
+				cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
+					"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@x.invalid", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@x.invalid")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v %s", args, err, out)
+				}
+			}
+			if out, err := exec.Command("git", "init", "-q", "-b", "main", local).CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v %s", err, out)
+			}
+			if tc.attrs != "" {
+				if err := os.WriteFile(filepath.Join(local, ".gitattributes"), []byte(tc.attrs), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(local, "a.txt"), []byte("one\ntwo\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			g("add", "-A")
+			g("commit", "-q", "-m", "files")
+			g("checkout", "-q", "-b", "feature")
+			if err := os.WriteFile(filepath.Join(local, "a.txt"), []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			g("commit", "-q", "-am", "three")
+			g("checkout", "-q", "main")
+			if tc.autocrlf {
+				g("config", "core.autocrlf", "true")
+			}
+			if err := os.Remove(filepath.Join(local, "a.txt")); err != nil {
+				t.Fatal(err)
+			}
+			g("checkout", "--", "a.txt") // checked out with the conversion
+
+			// The upgrade: spine serve installs a budget before any access.
+			git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{}})
+			repo := &repository.Repository{ID: "code", Status: "active", LocalPath: local, CloneURL: "https://git.example/code.git"}
+			resolver := &stubResolver{lookups: map[string]lookupResult{"code": {repo: repo}}}
+			pool := newPool(t, &stubClient{}, resolver, func(p string, _ gitpool.Credential) git.GitClient { return git.NewCLIClient(p) },
+				gitpool.WithCloner(&fakeCloner{}), gitpool.WithRepoBase(base))
+			client, err := pool.Client(context.Background(), "code")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Merge(context.Background(), git.MergeOpts{Source: "feature", Target: "main", Strategy: "merge-commit", Message: "m"}); err != nil {
+				t.Fatalf("first merge after the upgrade: %v", err)
+			}
+		})
 	}
 }

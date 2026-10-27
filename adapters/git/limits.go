@@ -142,9 +142,10 @@ const (
 	// symbolic links, gitlinks and directories — each of which costs an
 	// inode (or a directory) when written.
 	DefaultTreeMaxEntries int64 = 200_000
-	// DefaultTreeMaxTotalBytes caps the summed sizes of a tree's blobs,
-	// after the checkout-time expansion its .gitattributes can apply
-	// (treebudget_attrs.go).
+	// DefaultTreeMaxTotalBytes caps the summed sizes of a tree's blobs as
+	// git stores them — what a checkout writes in a repository with the
+	// neutral checkout attributes (neutral_attributes.go). It is also the
+	// GIT_ALLOC_LIMIT of a budgeted merge (never below the read limit).
 	DefaultTreeMaxTotalBytes int64 = 2 << 30
 	// DefaultTreeMaxPathBytesTotal caps the summed full-path bytes of a
 	// tree's entries. It also bounds the depth of a tree (a path of

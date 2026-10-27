@@ -1135,11 +1135,17 @@ The following limitations have been resolved:
   the line at start, when it builds a workspace's services, on every push it serves, into every
   budgeted clone and into every code-repository clone it reuses (operator lines are kept), and a
   budgeted measure refuses (`git.ErrNeutralAttributesMissing`, fail closed) a repository whose
-  file does not end in it. `merge` is left alone, so `binary` and `merge=union` merge as before.
+  file does not end in it — the last line that is not blank or a comment, by git's own rules
+  (only space, tab and CR are blanks). `merge` is left alone, so `binary` and `merge=union` merge
+  as before. The writer only writes at the top of a repository (never a repository that merely
+  contains the directory it is given), and when it first adds the line to a work tree checked out
+  with conversions it brings that tree to the stored bytes (quarantining its tracked state).
   Not neutralised (operator configuration): a host `merge.<name>.driver` named by a `merge=`
   attribute, and `pull.twohead` (Spine never pulls). Consequences: an LFS pointer stays a pointer,
-  `git add` keeps CRLF and does not collapse `$Id: … $`, and a tree checked out with conversions
-  before the upgrade looks modified once, until the shared tree's restore resets it.
+  `git add` keeps CRLF, does not collapse `$Id: … $`, runs no clean filter (a file Spine writes at
+  an LFS path on a git-lfs host is stored as its full content) and does not re-encode, and a tree
+  checked out with conversions
+  before the upgrade is brought to its stored bytes once, when the line is first added (above).
 - **A merge is measured by its result** (review rounds 1-2). After the switch to the target — in
   the working tree `git merge` will see, whose merge attributes it reads — `git merge-tree
   --write-tree` computes the tree the merge will leave (merge-ort; conflict markers included) on
@@ -1150,7 +1156,13 @@ The following limitations have been resolved:
   target tree) is not measured. merge-tree and the measured `git merge` run under
   `GIT_ALLOC_LIMIT` = max(`MaxTotalBytes`, the read allocation limit) — 2 GiB by default; a merge
   that needs one allocation over it is refused (`git.MergeAllocRefusedMessage`). (The 16 MiB read
-  limit alone would refuse a merge of any packed file over 16 MiB.) So two merges from one base can
+  limit alone would refuse a merge of any packed file over 16 MiB.) `GIT_ALLOC_LIMIT` caps single
+  allocations, not the git child's memory: a content merge of a large file changed on both sides
+  holds several copies of it at once — about 10x the file (a 115 MB file took merge-tree to
+  1.2 GB RSS), so up to ~10 GiB near git's own ~1 GiB per-file diff cap. This is pre-existing
+  (`git merge` itself needs the same); the operator controls are the server's memory limit
+  (container / cgroup), a `SPINE_GIT_TREE_MAX_BYTES` whose ~10x fits it, and keeping very large
+  files out of merged branches. So two merges from one base can
   no longer walk `main` over the budget, and a repair merge that brings an over-budget `main` back
   under it is admitted. This needs git >= 2.38: `spine serve` refuses to start on an older git, and
   a budgeted library merge on one is refused.

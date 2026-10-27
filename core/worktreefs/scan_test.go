@@ -58,8 +58,12 @@ var allowed = map[string]bool{
 	// INIT-024 TASK-003 review round 2: $GIT_COMMON_DIR/info/attributes, a
 	// git-administrative file located by `git rev-parse --git-common-dir`,
 	// never a working-tree path; Lstat first, a link is never followed.
-	"adapters/git/neutral_attributes.go:readInfoAttributes":              true,
-	"adapters/git/neutral_attributes.go:EnsureNeutralCheckoutAttributes": true,
+	"adapters/git/neutral_attributes.go:readInfoAttributes": true,
+	"adapters/git/neutral_attributes.go:ensureNeutral":      true,
+	// Review round 3: EvalSymlinks of the given directory and of git's own
+	// top-level path, to refuse a directory that is not its repository's
+	// top (nothing opened or written).
+	"adapters/git/neutral_attributes.go:requireRepositoryTop": true,
 	// MkdirTemp/RemoveAll of the private GIT_INDEX_FILE directory in
 	// os.TempDir (INIT-023 TASK-005): plumbing only, no working tree.
 	"adapters/git/commitbinder.go:CLIClient.CommitFilesOnto": true,

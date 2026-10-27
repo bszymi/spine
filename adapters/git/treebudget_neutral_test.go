@@ -337,3 +337,167 @@ func TestNeutralAttributes_MeasureFailsClosedWithoutTheLine(t *testing.T) {
 		t.Fatalf("measure from a linked worktree: %v", err)
 	}
 }
+
+// TestNeutralAttributes_BlankRulesAreGits (review round 3, P4): git skips
+// only space, tab and CR around attribute fields. A line led by a vertical
+// tab or a no-break space is a pattern line to git, not a blank or a
+// comment, and the neutral line with a form feed after it is not the
+// neutral line (git drops its last attribute as an invalid name). Each such
+// file is refused by the measure, and Ensure repairs it by appending the
+// exact line.
+func TestNeutralAttributes_BlankRulesAreGits(t *testing.T) {
+	ctx := context.Background()
+	n := git.NeutralCheckoutAttributes
+	for _, tc := range []struct{ name, content string }{
+		{"VT-led line after the neutral line", n + "\n\v* ident\n"},
+		{"NBSP-led line after the neutral line", n + "\n * ident\n"},
+		{"VT-prefixed neutral line", "\v" + n + "\n"},
+		{"NBSP-prefixed neutral line", " " + n + "\n"},
+		{"FF-suffixed neutral line", n + "\f\n"},
+		{"VT-led comment after it", n + "\n\v# not a comment\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _, _, _ := tbRepo(t)
+			path := filepath.Join(repo, ".git", "info", "attributes")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (git.TreeBudget{}).Measure(ctx, git.NewCLIClient(repo), "main"); !errors.Is(err, git.ErrNeutralAttributesMissing) {
+				t.Fatalf("measure: %v, want the neutral-attributes refusal", err)
+			}
+			if err := git.EnsureNeutralCheckoutAttributes(ctx, repo); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (git.TreeBudget{}).Measure(ctx, git.NewCLIClient(repo), "main"); err != nil {
+				t.Fatalf("after Ensure: %v", err)
+			}
+		})
+	}
+	// git's own blanks around the line, and a tab-led comment after it,
+	// are fine.
+	repo, _, _, _ := tbRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, ".git", "info", "attributes"), []byte(" \t"+n+"\r\n\t# end\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := git.HasNeutralCheckoutAttributes(ctx, repo); !ok || err != nil {
+		t.Fatalf("git-blank variants: %v %v", ok, err)
+	}
+}
+
+// TestNeutralAttributes_EnsureWritesOnlyAtTheTop (review round 3, P4): a
+// directory that merely lies inside a repository is refused — its
+// repository's info/attributes is not written; a bare repository's own
+// directory is accepted.
+func TestNeutralAttributes_EnsureWritesOnlyAtTheTop(t *testing.T) {
+	ctx := context.Background()
+	repo := testutil.NewTempRepo(t)
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.EnsureNeutralCheckoutAttributes(ctx, sub); err == nil {
+		t.Fatal("wrote the attributes of a repository the directory merely lies in")
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".git", "info", "attributes")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("info/attributes was written: %v", err)
+	}
+	bare := t.TempDir()
+	tbGit(t, bare, nil, "init", "-q", "--bare")
+	if err := git.EnsureNeutralCheckoutAttributes(ctx, bare); err != nil {
+		t.Fatalf("bare: %v", err)
+	}
+}
+
+// ntConvertedClone is a repository whose files were checked out with
+// conversions before the neutral line existed: its .gitattributes (attrs)
+// or its own core.autocrlf makes a.txt CRLF on disk. Branch feature
+// changes a.txt.
+func ntConvertedClone(t *testing.T, attrs string, autocrlf bool) string {
+	t.Helper()
+	repo := testutil.NewTempRepo(t)
+	if attrs != "" {
+		testutil.WriteFile(t, repo, ".gitattributes", attrs)
+	}
+	testutil.WriteFile(t, repo, "a.txt", "one\ntwo\nthree\n")
+	tbGit(t, repo, nil, "add", "-A")
+	tbGit(t, repo, nil, "commit", "-q", "-m", "files")
+	tbGit(t, repo, nil, "checkout", "-q", "-b", "feature")
+	testutil.WriteFile(t, repo, "a.txt", "one\ntwo\nthree\nfour\n")
+	tbGit(t, repo, nil, "commit", "-q", "-am", "four")
+	tbGit(t, repo, nil, "checkout", "-q", "main")
+	if autocrlf {
+		tbGit(t, repo, nil, "config", "core.autocrlf", "true")
+	}
+	// Re-check a.txt out under the conversion.
+	if err := os.Remove(filepath.Join(repo, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	tbGit(t, repo, nil, "checkout", "--", "a.txt")
+	if b, _ := os.ReadFile(filepath.Join(repo, "a.txt")); !strings.Contains(string(b), "\r\n") {
+		t.Fatalf("fixture: a.txt not converted: %q", b)
+	}
+	return repo
+}
+
+// TestNeutralAttributes_EnsureNeutralWorkTreeRenormalises (review round 3,
+// P3): a clone checked out with conversions before the line looks
+// modified once the line turns them off, and a merge over it was refused.
+// EnsureNeutralWorkTree, when it adds the line, brings the tree to the
+// stored bytes (quarantining the tracked state), and the merge succeeds;
+// called again it changes nothing.
+func TestNeutralAttributes_EnsureNeutralWorkTreeRenormalises(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		attrs    string
+		autocrlf bool
+	}{
+		{"text eol=crlf", "* text eol=crlf\n", false},
+		{"host core.autocrlf", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := ntConvertedClone(t, tc.attrs, tc.autocrlf)
+			c := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{}))
+			if err := c.EnsureNeutralWorkTree(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if st := tbGit(t, repo, nil, "status", "--porcelain", "--untracked-files=no"); st != "" {
+				t.Fatalf("still modified after the line was added:\n%s", st)
+			}
+			if _, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Target: "main", Strategy: "merge-commit", Message: "m"}); err != nil {
+				t.Fatalf("merge after the upgrade: %v", err)
+			}
+			head := tbGit(t, repo, nil, "rev-parse", "HEAD")
+			if err := c.EnsureNeutralWorkTree(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := tbGit(t, repo, nil, "rev-parse", "HEAD"); got != head {
+				t.Fatal("a second call moved HEAD")
+			}
+		})
+	}
+}
+
+// TestNeutralAttributes_SharedTreeRestoreRenormalises (review round 3, P3
+// check): on standalone's shared tree — a home branch — the line written
+// by the plain writer is enough: the first sequence's restore quarantines
+// the converted files and resets them to the stored bytes, and the merge
+// inside it succeeds.
+func TestNeutralAttributes_SharedTreeRestoreRenormalises(t *testing.T) {
+	ctx := context.Background()
+	repo := ntConvertedClone(t, "* text eol=crlf\n", false)
+	if err := git.EnsureNeutralCheckoutAttributes(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	c := git.NewCLIClient(repo, git.WithHomeBranch("main"), git.WithTreeBudget(git.TreeBudget{}))
+	err := c.WithWorkingTree(ctx, func(ctx context.Context) error {
+		if st := tbGit(t, repo, nil, "status", "--porcelain", "--untracked-files=no"); st != "" {
+			return fmt.Errorf("not restored:\n%s", st)
+		}
+		_, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Target: "main", Strategy: "merge-commit", Message: "m"})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

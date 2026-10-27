@@ -48,6 +48,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/bszymi/spine/core/observe"
 )
 
 // NeutralCheckoutAttributes is the attributes line a budgeted repository
@@ -112,18 +114,28 @@ func readInfoAttributes(path string) ([]byte, bool, error) {
 	return b, true, nil
 }
 
-// isNeutralLine reports whether line is the neutral line (blanks around it
-// and a CR ignored).
+// gitBlanks are the bytes git's attribute parser skips around a line's
+// fields (attr.c): space, tab and CR (and the LF that ends the line). Any
+// other byte — a vertical tab, a form feed, a no-break space — is part of
+// a pattern or an attribute name to git, so it must be to us too (review
+// round 3): a line led by one is a pattern line, not a blank or a
+// comment, and the neutral line with one around it is not the neutral
+// line.
+const gitBlanks = " \t\r"
+
+// isNeutralLine reports whether line is exactly the neutral line, git's
+// blanks around it aside.
 func isNeutralLine(line []byte) bool {
-	return string(bytes.TrimSpace(line)) == NeutralCheckoutAttributes
+	return string(bytes.Trim(line, gitBlanks+"\n")) == NeutralCheckoutAttributes
 }
 
 // endsNeutral reports whether the last attribute line of content — the
-// last line that is neither blank nor a comment — is the neutral line.
+// last line that, past git's blanks, is neither empty nor a comment (a
+// '#' right after the blanks) — is the neutral line.
 func endsNeutral(content []byte) bool {
 	lines := bytes.Split(content, []byte("\n"))
 	for i := len(lines) - 1; i >= 0; i-- {
-		l := bytes.TrimSpace(lines[i])
+		l := bytes.TrimLeft(lines[i], gitBlanks)
 		if len(l) == 0 || l[0] == '#' {
 			continue
 		}
@@ -138,16 +150,30 @@ func endsNeutral(content []byte) bool {
 // idempotent — a file that already ends in the line is not rewritten — and
 // writes atomically (a temporary file renamed into place). A non-regular
 // file at the path is refused, never followed.
+//
+// repoDir must be the top of a repository — its work tree's root, or a
+// bare repository's directory — never a directory that merely lies
+// inside one (review round 3): the file written is that repository's.
 func EnsureNeutralCheckoutAttributes(ctx context.Context, repoDir string) error {
+	_, err := ensureNeutral(ctx, repoDir)
+	return err
+}
+
+// ensureNeutral is EnsureNeutralCheckoutAttributes, reporting whether it
+// changed the file.
+func ensureNeutral(ctx context.Context, repoDir string) (bool, error) {
+	if err := requireRepositoryTop(ctx, repoDir); err != nil {
+		return false, err
+	}
 	path, err := infoAttributesPath(ctx, repoDir)
 	if err != nil {
-		return err
+		return false, err
 	}
 	neutralWriteMu.Lock()
 	defer neutralWriteMu.Unlock()
 	have, exists, err := readInfoAttributes(path)
 	if err != nil {
-		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot read info/attributes", Err: err}
+		return false, &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot read info/attributes", Err: err}
 	}
 	var want bytes.Buffer
 	for _, line := range bytes.SplitAfter(have, []byte("\n")) {
@@ -161,32 +187,137 @@ func EnsureNeutralCheckoutAttributes(ctx context.Context, repoDir string) error 
 	}
 	want.WriteString(NeutralCheckoutAttributes + "\n")
 	if exists && bytes.Equal(have, want.Bytes()) {
-		return nil
+		return false, nil
+	}
+	writeErr := func(msg string, err error) (bool, error) {
+		return false, &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: msg, Err: err}
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot create info/", Err: err}
+		return writeErr("cannot create info/", err)
 	}
 	tmp, err := os.CreateTemp(dir, ".attributes.spine-*")
 	if err != nil {
-		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot write info/attributes", Err: err}
+		return writeErr("cannot write info/attributes", err)
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }() // a no-op after the rename
 	if _, err := tmp.Write(want.Bytes()); err != nil {
 		_ = tmp.Close()
-		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot write info/attributes", Err: err}
+		return writeErr("cannot write info/attributes", err)
 	}
 	if err := tmp.Chmod(0o644); err != nil { //nolint:gosec // G302: git's own mode for info/attributes
 		_ = tmp.Close()
-		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot write info/attributes", Err: err}
+		return writeErr("cannot write info/attributes", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot write info/attributes", Err: err}
+		return writeErr("cannot write info/attributes", err)
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
-		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot write info/attributes", Err: err}
+		return writeErr("cannot write info/attributes", err)
+	}
+	return true, nil
+}
+
+// requireRepositoryTop refuses a repoDir that is not the top of its
+// repository: a work tree's root (`rev-parse --show-toplevel`) or a bare
+// repository's own directory (`rev-parse --absolute-git-dir`).
+func requireRepositoryTop(ctx context.Context, repoDir string) error {
+	run := func(args ...string) (string, error) {
+		cmd := newGitCmd(ctx, args...)
+		cmd.Dir = repoDir
+		cmd.Env = append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
+		out, err := cmd.Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	refuse := func(err error) error {
+		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes",
+			Message: "not the top of a git repository; its info/attributes is not written", Err: err}
+	}
+	bare, err := run("rev-parse", "--is-bare-repository")
+	if err != nil {
+		return refuse(err)
+	}
+	top := ""
+	if bare == "true" {
+		top, err = run("rev-parse", "--absolute-git-dir")
+	} else {
+		top, err = run("rev-parse", "--show-toplevel")
+	}
+	if err != nil {
+		return refuse(err)
+	}
+	same := func(a, b string) bool {
+		ra, errA := filepath.EvalSymlinks(a)
+		rb, errB := filepath.EvalSymlinks(b)
+		return errA == nil && errB == nil && filepath.Clean(ra) == filepath.Clean(rb)
+	}
+	abs, err := filepath.Abs(repoDir)
+	if err != nil || !same(abs, top) {
+		return refuse(errors.New("the directory lies inside the repository"))
 	}
 	return nil
+}
+
+// EnsureNeutralWorkTree is EnsureNeutralCheckoutAttributes for an
+// existing clone with a work tree (review round 3). A clone checked out
+// before the line was written holds files as its old attributes or host
+// config converted them (CRLF, expanded idents), which no longer match
+// the blobs once conversion is off: status shows them modified and a
+// merge or switch over them is refused. So when this call ADDS the line,
+// the work tree is brought to the stored bytes, holding the tree like any
+// other stateful call: HEAD's tree is measured against the client's
+// budget (when it has one), a tracked file standing in the way of an
+// untracked one refuses, the tracked state is quarantined into an
+// unreferenced commit (`git stash create`, logged at Warn, as the shared
+// tree's restore does), and `reset --hard` writes HEAD's stored bytes. A
+// bare repository, an unborn HEAD or a clean tree needs nothing more. A
+// file that already ended in the line is left alone, and so is the tree.
+//
+// Only a call that changes the file takes the tree (so the per-push call
+// of the git HTTP endpoint never waits behind a sequence once the line is
+// there).
+func (c *CLIClient) EnsureNeutralWorkTree(ctx context.Context) error {
+	const op = "neutral_attributes"
+	changed, err := ensureNeutral(ctx, c.repoPath)
+	if err != nil || !changed {
+		return err
+	}
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	ctx = h.ctx
+	if out, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "--is-bare-repository"); err != nil || strings.TrimSpace(out) == "true" {
+		return err
+	}
+	if _, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "-q", "--verify", "HEAD^{commit}"); err != nil {
+		return nil // unborn HEAD: nothing checked out
+	}
+	status, _, err := c.runWith(ctx, op, runOpts{}, "status", "--porcelain=v1", "-z", "--untracked-files=no")
+	if err != nil {
+		return err
+	}
+	if len(parseTrackedStatus(status)) == 0 {
+		return nil
+	}
+	if err := c.checkTrees(ctx, op, "HEAD"); err != nil {
+		return err
+	}
+	if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
+		return err
+	} else if p != "" {
+		return &GitError{Kind: ErrKindPermanent, Op: op,
+			Message: fmt.Sprintf("an untracked file is in the way of a tracked path the renormalising reset would rewrite (%q); nothing was reset", p)}
+	}
+	sha, err := c.quarantineTracked(ctx, op)
+	if err != nil {
+		return err
+	}
+	observe.Logger(ctx).Warn("work tree checked out with conversions brought to stored bytes after the neutral checkout attributes were added",
+		"repo_path", c.repoPath, "quarantine_sha", sha)
+	_, _, err = c.runWith(ctx, op, runOpts{}, "reset", "--hard", "-q")
+	return err
 }
 
 // HasNeutralCheckoutAttributes reports whether repoDir's info/attributes

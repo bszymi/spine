@@ -398,8 +398,11 @@ func (p *Pool) ensureClone(ctx context.Context, repo *repository.Repository, cre
 		// In a process with a checkout budget (`spine serve`) a clone made
 		// before it — or by an older binary — gets the neutral checkout
 		// attributes too; the budget's measure refuses without them.
+		// A clone checked out with conversions before the line existed is
+		// brought to its stored bytes when the line is added
+		// (EnsureNeutralWorkTree), so its first merge does not find it dirty.
 		if git.DefaultCheckoutLimits().Budget != nil {
-			if err := git.EnsureNeutralCheckoutAttributes(ctx, repo.LocalPath); err != nil {
+			if err := git.NewCLIClient(repo.LocalPath).EnsureNeutralWorkTree(ctx); err != nil {
 				return domain.NewErrorWithCause(domain.ErrUnavailable,
 					fmt.Sprintf("repository %q is unavailable: cannot set its neutral checkout attributes", repo.ID), err)
 			}

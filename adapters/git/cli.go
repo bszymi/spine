@@ -1966,7 +1966,9 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 	mergeLimit := int64(0)
 	if op == "merge" {
 		if mergeLimit = c.mergeAllocLimit(); mergeLimit > 0 {
-			cmd.Env = append(os.Environ(), "GIT_ALLOC_LIMIT="+strconv.FormatInt(mergeLimit, 10))
+			// The C locale too: the alloc refusal and classifyGitError's
+			// patterns are English, as for merge-tree (runWith).
+			cmd.Env = append(os.Environ(), "GIT_ALLOC_LIMIT="+strconv.FormatInt(mergeLimit, 10), "LC_ALL=C", "LANGUAGE=")
 		}
 	}
 
