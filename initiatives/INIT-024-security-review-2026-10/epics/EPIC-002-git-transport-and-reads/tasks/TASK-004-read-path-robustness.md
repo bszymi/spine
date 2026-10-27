@@ -2,12 +2,12 @@
 id: TASK-004
 type: Task
 title: "Read-path robustness: streamed listings, no DWIM fallback for reserved names, unforgeable log records, bounded evidence diff"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-10-27
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
