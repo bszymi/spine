@@ -74,8 +74,8 @@ change.
   tree's restore would also repair the workspace tree on its first sequence. The tree is marked
   (a file in its git directory) before the line is written and the mark is cleared only once the
   tree is at its stored bytes or clean, so a renormalisation that fails or is interrupted (HEAD
-  over the budget, a tracked file in an untracked one's way, a cancelled request, a crash) is
-  retried by the next call — the next start, workspace build, reuse or push — and returns its
+  over the budget, a tracked file in an untracked one's way, a cancelled request, a workspace
+  build's init deadline, a crash) is retried by the next call — the next start, workspace build, reuse or push — and returns its
   error meanwhile (matching `git.ErrRenormalisePending`). A push is not refused for it (its
   measure needs only the line); it logs a Warn and the next push retries. A tree whose file
   already ends in the line, with no mark, is not touched again.

@@ -1160,9 +1160,13 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// when its tree is already over the checkout budget (INIT-024 TASK-003).
 	// The budget's premise (INIT-024 TASK-003): checkouts of the
 	// workspace tree write stored bytes. A failure is logged; every
-	// budgeted measure then refuses (fail closed).
+	// budgeted measure then refuses (fail closed). It is one of the
+	// build's one-shot calls, so it runs under the init deadline: a
+	// renormalisation waiting for a tree another operation holds stops
+	// there, stays pending and is retried at the next build, instead of
+	// holding the build past InitTimeout (INIT-024 integration A).
 	if gitClient.CheckoutLimits().Budget != nil {
-		if err := gitClient.EnsureNeutralWorkTree(ctx); err != nil {
+		if err := gitClient.EnsureNeutralWorkTree(initCtx); err != nil {
 			observe.Logger(ctx).Error("neutral checkout attributes not set, or the workspace tree not yet brought to its stored bytes (retried at the next build); its checkouts and merges may be refused",
 				"workspace_id", cfg.ID, "error", err)
 		}

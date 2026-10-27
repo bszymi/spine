@@ -1297,7 +1297,10 @@ The following limitations have been resolved:
   as before. The writer only writes at the top of a repository (never a repository that merely
   contains the directory it is given), and when it first adds the line to a work tree checked out
   with conversions it brings that tree to the stored bytes (quarantining its tracked state); a
-  tree whose renormalisation failed stays marked and is retried by the next call.
+  tree whose renormalisation failed stays marked and is retried by the next call. A shared-mode
+  workspace build waits for the tree's hold at most its init deadline (`SPINE_WS_POOL_INIT_TIMEOUT`;
+  "Shared Working Tree", item 9): past it the renormalisation stays pending for the next build and
+  the workspace is served.
   Not neutralised (operator configuration): a host `merge.<name>.driver` named by a `merge=`
   attribute, and `pull.twohead` (Spine never pulls). Consequences: an LFS pointer stays a pointer,
   `git add` keeps CRLF, does not collapse `$Id: … $`, runs no clean filter (a file Spine writes at
