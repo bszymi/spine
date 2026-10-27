@@ -1597,7 +1597,10 @@ What that implies, and what it leaves open:
      it. When the abandoned build returns, a successful result is installed and served (a slow but
      healthy workspace is not rebuilt for ever), unless the workspace was evicted meanwhile or the
      pool closed; otherwise what it built is closed and the next caller builds afresh. A panic in a
-     build is recovered: what the build had started is closed, and callers get the error.
+     build is recovered: what the build had started is closed, and callers get the error. A
+     request meets every one of these failures before its bearer can be validated (that needs the
+     built services), so it answers the uniform pre-authentication `401` (INIT-024 TASK-007), even
+     with a token that is valid there; the cause is logged.
      **An operator with a workspace that keeps failing this way:** check that its database answers
      (connection and authentication); if its healthy build is simply slower than the timeout (a large
      subscription sweep, a slow database), raise `SPINE_WS_POOL_INIT_TIMEOUT`; to bound connection

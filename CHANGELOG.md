@@ -61,7 +61,10 @@ gap more than a security finding (INIT-024 owner question 5). Standalone only: S
   - a build that finishes after the timeout is installed and served, unless the workspace was
     evicted meanwhile or the pool closed; otherwise it is closed and the next caller builds afresh;
   - the build runs in its own goroutine; a panic in it (the builder hook included) is recovered,
-    what it had started is closed, and callers get an initialization error (its stack is logged).
+    what it had started is closed, and callers get an initialization error (its stack is logged);
+  - a request meets each of these failures before its bearer can be validated (that needs the
+    built services), so it answers TASK-007's uniform pre-authentication `401` (below), on
+    `/api/v1` and `/git` alike; the cause is logged.
 - In `platform-binding` mode the scheduler lists workspaces from the provider's cache keys
   (`ListIDs`), reading no secret; each scan's resolve still reads the binding's secrets
   (`KNOWN-LIMITATIONS.md`, item 9).
