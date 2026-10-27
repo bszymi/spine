@@ -28,11 +28,13 @@ package git
 // checkouts write stored bytes (an LFS pointer stays a pointer, CRLF is
 // not added), `git add` no longer normalises (CRLF content stays CRLF,
 // `$Id: … $` is not collapsed), conflict markers are always 7 characters,
-// and a tree checked out with conversions before looks modified once,
-// until the shared tree's restore resets it.
+// and a tree checked out with conversions before the line would look
+// modified, so EnsureNeutralWorkTree brings it to the stored bytes
+// (retried until that succeeds).
 //
 // The writer is opt-in like the budget: `spine serve` calls
-// EnsureNeutralCheckoutAttributes for each repository it serves, and a
+// EnsureNeutralWorkTree for each repository it serves, a budgeted Clone
+// writes the line before its checkout, and a
 // budgeted measure refuses (fail closed) on a repository whose attributes
 // file does not end in the line (requireNeutralCheckoutAttributes).
 // Operator lines in the file are kept.
@@ -155,25 +157,29 @@ func endsNeutral(content []byte) bool {
 // bare repository's directory — never a directory that merely lies
 // inside one (review round 3): the file written is that repository's.
 func EnsureNeutralCheckoutAttributes(ctx context.Context, repoDir string) error {
-	_, err := ensureNeutral(ctx, repoDir)
-	return err
+	return ensureNeutral(ctx, repoDir, "")
 }
 
-// ensureNeutral is EnsureNeutralCheckoutAttributes, reporting whether it
-// changed the file.
-func ensureNeutral(ctx context.Context, repoDir string) (bool, error) {
+// ensureNeutral is EnsureNeutralCheckoutAttributes. With a pendingMarker
+// path, a write that ADDS the line (the file did not end in it) first
+// creates that marker, so a work tree checked out under the old
+// attributes stays marked for renormalising until EnsureNeutralWorkTree
+// has done it (codex review round 3): the marker is on disk before the
+// line is, and a failed or interrupted renormalisation is retried by the
+// next call.
+func ensureNeutral(ctx context.Context, repoDir, pendingMarker string) error {
 	if err := requireRepositoryTop(ctx, repoDir); err != nil {
-		return false, err
+		return err
 	}
 	path, err := infoAttributesPath(ctx, repoDir)
 	if err != nil {
-		return false, err
+		return err
 	}
 	neutralWriteMu.Lock()
 	defer neutralWriteMu.Unlock()
 	have, exists, err := readInfoAttributes(path)
 	if err != nil {
-		return false, &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot read info/attributes", Err: err}
+		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot read info/attributes", Err: err}
 	}
 	var want bytes.Buffer
 	for _, line := range bytes.SplitAfter(have, []byte("\n")) {
@@ -187,10 +193,15 @@ func ensureNeutral(ctx context.Context, repoDir string) (bool, error) {
 	}
 	want.WriteString(NeutralCheckoutAttributes + "\n")
 	if exists && bytes.Equal(have, want.Bytes()) {
-		return false, nil
+		return nil
 	}
-	writeErr := func(msg string, err error) (bool, error) {
-		return false, &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: msg, Err: err}
+	writeErr := func(msg string, err error) error {
+		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: msg, Err: err}
+	}
+	if pendingMarker != "" && !endsNeutral(have) {
+		if err := markRenormalisePending(pendingMarker); err != nil {
+			return writeErr("cannot mark the work tree for renormalising; info/attributes not written", err)
+		}
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -215,7 +226,52 @@ func ensureNeutral(ctx context.Context, repoDir string) (bool, error) {
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return writeErr("cannot write info/attributes", err)
 	}
-	return true, nil
+	return nil
+}
+
+// renormaliseMarker is the file, in a work tree's own git directory, that
+// says the work tree still holds files checked out before the neutral line
+// was added: created before the line is written, removed once the tree is
+// at its stored bytes (or found clean).
+const renormaliseMarker = "spine-renormalise-pending"
+
+// markRenormalisePending creates the marker. One already there (a regular
+// file) is kept; anything else at the path is refused, never followed
+// (O_EXCL does not follow a link).
+func markRenormalisePending(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: a fixed name in git's own directory
+	if errors.Is(err, fs.ErrExist) {
+		if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode().IsRegular() {
+			return nil
+		}
+		return errors.New("the renormalise marker is not a regular file")
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString("the work tree is brought to its stored bytes by the next neutral-attributes call\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// renormalisePending reports whether the marker is there.
+func renormalisePending(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// clearRenormalisePending removes the marker (a link is removed, not
+// followed).
+func clearRenormalisePending(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // requireRepositoryTop refuses a repoDir that is not the top of its
@@ -264,22 +320,42 @@ func requireRepositoryTop(ctx context.Context, repoDir string) error {
 // config converted them (CRLF, expanded idents), which no longer match
 // the blobs once conversion is off: status shows them modified and a
 // merge or switch over them is refused. So when this call ADDS the line,
-// the work tree is brought to the stored bytes, holding the tree like any
+// it first marks the work tree (a file in its git directory), and a
+// marked tree is brought to the stored bytes, holding the tree like any
 // other stateful call: HEAD's tree is measured against the client's
 // budget (when it has one), a tracked file standing in the way of an
 // untracked one refuses, the tracked state is quarantined into an
 // unreferenced commit (`git stash create`, logged at Warn, as the shared
-// tree's restore does), and `reset --hard` writes HEAD's stored bytes. A
-// bare repository, an unborn HEAD or a clean tree needs nothing more. A
-// file that already ended in the line is left alone, and so is the tree.
+// tree's restore does), and `reset --hard` writes HEAD's stored bytes. An
+// unborn HEAD or a clean tree needs nothing more. The mark is cleared only
+// then, so a renormalisation that fails or is interrupted (HEAD over the
+// budget, an obstruction, a cancelled request, a crash) is retried by the
+// next call — the error is returned meanwhile — rather than leaving the
+// tree converted under a file that already ends in the line (codex review
+// round 3). A bare repository is never marked; a file that already ended
+// in the line, with no mark, leaves the file and the tree alone.
 //
-// Only a call that changes the file takes the tree (so the per-push call
-// of the git HTTP endpoint never waits behind a sequence once the line is
-// there).
+// Only a marked tree is held (so the per-push call of the git HTTP
+// endpoint never waits behind a sequence once the line is there and the
+// tree is renormalised).
 func (c *CLIClient) EnsureNeutralWorkTree(ctx context.Context) error {
 	const op = "neutral_attributes"
-	changed, err := ensureNeutral(ctx, c.repoPath)
-	if err != nil || !changed {
+	out, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "--is-bare-repository", "--absolute-git-dir")
+	if err != nil {
+		return err
+	}
+	fields := strings.SplitN(strings.TrimSuffix(out, "\n"), "\n", 2) // a git dir may hold spaces
+	if len(fields) != 2 || fields[1] == "" {
+		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "unexpected rev-parse output for the repository's git directory"}
+	}
+	marker := ""
+	if fields[0] != "true" {
+		marker = filepath.Join(fields[1], renormaliseMarker)
+	}
+	if err := ensureNeutral(ctx, c.repoPath, marker); err != nil || marker == "" {
+		return err
+	}
+	if pending, err := renormalisePending(marker); err != nil || !pending {
 		return err
 	}
 	h, err := c.lockTree(ctx)
@@ -288,18 +364,25 @@ func (c *CLIClient) EnsureNeutralWorkTree(ctx context.Context) error {
 	}
 	defer h.release()
 	ctx = h.ctx
-	if out, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "--is-bare-repository"); err != nil || strings.TrimSpace(out) == "true" {
+	// Another call may have finished while this one waited for the tree.
+	if pending, err := renormalisePending(marker); err != nil || !pending {
 		return err
 	}
+	done := func() error {
+		if err := clearRenormalisePending(marker); err != nil {
+			return &GitError{Kind: ErrKindPermanent, Op: op, Message: "cannot clear the renormalise marker", Err: err}
+		}
+		return nil
+	}
 	if _, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "-q", "--verify", "HEAD^{commit}"); err != nil {
-		return nil // unborn HEAD: nothing checked out
+		return done() // unborn HEAD: nothing checked out
 	}
 	status, _, err := c.runWith(ctx, op, runOpts{}, "status", "--porcelain=v1", "-z", "--untracked-files=no")
 	if err != nil {
 		return err
 	}
 	if len(parseTrackedStatus(status)) == 0 {
-		return nil
+		return done()
 	}
 	if err := c.checkTrees(ctx, op, "HEAD"); err != nil {
 		return err
@@ -316,8 +399,10 @@ func (c *CLIClient) EnsureNeutralWorkTree(ctx context.Context) error {
 	}
 	observe.Logger(ctx).Warn("work tree checked out with conversions brought to stored bytes after the neutral checkout attributes were added",
 		"repo_path", c.repoPath, "quarantine_sha", sha)
-	_, _, err = c.runWith(ctx, op, runOpts{}, "reset", "--hard", "-q")
-	return err
+	if _, _, err := c.runWith(ctx, op, runOpts{}, "reset", "--hard", "-q"); err != nil {
+		return err
+	}
+	return done()
 }
 
 // HasNeutralCheckoutAttributes reports whether repoDir's info/attributes

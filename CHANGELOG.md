@@ -71,8 +71,12 @@ change.
   built), a code-repository clone the pool reuses, and a served repository on its first push each
   have HEAD's tree measured, their tracked state quarantined into an unreferenced commit (logged at
   Warn, as the shared tree's restore does) and `reset --hard` to the stored bytes. The shared
-  tree's restore would also repair the workspace tree on its first sequence. A tree whose file
-  already ends in the line is not touched again.
+  tree's restore would also repair the workspace tree on its first sequence. The tree is marked
+  (a file in its git directory) before the line is written and the mark is cleared only once the
+  tree is at its stored bytes or clean, so a renormalisation that fails or is interrupted (HEAD
+  over the budget, a tracked file in an untracked one's way, a cancelled request, a crash) is
+  retried by the next call — the next start, workspace build, reuse or push — and returns its
+  error meanwhile. A tree whose file already ends in the line, with no mark, is not touched again.
 - Not neutralised (operator configuration): a host `merge.<name>.driver` and `pull.twohead`.
 - With the deadline on, `EnterBranch` adds its worktree `--no-checkout` and fills it with
   `reset --hard`, so a worktree's `post-checkout` hook no longer runs.
@@ -88,7 +92,7 @@ change.
   `TreeBudget.Check(ctx, *CLIClient, treeish)`, `MeasureTree(ctx, *CLIClient, treeish)`,
   `TreeStats`, `NeutralCheckoutAttributes`, `EnsureNeutralCheckoutAttributes` /
   `HasNeutralCheckoutAttributes(ctx, repoDir)`, `CLIClient.EnsureNeutralWorkTree(ctx)` (the writer
-  plus the one-time reset of a tree checked out with conversions), `ErrNeutralAttributesMissing` (a budgeted measure
+  plus the reset, retried until it succeeds, of a tree checked out with conversions), `ErrNeutralAttributesMissing` (a budgeted measure
   on a repository without the line), `MergeAllocRefusedMessage`, `ErrTreeTooLarge` with the typed
   cause `*TreeTooLargeError{Limit, Max, Seen}` inside `*GitError{Kind: ErrKindPermanent, Message: TreeTooLargeMessage}` (distinct
   from `ErrBlobTooLarge` and `ErrOutputTooLarge`), `WithTreeBudget`, `WithMutateTimeout`,

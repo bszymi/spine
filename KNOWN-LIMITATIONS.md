@@ -1139,13 +1139,15 @@ The following limitations have been resolved:
   (only space, tab and CR are blanks). `merge` is left alone, so `binary` and `merge=union` merge
   as before. The writer only writes at the top of a repository (never a repository that merely
   contains the directory it is given), and when it first adds the line to a work tree checked out
-  with conversions it brings that tree to the stored bytes (quarantining its tracked state).
+  with conversions it brings that tree to the stored bytes (quarantining its tracked state); a
+  tree whose renormalisation failed stays marked and is retried by the next call.
   Not neutralised (operator configuration): a host `merge.<name>.driver` named by a `merge=`
   attribute, and `pull.twohead` (Spine never pulls). Consequences: an LFS pointer stays a pointer,
   `git add` keeps CRLF, does not collapse `$Id: … $`, runs no clean filter (a file Spine writes at
   an LFS path on a git-lfs host is stored as its full content) and does not re-encode, and a tree
   checked out with conversions
-  before the upgrade is brought to its stored bytes once, when the line is first added (above).
+  before the upgrade is brought to its stored bytes once, when the line is first added (retried
+  until it succeeds; above).
 - **A merge is measured by its result** (review rounds 1-2). After the switch to the target — in
   the working tree `git merge` will see, whose merge attributes it reads — `git merge-tree
   --write-tree` computes the tree the merge will leave (merge-ort; conflict markers included) on

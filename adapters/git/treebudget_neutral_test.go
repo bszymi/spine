@@ -478,6 +478,49 @@ func TestNeutralAttributes_EnsureNeutralWorkTreeRenormalises(t *testing.T) {
 	}
 }
 
+// TestNeutralAttributes_FailedRenormalisationIsRetried (codex review
+// round 3): a renormalisation that fails after the line is written —
+// here HEAD's tree is over the first client's budget — must not leave the
+// tree converted under a file that already ends in the line. The next
+// call, once the budget allows HEAD, still brings the tree to the stored
+// bytes and the merge succeeds; after that, no call touches the tree
+// again, whatever its budget.
+func TestNeutralAttributes_FailedRenormalisationIsRetried(t *testing.T) {
+	ctx := context.Background()
+	repo := ntConvertedClone(t, "* text eol=crlf\n", false)
+	tight := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{MaxEntries: 1}))
+	err := tight.EnsureNeutralWorkTree(ctx)
+	var tooLarge *git.TreeTooLargeError
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("first call: want the HEAD-over-budget refusal, got %v", err)
+	}
+	if has, herr := git.HasNeutralCheckoutAttributes(ctx, repo); herr != nil || !has {
+		t.Fatalf("fixture: the line was not written by the failed call (%v, %v)", has, herr)
+	}
+	if err := tight.EnsureNeutralWorkTree(ctx); !errors.As(err, &tooLarge) {
+		t.Fatalf("a retry while HEAD is still over the budget: want the refusal again, got %v", err)
+	}
+	c := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{}))
+	if err := c.EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatalf("retry once HEAD fits: %v", err)
+	}
+	if st := tbGit(t, repo, nil, "status", "--porcelain", "--untracked-files=no"); st != "" {
+		t.Fatalf("the retry did not renormalise:\n%s", st)
+	}
+	if _, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Target: "main", Strategy: "merge-commit", Message: "m"}); err != nil {
+		t.Fatalf("merge after the retried renormalisation: %v", err)
+	}
+	// Done: the tree is no longer marked, so even an over-budget client's
+	// call is a no-op, and an edit made since is not reset.
+	testutil.WriteFile(t, repo, "a.txt", "edited\n")
+	if err := tight.EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatalf("a call after the renormalisation: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(repo, "a.txt")); string(b) != "edited\n" {
+		t.Fatalf("a call after the renormalisation touched the tree: %q", b)
+	}
+}
+
 // TestNeutralAttributes_SharedTreeRestoreRenormalises (review round 3, P3
 // check): on standalone's shared tree — a home branch — the line written
 // by the plain writer is enough: the first sequence's restore quarantines

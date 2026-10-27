@@ -912,7 +912,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// budgeted measure then refuses (fail closed).
 	if gitClient.CheckoutLimits().Budget != nil {
 		if err := gitClient.EnsureNeutralWorkTree(ctx); err != nil {
-			observe.Logger(ctx).Error("neutral checkout attributes not set; every checkout and merge of the workspace tree will be refused",
+			observe.Logger(ctx).Error("neutral checkout attributes not set, or the workspace tree not yet brought to its stored bytes (retried at the next build); its checkouts and merges may be refused",
 				"workspace_id", cfg.ID, "error", err)
 		}
 	}
