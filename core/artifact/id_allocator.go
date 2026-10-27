@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/domain"
 )
 
@@ -61,7 +62,20 @@ func NextID(ctx context.Context, gitClient FileLister, parentDir string, artifac
 		ref = "HEAD"
 	}
 
-	files, err := gitClient.ListFiles(ctx, ref, "")
+	// Normalize parentDir for prefix matching.
+	scanDir := strings.TrimSuffix(parentDir, "/")
+	if scanDir != "" {
+		scanDir += "/"
+	}
+
+	// Only the files under the parent directory are listed (INIT-024
+	// TASK-004, review finding N-6): with a git client that filters while
+	// it lists (git.PathFilterLister), a huge listing elsewhere in the tree
+	// no longer exceeds the listing limit. The loop below checks the
+	// prefix again.
+	files, err := git.ListFilesKeeping(ctx, gitClient, ref, func(file string) bool {
+		return scanDir == "" || strings.HasPrefix(file, scanDir)
+	})
 	if err != nil {
 		return "", fmt.Errorf("list files at %s: %w", ref, err)
 	}
@@ -73,12 +87,6 @@ func NextID(ctx context.Context, gitClient FileLister, parentDir string, artifac
 	// earlier in the same run must still be counted.
 	entryPrefix := prefix + "-"
 	pattern := regexp.MustCompile(`(?i)^` + regexp.QuoteMeta(entryPrefix) + `(\d+)`)
-
-	// Normalize parentDir for prefix matching.
-	scanDir := strings.TrimSuffix(parentDir, "/")
-	if scanDir != "" {
-		scanDir += "/"
-	}
 
 	maxNum := 0
 	seen := make(map[string]bool) // deduplicate directory entries

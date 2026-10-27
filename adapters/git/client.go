@@ -31,6 +31,45 @@ type GitClient interface {
 	DeleteRemoteBranch(ctx context.Context, remote, branch string) error
 }
 
+// PathFilterLister is the optional listing capability (INIT-024
+// TASK-004, review finding N-6): ListFilesFunc returns the paths at ref
+// that keep accepts (every path when keep is nil), with keep applied while
+// git lists, so only the kept paths count against the client's listing
+// limit. A caller finds it by type assertion on its GitClient and falls
+// back to ListFiles, so no interface an embedder implements grows a
+// method. *CLIClient implements it, and so does any type that embeds one
+// (SMP's gitread.Client).
+type PathFilterLister interface {
+	ListFilesFunc(ctx context.Context, ref string, keep func(path string) bool) ([]string, error)
+}
+
+// FileLister is the one GitClient method ListFilesKeeping needs.
+type FileLister interface {
+	ListFiles(ctx context.Context, ref, pattern string) ([]string, error)
+}
+
+// ListFilesKeeping lists, in git's order, the paths at ref that keep
+// accepts (every path when keep is nil): through ListFilesFunc when gc
+// has it (PathFilterLister), else ListFiles(ref, "") filtered here —
+// exactly what every caller did before the capability, with the client's
+// limit then applying to the whole listing.
+func ListFilesKeeping(ctx context.Context, gc FileLister, ref string, keep func(path string) bool) ([]string, error) {
+	if l, ok := gc.(PathFilterLister); ok {
+		return l.ListFilesFunc(ctx, ref, keep)
+	}
+	files, err := gc.ListFiles(ctx, ref, "")
+	if err != nil || keep == nil {
+		return files, err
+	}
+	var kept []string
+	for _, f := range files {
+		if keep(f) {
+			kept = append(kept, f)
+		}
+	}
+	return kept, nil
+}
+
 // CommitOpts defines options for creating a Git commit.
 type CommitOpts struct {
 	Message    string            // Commit summary line

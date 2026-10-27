@@ -149,20 +149,41 @@ const (
 	DefaultTreeMaxTotalBytes int64 = 2 << 30
 	// DefaultTreeMaxPathBytesTotal caps the summed full-path bytes of a
 	// tree's entries. It also bounds the depth of a tree (a path of
-	// depth d costs O(d^2) summed). It does NOT keep an admitted tree's
-	// listing within DefaultMaxOutputBytes (review round 1): a
-	// `ls-tree -r --name-only -z` adds one NUL per entry to the path
-	// bytes, so a tree near both defaults (16 MiB of paths, 200,000
-	// entries) lists to ~16.2 MiB and ListFiles refuses it (N-6, INIT-024
-	// TASK-004, whose listing cap must be at least this path budget plus
-	// one byte per entry and a margin, or be derived from the budget).
-	// The default stays 16 MiB pending owner question 1.
+	// depth d costs O(d^2) summed). A `ls-tree -r --name-only -z` adds
+	// one NUL per entry to the path bytes, so a tree near both defaults
+	// (16 MiB of paths, 200,000 entries) lists to ~16.2 MiB, over
+	// DefaultMaxOutputBytes (review round 1): the listings' own limit
+	// (DefaultMaxListingBytes; listingLimit for a budgeted client) is
+	// derived from this budget instead (INIT-024 TASK-004). The default
+	// stays 16 MiB pending owner question 1.
 	DefaultTreeMaxPathBytesTotal int64 = 16 << 20
 	// DefaultMutateTimeout is the wall-clock deadline `spine serve`
 	// gives every local mutating git command (owner question 2: 2 min).
 	// A client with no deadline (the library default) runs them under
 	// the caller's context alone, as before.
 	DefaultMutateTimeout = 2 * time.Minute
+)
+
+// Streamed listing bound (INIT-024 TASK-004, review finding N-6;
+// listing.go). ListFiles, ListFilesFunc and Diff hold only the paths they
+// return, and these bound how many bytes of them: each kept path plus its
+// NUL.
+const (
+	// listingMarginBytes is the headroom DefaultMaxListingBytes and a
+	// budgeted client's listing limit keep above the largest listing the
+	// checkout budget admits.
+	listingMarginBytes int64 = 1 << 20
+
+	// DefaultMaxListingBytes is the listing limit of a client with no
+	// explicit WithMaxOutputBytes: the checkout budget's default path
+	// bytes, plus one NUL per entry at its default entry count, plus a
+	// margin (16 MiB + 200,000 + 1 MiB, about 17.2 MiB). A tree the
+	// default budget admits — and so any tree a budgeted merge can bring
+	// in — therefore always lists in full, so no governed merge can wedge
+	// the projection's listings (`ls-tree -r --name-only` lists a subset
+	// of the entries `ls-tree -r -t` measures). It is deliberately above
+	// DefaultMaxOutputBytes, the stdout cap of every other command.
+	DefaultMaxListingBytes = DefaultTreeMaxPathBytesTotal + DefaultTreeMaxEntries + listingMarginBytes
 )
 
 // WithMaxBlobBytes sets the per-blob ReadFile limit. n <= 0 keeps the
@@ -180,10 +201,15 @@ func WithMaxBlobBytes(n int64) CLIOption {
 // (DefaultMaxOutputBytes); a value below 4 KiB is raised to 4 KiB. Read
 // commands fail when they exceed it; mutating commands keep the head and
 // discard the rest.
+//
+// It is also the limit on the paths a streamed listing keeps (ListFiles,
+// ListFilesFunc, Diff; listingLimit): without it they keep up to
+// DefaultMaxListingBytes.
 func WithMaxOutputBytes(n int64) CLIOption {
 	return func(c *CLIClient) {
 		if n > 0 {
 			c.maxOutputBytes = n
+			c.outputLimitSet = true
 		}
 	}
 }
@@ -329,13 +355,21 @@ type OutputTooLargeError struct {
 	Limit int64
 	// GitAlloc is true when git refused an allocation over its alloc
 	// limit (Limit is then GIT_ALLOC_LIMIT), false when stdout overran
-	// Limit.
+	// Limit — for a streamed listing (ListFiles, Diff), when the paths it
+	// keeps did.
 	GitAlloc bool
+	// PerPath is true when a streamed listing refused one path longer
+	// than MaxListingPathBytes (Limit is then that bound; INIT-024
+	// TASK-004).
+	PerPath bool
 }
 
 func (e *OutputTooLargeError) Error() string {
-	if e.GitAlloc {
+	switch {
+	case e.GitAlloc:
 		return fmt.Sprintf("git %s needed an allocation over the %d-byte git allocation limit", e.Op, e.Limit)
+	case e.PerPath:
+		return fmt.Sprintf("git %s output holds a path longer than %d bytes", e.Op, e.Limit)
 	}
 	return fmt.Sprintf("git %s output exceeds the %d-byte read limit", e.Op, e.Limit)
 }
@@ -388,6 +422,24 @@ func (c *CLIClient) outputLimit() int64 {
 		return max(c.maxOutputBytes, minOutputBytes)
 	}
 	return DefaultMaxOutputBytes
+}
+
+// listingLimit bounds the bytes a streamed listing keeps (listing.go):
+// WithMaxOutputBytes when the embedder set it (the task's Decision 3: no
+// separate knob), else DefaultMaxListingBytes — and, on a client that
+// carries a checkout budget, never below what that budget admits (its
+// path bytes plus one NUL per entry plus a margin), so an operator who
+// raises the SPINE_GIT_TREE_* limits raises the listings with them and no
+// tree a budgeted merge admits is refused by a listing.
+func (c *CLIClient) listingLimit() int64 {
+	n := DefaultMaxListingBytes
+	if c.outputLimitSet {
+		n = c.outputLimit()
+	}
+	if b := c.CheckoutLimits().Budget; b != nil {
+		n = max(n, satAdd(satAdd(b.MaxPathBytesTotal, b.MaxEntries), listingMarginBytes))
+	}
+	return n
 }
 
 func (c *CLIClient) gitAllocLimit() int64 {

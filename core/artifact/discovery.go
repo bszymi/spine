@@ -87,14 +87,22 @@ func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string, artif
 		dir = artifactsDir[0]
 	}
 
-	files, err := gitClient.ListFiles(ctx, ref, "")
-	if err != nil {
-		return nil, err
-	}
-
 	prefix := ""
 	if dir != "/" {
 		prefix = dir + "/"
+	}
+
+	// Only the candidates the loop below can use are listed (INIT-024
+	// TASK-004, review finding N-6): with a git client that filters while
+	// it lists (git.PathFilterLister), a tree with a huge listing and few
+	// artifacts no longer exceeds the listing limit. The loop applies the
+	// same checks again, so the result is the one an unfiltered listing
+	// gives.
+	files, err := git.ListFilesKeeping(ctx, gitClient, ref, func(file string) bool {
+		return discoveryCandidate(file, prefix)
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	result := &DiscoveryResult{}
@@ -177,6 +185,17 @@ func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string, artif
 	}
 
 	return result, nil
+}
+
+// discoveryCandidate reports whether DiscoverAll's loop does anything
+// with file: a workflow definition or a .md file inside the artifacts
+// directory (prefix, "" for the repository root). Everything else is
+// skipped without a trace, so it need not be listed.
+func discoveryCandidate(file, prefix string) bool {
+	if prefix != "" && !strings.HasPrefix(file, prefix) {
+		return false
+	}
+	return IsWorkflowPath(strings.TrimPrefix(file, prefix)) || strings.HasSuffix(file, ".md")
 }
 
 // DiscoverChanges detects artifacts affected by changes between two Git refs.
@@ -436,14 +455,21 @@ func DiscoverWorkflows(ctx context.Context, gitClient git.GitClient, ref string,
 		dir = artifactsDir[0]
 	}
 
-	files, err := gitClient.ListFiles(ctx, ref, "")
-	if err != nil {
-		return nil, err
-	}
-
 	prefix := ""
 	if dir != "/" {
 		prefix = dir + "/"
+	}
+
+	// Listed through the same filter as DiscoverAll's (INIT-024 TASK-004):
+	// only workflow definitions inside the directory are kept.
+	files, err := git.ListFilesKeeping(ctx, gitClient, ref, func(file string) bool {
+		if prefix != "" && !strings.HasPrefix(file, prefix) {
+			return false
+		}
+		return IsWorkflowPath(strings.TrimPrefix(file, prefix))
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	var workflows []string

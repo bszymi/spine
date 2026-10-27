@@ -2,6 +2,9 @@ package git
 
 import (
 	"context"
+	"errors"
+	"math"
+	"strings"
 	"testing"
 )
 
@@ -56,10 +59,92 @@ func StderrKeptForTest(p []byte, chunk int) string {
 	return s.String()
 }
 
-// ParseNameStatusZForTest exposes Diff's -z parser.
+// ParseNameStatusZForTest runs Diff's streamed -z parser
+// (nameStatusCollector) over a whole output, written in one piece, with
+// no listing limit. It returns the parse error the way the buffered
+// parser it replaced did (INIT-023 TASK-003): a stream that does not end
+// in NUL is "unterminated record" whatever else is wrong with it.
 func ParseNameStatusZForTest(out string) ([]FileDiff, error) {
-	return parseNameStatusZ(out)
+	return ParseNameStatusZChunkedForTest(out, len(out))
 }
+
+// ParseNameStatusZChunkedForTest is ParseNameStatusZForTest with the
+// output written in chunk-sized writes (as os/exec's copy would hand it
+// over), so a test can split records at every byte.
+func ParseNameStatusZChunkedForTest(out string, chunk int) ([]FileDiff, error) {
+	if out == "" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(out, "\x00") {
+		return nil, unterminatedDiff().Err
+	}
+	s := newNameStatusCollector("diff", math.MaxInt64)
+	feedForTest(&s.nulRecords, []byte(out), chunk)
+	if err := s.finish(); err != nil {
+		if s.parse != nil {
+			return nil, s.parse
+		}
+		return nil, err
+	}
+	return s.diffs, nil
+}
+
+// ListedForTest feeds a `ls-tree -r --name-only -z` output to ListFiles'
+// streamed collector in chunk-sized writes and returns what it kept,
+// with the refusal or the truncation error ListFiles would return.
+func ListedForTest(out []byte, chunk int, limit int64, keep func(string) bool) ([]string, error) {
+	s := newPathCollector("list_files", limit, keep)
+	feedForTest(&s.nulRecords, out, chunk)
+	if err := s.refusal(); err != nil {
+		return nil, err
+	}
+	if s.unterminated() {
+		return nil, unterminatedListing()
+	}
+	return s.paths, nil
+}
+
+func feedForTest(s *nulRecords, p []byte, chunk int) {
+	if chunk <= 0 {
+		chunk = len(p)
+	}
+	for len(p) > 0 {
+		n := min(chunk, len(p))
+		if _, err := s.Write(p[:n]); err != nil {
+			return
+		}
+		p = p[n:]
+	}
+}
+
+// CountedForTest feeds a `git diff --name-only -z` output to
+// CountChangedPaths' counter in chunk-sized writes.
+func CountedForTest(out []byte, chunk int) (int, error) {
+	s := &pathCounter{op: "count_changed_paths"}
+	for p := out; len(p) > 0; {
+		n := min(max(chunk, 1), len(p))
+		if _, err := s.Write(p[:n]); err != nil {
+			break
+		}
+		p = p[n:]
+	}
+	if err := s.refusal(); err != nil {
+		return 0, err
+	}
+	if s.unterminated() {
+		return 0, errors.New("unterminated")
+	}
+	return s.n, nil
+}
+
+// ListingLimitForTest is the bound the client's streamed listings hold
+// the paths they keep to (listingLimit).
+func (c *CLIClient) ListingLimitForTest() int64 { return c.listingLimit() }
+
+// SetEnvHookForTest installs a hook called with the op and the
+// environment of every streamed listing command (ListFiles, Diff,
+// CountChangedPaths).
+func (c *CLIClient) SetEnvHookForTest(hook func(op string, env []string)) { c.envHook = hook }
 
 // IsGitAllocRefusalForTest exposes the alloc-limit stderr matcher.
 func IsGitAllocRefusalForTest(stderr string, limit int64) bool {

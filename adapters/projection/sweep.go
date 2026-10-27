@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strconv"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
@@ -143,7 +144,20 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) 
 		return false, nil
 	}
 
-	files, err := s.git.ListFiles(ctx, head, "")
+	// The listings below only answer "is this row's file there?", so only
+	// the stored rows' paths are kept (INIT-024 TASK-004, review finding
+	// N-6): with a git client that filters while it lists
+	// (git.PathFilterLister), a tree with a huge listing no longer fails
+	// the sweep, and so every IncrementalSync, on the listing limit.
+	rowPaths := make(map[string]struct{}, len(rows))
+	for i := range rows {
+		rowPaths[rows[i].WorkflowPath] = struct{}{}
+	}
+	isRowPath := func(p string) bool {
+		_, ok := rowPaths[p]
+		return ok
+	}
+	files, err := git.ListFilesKeeping(ctx, s.git, head, isRowPath)
 	if err != nil {
 		return false, fmt.Errorf("list files at %s: %w", shortSHA(head), err)
 	}
@@ -165,7 +179,7 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) 
 		}
 		if atFrom == nil {
 			atFrom = map[string]struct{}{}
-			fromFiles, err := s.git.ListFiles(ctx, from, "")
+			fromFiles, err := git.ListFilesKeeping(ctx, s.git, from, isRowPath)
 			if err != nil {
 				log.Debug("projection: list files at the last synced commit", "from", shortSHA(from), "error", sanitizeForLog(err.Error()))
 			}
