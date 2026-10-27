@@ -2,6 +2,8 @@ package git
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -1106,6 +1108,16 @@ func validDiffStatus(s string) bool {
 // Log returns commit history. A non-empty Since is Rev class; Path
 // always follows the `--`.
 //
+// Each record follows a boundary drawn for this call (newLogBoundary: 128
+// bits from crypto/rand) and parseLogOutput requires every record to
+// start with a full object id (INIT-024 TASK-004, review finding N-11).
+// The boundary used to be the fixed text "---END---", which a commit
+// message could hold: a message with it and lines shaped like a record
+// after it became a second entry, with whatever id, author, date and
+// trailers the message chose, in GET /query/history. A record that does
+// not parse fails the call (permanent, "unparseable log output"); it is
+// never skipped.
+//
 // The history ends at HEAD — on a tree with a home branch (INIT-023
 // TASK-012 §2.9) at refs/heads/<home>, looked up exactly: both the
 // implicit default revision and the `<since>..HEAD` range name the home
@@ -1117,7 +1129,11 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 			return nil, err
 		}
 	}
-	args := []string{"log", "--format=%H%n%an%n%ae%n%aI%n%B%n---END---"}
+	boundary, err := newLogBoundary()
+	if err != nil {
+		return nil, &GitError{Kind: ErrKindTransient, Op: "log", Message: "no log record boundary", Err: err}
+	}
+	args := []string{"log", "--format=" + boundary + "%n%H%n%an%n%ae%n%aI%n%B"}
 
 	if opts.Limit > 0 {
 		args = append(args, fmt.Sprintf("-n%d", opts.Limit))
@@ -1149,8 +1165,57 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 	if err != nil {
 		return nil, err
 	}
+	commits, err := parseLogOutput(output, boundary)
+	if err != nil {
+		return nil, unparseableLog(err)
+	}
+	return commits, nil
+}
 
-	return parseLogOutput(output), nil
+// logBoundaryPrefix starts every log record boundary; 32 hex digits from
+// crypto/rand follow it (newLogBoundary).
+const logBoundaryPrefix = "spine-log-"
+
+// newLogBoundary returns a record boundary for one `git log --format`
+// call. It is unpredictable, so no commit message can hold it: messages
+// are fixed before the call draws it.
+func newLogBoundary() (string, error) {
+	var b [16]byte // 128 bits
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return logBoundaryPrefix + hex.EncodeToString(b[:]), nil
+}
+
+// unparseableLog is the refusal of log output that does not split into
+// well-formed records.
+func unparseableLog(err error) *GitError {
+	return &GitError{Kind: ErrKindPermanent, Op: "log", Message: "unparseable log output", Err: err}
+}
+
+// errMalformedLog is the cause of every unparseable-log refusal. It never
+// echoes the output: messages are committed, attacker-chosen text.
+var errMalformedLog = errors.New("malformed `git log` output")
+
+// logRecords splits `git log --format=<boundary>%n…` output into the text
+// of each record (what follows its boundary line). The output must start
+// with the boundary; empty output is no records.
+func logRecords(output, boundary string) ([]string, error) {
+	if output == "" {
+		return nil, nil
+	}
+	parts := strings.Split(output, boundary)
+	if parts[0] != "" {
+		return nil, fmt.Errorf("%w: output before the first record", errMalformedLog)
+	}
+	recs := parts[1:]
+	for i, r := range recs {
+		var ok bool
+		if recs[i], ok = strings.CutPrefix(r, "\n"); !ok {
+			return nil, fmt.Errorf("%w: record %d does not start on its own line", errMalformedLog, i+1)
+		}
+	}
+	return recs, nil
 }
 
 // ReadFile reads a file at a specific Git ref (Rev class). An empty ref
@@ -1673,20 +1738,31 @@ func (c *CLIClient) MergeBase(ctx context.Context, a, b string) (string, error) 
 
 // HasCommitWithTrailer checks if a commit with the given trailer value exists.
 // Used for idempotent commit detection per Git Integration §5.6.
+//
+// Its records are delimited like Log's (INIT-024 TASK-004, review
+// finding N-11): a per-call random boundary, and each record's first line
+// must be a full object id, so a message cannot make another commit id —
+// or one that names no commit — the answer.
 func (c *CLIClient) HasCommitWithTrailer(ctx context.Context, key, value string) (string, bool, error) {
-	output, err := c.run(ctx, "log", "log", "--all", "--format=%H %B---END---")
+	boundary, err := newLogBoundary()
+	if err != nil {
+		return "", false, &GitError{Kind: ErrKindTransient, Op: "log", Message: "no log record boundary", Err: err}
+	}
+	output, err := c.run(ctx, "log", "log", "--all", "--format="+boundary+"%n%H%n%B")
 	if err != nil {
 		return "", false, err
 	}
-
+	recs, err := logRecords(output, boundary)
+	if err != nil {
+		return "", false, unparseableLog(err)
+	}
 	trailer := fmt.Sprintf("%s: %s", key, value)
-	for _, entry := range strings.Split(output, "---END---") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
+	for i, rec := range recs {
+		sha, body, _ := strings.Cut(rec, "\n")
+		if !IsFullObjectName(sha) {
+			return "", false, unparseableLog(fmt.Errorf("%w: record %d does not start with an object id", errMalformedLog, i+1))
 		}
-		if strings.Contains(entry, trailer) {
-			sha := strings.SplitN(entry, " ", 2)[0]
+		if strings.Contains(body, trailer) {
 			return sha, true, nil
 		}
 	}
@@ -2034,52 +2110,54 @@ func buildCommitMessage(opts CommitOpts) string {
 	return b.String()
 }
 
-// parseLogOutput parses the custom-formatted git log output.
-func parseLogOutput(output string) []CommitInfo {
-	var commits []CommitInfo
-
-	entries := strings.Split(output, "---END---")
-	for _, entry := range entries {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
+// parseLogOutput parses Log's output: each record is boundary (the
+// call's newLogBoundary), then "%H\n%an\n%ae\n%aI\n%B" and git's record
+// terminator. Every record must have the five fields and start with a
+// full object id; any that does not fails the whole parse (no record is
+// skipped), so no message text can add, drop or reshape an entry. The
+// fields are read as before: trimmed, the message trimmed, and its
+// trailers taken from the allow-list below.
+func parseLogOutput(output, boundary string) ([]CommitInfo, error) {
+	recs, err := logRecords(output, boundary)
+	if err != nil {
+		return nil, err
+	}
+	commits := make([]CommitInfo, 0, len(recs))
+	for i, rec := range recs {
+		lines := strings.SplitN(rec, "\n", 5)
+		if len(lines) < 5 {
+			return nil, fmt.Errorf("%w: record %d has %d of 5 fields", errMalformedLog, i+1, len(lines))
 		}
-
-		lines := strings.SplitN(entry, "\n", 5)
-		if len(lines) < 4 {
-			continue
+		if !IsFullObjectName(lines[0]) {
+			return nil, fmt.Errorf("%w: record %d does not start with an object id", errMalformedLog, i+1)
 		}
 
 		ts, _ := time.Parse(time.RFC3339, strings.TrimSpace(lines[3]))
 
 		ci := CommitInfo{
-			SHA:       strings.TrimSpace(lines[0]),
+			SHA:       lines[0],
 			Author:    Author{Name: strings.TrimSpace(lines[1]), Email: strings.TrimSpace(lines[2])},
+			Message:   strings.TrimSpace(lines[4]),
 			Timestamp: ts,
 			Trailers:  make(map[string]string),
 		}
-
-		if len(lines) > 4 {
-			ci.Message = strings.TrimSpace(lines[4])
-			// Extract trailers from message. Whitelist kept in sync with
-			// TrailerOrder (branchwrite.go) so trailers the producer side
-			// can write are also surfaced through this parser.
-			for _, msgLine := range strings.Split(lines[4], "\n") {
-				msgLine = strings.TrimSpace(msgLine)
-				if idx := strings.Index(msgLine, ": "); idx > 0 {
-					key := msgLine[:idx]
-					switch key {
-					case "Trace-ID", "Actor-ID", "Run-ID", "Operation",
-						"Workflow-Bypass", "Branch-Protection-Override":
-						ci.Trailers[key] = msgLine[idx+2:]
-					}
+		// Extract trailers from message. Whitelist kept in sync with
+		// TrailerOrder (branchwrite.go) so trailers the producer side
+		// can write are also surfaced through this parser.
+		for _, msgLine := range strings.Split(lines[4], "\n") {
+			msgLine = strings.TrimSpace(msgLine)
+			if idx := strings.Index(msgLine, ": "); idx > 0 {
+				key := msgLine[:idx]
+				switch key {
+				case "Trace-ID", "Actor-ID", "Run-ID", "Operation",
+					"Workflow-Bypass", "Branch-Protection-Override":
+					ci.Trailers[key] = msgLine[idx+2:]
 				}
 			}
 		}
-
 		commits = append(commits, ci)
 	}
-	return commits
+	return commits, nil
 }
 
 // matchSimpleGlob provides basic glob matching (supports * and ** prefix/suffix).
