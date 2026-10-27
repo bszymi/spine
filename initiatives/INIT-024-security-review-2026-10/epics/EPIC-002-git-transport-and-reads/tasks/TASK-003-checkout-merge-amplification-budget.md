@@ -441,3 +441,39 @@ against `a560c210` (RULES; identical in the TASK-001 gate); `dev/testgate` Spine
   N-9 needs a callback channel; per-push data must go through `cgiHandler.Env`, because the
   per-repo script is shared and rewritten on every push (concurrent pushes would race on it).
   Moving the semaphore slot after the command read would put the hook install outside the slot.
+
+**Commits (review round 1):** `30af374b` (rulings 1–9), `1480414c`, `3a3d15b3`, `366fc202` (codex
+below), `04cde224` (gosec G118: the start-of-life warning takes a detached context), and the notes
+commit.
+
+**Codex after review round 1** (`codex review --base init/INIT-024-scaffold`, plain; `gpt-6.1-sol`
+confirmed in each review sub-session; 3 rounds, the maximum):
+
+| Round | Review session | Findings (codex's rating) | Disposition |
+|---|---|---|---|
+| A1 | `01a17876-bdfa-7482-9465-5d7bc1a088df` | P1 a fan-out self-referencing macro (`[attr]loop loop …`, 20 ways) cost ~20^8 visits in Go, beyond any timeout; P1 the macro depth limit (8) hid the end of a longer chain (`ident`, a filter); P1 attributes past the scan cap could name a configured smudge driver, which the finite worst case does not bound | All real, fixed `1480414c`: macros are a worklist, each expanded at most once, no depth limit; past the cap (or a symlinked file) with any smudge/process driver configured on the host → refused (+Inf). `TestTreeBudget_MacrosAreExpandedOnceAndFully`, `TestTreeBudget_UnscannedAttributesWithAFilterDriverAreRefused` — **red at `30af374b`** ("did not finish in 5 s"; "err = <nil>") |
+| A2 | `01a1787a-6980-7dc3-a929-8c5fcbe21b72` | P1 `* ident\0hidden` sets ident in git (C-string line) but parsed as an unknown attribute: 480,000 bytes written under a 100,000-byte budget | Real, fixed `3a3d15b3`: a NUL ends the line and the scan reads on (superset of git's blob reader, which stops the file, and its worktree reader, which stops the line). Parsing cases + an end-to-end `nul-terminated` case in `TestTreeBudget_AttributeExpansionIsCounted` — **red at `1480414c`** ("admitted a tree that wrote 188155 bytes") |
+| A3 | `01a1788a-c263-7111-9407-715dde9221af` | P1 a macro named like a built-in attribute (`[attr]text ident` + `* text`) is expanded by git but was only classified | Real, fixed `366fc202`: every set name with a definition is expanded, whatever it also means. With it, checked against git 2.54: CR is a blank between pattern and attributes (`*\rident` sets ident — git wrote 48 bytes for `$Id$\n`), and an unclosed quoted pattern is split at the first blank (git drops the line; counting it only over-estimates). Cases in `TestTreeBudget_AttributeParsing` and `built-in-named macro` end to end — **red at `3a3d15b3`** ("wrote 188164 bytes"; "factor 2, want 23.5"; `*\rident` 1; filter behind the macro not found). No fourth codex round (the limit); these last changes were not codex-reviewed. |
+
+**Adversarial note (attribute parser vs git).** The scan is a superset of what git applies: it
+ignores which paths a pattern matches, reads lines git ignores (negative patterns, `[attr]` outside
+the top-level file, over-long lines, a quote that does not close, everything after a NUL in a blob)
+and splits attributes on any Unicode space (git's blanks are a subset). Where it must not be looser
+— a NUL, CR, macros of any name and depth — it now matches git, each with a test.
+
+**Gates after review round 1** (all at `04cde224`; heavy legs under the shared heavy-suite lock):
+
+| Gate | Result |
+|---|---|
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | rc=0 |
+| `go test -p 4 ./...` | rc=0, no failures |
+| `scenario-git-http` (`TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*`), own DB | rc=0 (87 / 26 / 130 passes, 0 skips) |
+| integration (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `core/artifact`, `core/workflow`) | rc=0 |
+| `-race`: `adapters/git`, `githttp`, `cmd/spine` (ci.sh), `gitpool`, `workspace` (separately) | rc=0 |
+| `git-floor` (golang:1.26-bookworm, git 2.39.5, `--pull=never`): both CI steps, the githttp/cmd/gitpool/workspace budget tests, and a verbose run of `TestMerge_*` (`merge-tree --write-tree` on 2.39.5), `TestCheckBudgetGitVersion`, the attribute tests | STEP1 / STEP2 / EXTRA / EXTRA2 rc=0 |
+| golangci-lint v2.11.4 (touched packages incl. `gitpool`, `workspace`) vs the scaffold | 0 new (one new gosec G118 fixed in `04cde224`); `--enable-only=gosec`: 0 issues |
+| `gofmt -l` on changed files | clean |
+| SMP compatibility gate (`../spine` at `04cde224`; only this artifact uncommitted) | build and vet x4 rc=0; `-race` §5 packages: only the two by-design `gitread` contract tests; testgate runtime PASS (2,143 passed) and githttp PASS (588 passed); no `ws_*` / `s24003_*` databases left. No SMP change. |
+
+**Not run (review round 1):** a fourth codex round (the limit is three); GitHub CI (nothing is
+pushed); the full `make test-scenario` with a registry DB (command as above).
