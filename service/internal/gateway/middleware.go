@@ -380,11 +380,14 @@ func (s *Server) authenticatePooled(w http.ResponseWriter, r *http.Request, next
 		writeUniformUnauthorized(w)
 		return
 	}
+	// The lines below name the workspace once: workspaceMiddleware put its
+	// id in ctx already, so an explicit attribute would repeat it.
+	log = observe.Logger(observe.WithWorkspaceID(ctx, cfg.ID))
 
 	ctx, release, err := s.acquireServiceSet(ctx, cfg.ID)
 	if err != nil {
 		log.Warn("workspace services could not be built for a request that is not yet authenticated; answering the uniform 401",
-			"workspace_id", cfg.ID, "error", describePreauthErr(err))
+			"error", describePreauthErr(err))
 		writeUniformUnauthorized(w)
 		return
 	}
@@ -395,8 +398,7 @@ func (s *Server) authenticatePooled(w http.ResponseWriter, r *http.Request, next
 	// another store.
 	ss := serviceSetFromContext(ctx)
 	if ss == nil || ss.Auth == nil {
-		log.Error("workspace has no auth service (no runtime database?); answering the uniform 401",
-			"workspace_id", cfg.ID)
+		log.Error("workspace has no auth service (no runtime database?); answering the uniform 401")
 		writeUniformUnauthorized(w)
 		return
 	}
@@ -406,7 +408,7 @@ func (s *Server) authenticatePooled(w http.ResponseWriter, r *http.Request, next
 		var se *domain.SpineError
 		if !errors.As(err, &se) || se.Code != domain.ErrUnauthorized {
 			log.Warn("bearer validation failed on the workspace token store; answering the uniform 401",
-				"workspace_id", cfg.ID, "error", describePreauthErr(err))
+				"error", describePreauthErr(err))
 		}
 		writeUniformUnauthorized(w)
 		return
@@ -419,7 +421,6 @@ func (s *Server) authenticatePooled(w http.ResponseWriter, r *http.Request, next
 		if _, gerr := ss.Store.GetActor(ctx, actor.ActorID); gerr != nil {
 			log.Warn("actor not a member of requested workspace",
 				"actor_id", actor.ActorID,
-				"workspace_id", cfg.ID,
 				"error", gerr.Error(),
 			)
 			WriteError(w, domain.NewError(domain.ErrForbidden, "actor has no membership in this workspace"))

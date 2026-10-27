@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -664,8 +665,17 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 	entry.lastAccess = time.Now()
 	publishReadyLocked(entry)
 
-	observe.Logger(ctx).Info("workspace service set initialized", "workspace_id", canonicalID)
+	buildLogger(ctx, canonicalID).Info("workspace service set initialized")
 	return ss, nil
+}
+
+// buildLogger is the logger of a Get caller's ctx for workspace
+// canonicalID, naming the workspace once: a request's context carries its
+// id already (the gateway's workspace middleware), a scheduler scan's or
+// the projection sync's does not, and an explicit attribute on top would
+// repeat it (INIT-024 integration A).
+func buildLogger(ctx context.Context, canonicalID string) *slog.Logger {
+	return observe.Logger(observe.WithWorkspaceID(ctx, canonicalID))
 }
 
 // builtSet is one buildServiceSet result.
@@ -704,8 +714,8 @@ func (p *ServicePool) buildWithTimeout(ctx context.Context, canonicalID string, 
 				if bp, ok := r.(*buildPanic); ok {
 					value, stack = bp.value, bp.stack
 				}
-				observe.Logger(ctx).Error("workspace service set build panicked; recovered as an initialization error",
-					"workspace_id", canonicalID, "panic", fmt.Sprint(value), "stack", string(stack))
+				buildLogger(ctx, canonicalID).Error("workspace service set build panicked; recovered as an initialization error",
+					"panic", fmt.Sprint(value), "stack", string(stack))
 				// The panic value stays in the log: the error may reach a
 				// response.
 				done <- builtSet{err: fmt.Errorf("%w: building workspace %q services panicked", ErrWorkspaceUnavailable, canonicalID)}
@@ -721,8 +731,8 @@ func (p *ServicePool) buildWithTimeout(ctx context.Context, canonicalID string, 
 		return b.ss, nil, b.err
 	case <-timer.C:
 	}
-	observe.Logger(ctx).Error("workspace service set initialization timed out; the workspace is unavailable until the abandoned build returns",
-		"workspace_id", canonicalID, "init_timeout", timeout)
+	buildLogger(ctx, canonicalID).Error("workspace service set initialization timed out; the workspace is unavailable until the abandoned build returns",
+		"init_timeout", timeout)
 	return nil, done, fmt.Errorf("%w: initialization of workspace %q services did not finish within %s; unavailable until it returns",
 		ErrWorkspaceUnavailable, canonicalID, timeout)
 }
