@@ -817,7 +817,7 @@ spec:
 | `SMP_WORKSPACE_ID` | No | - | Management platform workspace ID (dedicated mode) |
 | `SPINE_ORPHAN_THRESHOLD` | No | - | Duration before recovering orphaned steps |
 | `SPINE_STEP_ENTRY_POLICY` | No | `strict` | Engine step-entry policy (INIT-023 TASK-007). `strict` (or unset): assign/claim enforce run status, actor eligibility, execution mode, preconditions, `required_skills` on assign and separation of duties (which counts a planning run's starter as an author, so a planning start needs an authenticated caller — INIT-024 TASK-001); cancelled/failed runs close their live steps; the gateway's engine-less assign fallback is disabled. `legacy`: pre-INIT-023 behaviour, logged as a `WARN` at startup (migration escape hatch, to be removed). Any other value refuses to start. See [Security Model](/architecture/security-model.md) §4.4.1. |
-| `SPINE_GOVERNANCE_GUARD` | No | on | Governance-path guards (ADR-016; INIT-023 TASK-006). On (unset, `on`, `true`, `1`, `yes`): a governed merge that changes `.spine/`, `.spine.yaml`, `workflows/` or `<artifacts_dir>/workflows/` waits in `committing`, with no timeout, until an operator approves or rejects its bound commit (`POST /runs/{run_id}/governance-decision`; `GET /runs/{run_id}/governance` shows the state), and the projection installs a branch-protection relaxation only with an operator record (an approved merge or an honoured override push). `off`, `false`, `0` or `no` (any case) turn both guards off, logged as a `WARN` at startup. Any other value keeps them on, with a `WARN` naming the value. See [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) and §12. |
+| `SPINE_GOVERNANCE_GUARD` | No | on | Governance-path guards (ADR-016; INIT-023 TASK-006). On (unset, `on`, `true`, `1`, `yes`): a governed merge that changes `.spine/`, `.spine.yaml`, `workflows/`, `<artifacts_dir>/workflows/` or a YAML file directly inside any directory named `workflows` (INIT-024 TASK-002) waits in `committing`, with no timeout, until an operator approves or rejects its bound commit (`POST /runs/{run_id}/governance-decision`; `GET /runs/{run_id}/governance` shows the state), and the projection installs a branch-protection relaxation only with an operator record (an approved merge or an honoured override push). `off`, `false`, `0` or `no` (any case) turn both guards off, logged as a `WARN` at startup. Any other value keeps them on, with a `WARN` naming the value. See [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) and §12. |
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |
 | `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | `5` | Per-actor cap on concurrent SSE stream connections, counted per (workspace, actor) in shared mode (≤0 disables the cap) |
 | `SPINE_EVENT_DELIVERY` | No | `false` | Feature flag — set to `true` to enable webhook / SSE / pull-log delivery. Without it, only projection polling works. |
@@ -987,7 +987,11 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    })
    ```
    It errors, and leaves the guard off, without binding or `MergeBaseLister`, or for an invalid
-   path entry.
+   path entry. At each decision the guard also adds `<ArtifactsDir()>/workflows/` (when
+   `WithArtifactsDir` was called, before or after this call) and a backstop: every changed
+   `*.yaml` / `*.yml` file directly inside a directory named `workflows`, as an entry of its own
+   (INIT-024 TASK-002). Passing `WorkflowDirs` is still recommended: it is the only source that
+   guards nested files of a projection directory the orchestrator was not told about.
 3. **Handle holds.** `MergeRunBranch` returns a `precondition_failed` `*domain.SpineError`
    wrapping `engine.ErrGovernanceApprovalRequired` and leaves the run `committing`; the publish
    step (or the last completed step) carries `error_detail.classification =

@@ -6,7 +6,9 @@ package yamlsafe
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 
 	"gopkg.in/yaml.v3"
 )
@@ -60,6 +62,18 @@ func DecodeInto(data []byte, target any) error {
 // Callers should prefer this over DecodeInto whenever the target is a
 // closed-shape struct (e.g., workflow definitions): silent drop of an
 // unknown step field is a documented misrouting risk per ADR-015.
+//
+// The input is one YAML document (INIT-024 TASK-002, review finding N-7).
+// A decoder stops after the first document, so content after a `---`
+// separator used to be dropped without a word: a viewer or another YAML
+// tool could show, or act on, a document no Spine reader ever saw. Every
+// document after the first must be empty — what a bare trailing `---`
+// produces (see isEmptyDocument), which editors and generators append —
+// or the input is refused with "unexpected second document". A syntax
+// error in the trailing content is refused too ("trailing content"). An
+// explicit document end (`...`) followed by nothing is not a document.
+// The branch-protection parser refuses even an empty second document;
+// the workflow corpus accepts it because it carries no content.
 func DecodeIntoStrict(data []byte, target any) error {
 	if _, err := Decode(data); err != nil {
 		return err
@@ -69,7 +83,46 @@ func DecodeIntoStrict(data []byte, target any) error {
 	if err := dec.Decode(target); err != nil {
 		return fmt.Errorf("invalid YAML: %w", err)
 	}
-	return nil
+	// Read every remaining document, not just the next one: an empty
+	// document followed by one with content ("---\n---\nid: b") must not
+	// pass because the first trailing document was empty. The loop is
+	// bounded by the input, which Decode capped at MaxBytes, and the
+	// trailing documents are decoded into yaml.Node only (aliases are
+	// never expanded), so nothing here can amplify.
+	for {
+		var trailing yaml.Node
+		err := dec.Decode(&trailing)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("invalid YAML: trailing content: %w", err)
+		}
+		if !isEmptyDocument(&trailing) {
+			return errors.New("invalid YAML: unexpected second document (only one document per file)")
+		}
+	}
+}
+
+// isEmptyDocument reports whether n is the document a bare `---` line
+// produces: a DocumentNode whose only child is an untagged, unanchored
+// null scalar with an empty value and no children. Comments do not
+// count as content (no reader sees them). Everything else is content and
+// is refused, including an anchor alone (`--- &x`), an explicit tag
+// (`--- !!null`) and an explicit null (`--- ~`, `--- null`): someone wrote
+// them, and their meaning to another tool is not Spine's to guess.
+func isEmptyDocument(n *yaml.Node) bool {
+	if n.Kind != yaml.DocumentNode || n.Anchor != "" || len(n.Content) != 1 {
+		return false
+	}
+	c := n.Content[0]
+	return c.Kind == yaml.ScalarNode &&
+		c.Tag == "!!null" &&
+		c.Value == "" &&
+		c.Anchor == "" &&
+		c.Style&yaml.TaggedStyle == 0 &&
+		c.Alias == nil &&
+		len(c.Content) == 0
 }
 
 func walk(n *yaml.Node, depth int, nodes, aliases *int) error {

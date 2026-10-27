@@ -55,6 +55,8 @@ Only **direct children** of `/workflows/` are workflow definitions. Files in sub
 
 Workflow definition files do not use Markdown with YAML front matter. They are pure YAML files. Metadata fields (id, version, status) are top-level keys in the YAML document.
 
+**One document per file (INIT-024 TASK-002).** A workflow file holds exactly one YAML document. A `---` separator followed by a second document with content is refused (`invalid YAML: unexpected second document (only one document per file)`), as is trailing content that does not parse: the workflow API refuses the body at create and update time, and the projection treats the file as a refused file (§2.2). A leading `---`, a bare trailing `---` (an empty document) and an explicit document end (`...`) are accepted; none of them carries content. Before this, every reader read the first document and silently ignored the rest.
+
 ---
 
 ## 3. Schema
@@ -146,6 +148,8 @@ Once TASK-004 is shipped: optional. Identifies the target repository for the ste
 | `automated` | Executed by AI or automation — must declare retry limits |
 | `review` | Evaluation step — actor reviews artifacts or outcomes |
 | `convergence` | Evaluates parallel branch results and selects outcome |
+
+**Timeouts on automated checks.** A timeout means the step did not finish: its validator was missing, hung or starved. On an `automated` step that gates later work, `timeout_outcome` should therefore name the failing outcome (for example `invalid`, back to `draft`), never one that routes forward into review as if the check had passed. The shipped workflows follow this rule, and a corpus test pins it (INIT-024 TASK-002).
 
 ### 3.3 Divergence and Convergence
 
