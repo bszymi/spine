@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -163,6 +164,18 @@ type poolEntry struct {
 	readyClosed bool
 	initErr     error
 
+	// abandoned marks an entry whose build outlived InitTimeout (INIT-024
+	// TASK-008). It stays in p.entries, with initErr set and ready closed,
+	// until the build returns: every Get fails at once with initErr, and
+	// neither Evict nor EvictIdle removes it, so no second build of the
+	// workspace starts beside the abandoned one (a late build's
+	// NewWorkspaceDBPool would register its database pool over, and so
+	// close, the replacement's); Evict only marks it evicting. When the
+	// build returns, finishAbandoned installs a successful result in the
+	// entry — unless it was evicted meanwhile or the pool closed — or
+	// closes it and then removes the entry.
+	abandoned bool
+
 	// gone signals removal of this entry from p.entries. Closed exactly
 	// once by removeLocked. A concurrent Get observing an evicting entry
 	// waits on this channel so it can start a fresh initialization only
@@ -184,6 +197,7 @@ type ServicePool struct {
 	secretClient secrets.SecretClient
 	dbPolicy     PoolPolicy
 	codeRepoBase string
+	initTimeout  time.Duration
 	closed       bool
 	ctx          context.Context    // pool-lifetime context for background goroutines
 	cancel       context.CancelFunc // cancels pool-lifetime context on Close
@@ -287,7 +301,35 @@ type PoolConfig struct {
 	// expected to set it (cmd/spine fails fast when
 	// SPINE_ENV=production and this is unset).
 	CodeRepoBase string
+
+	// InitTimeout bounds how long Get waits for a workspace's services to
+	// be built (INIT-024 TASK-008). The build runs on the pool-lifetime
+	// context, because the services it starts (queue, event delivery,
+	// bootstrap retries) live as long as the set, so nothing inside it
+	// is bounded by the caller: a database that accepts the connection
+	// and never answers held every Get of the workspace — a request, the
+	// scheduler's scan, the projection sync — for good. Past the timeout
+	// the initiator and every waiter get an error wrapping
+	// ErrWorkspaceUnavailable, and so does every Get of the workspace
+	// until the abandoned build returns: no second build starts beside
+	// it. A build that then succeeds is installed and served (a slow but
+	// healthy workspace is not rebuilt for ever), unless the workspace
+	// was evicted meanwhile or the pool closed; otherwise what it built is
+	// closed ("init-error") and only then is the entry removed, so the
+	// next Get builds afresh. The build's one-shot calls — the database
+	// ping, the subscription-secret sweep, its git commands, and those the
+	// builder hook makes through InitContext — run under a deadline of the
+	// same length, so a database that never answers fails the build
+	// instead of holding it; the services it starts keep the lifetime
+	// context. 0 means DefaultInitTimeout.
+	InitTimeout time.Duration
 }
+
+// DefaultInitTimeout is PoolConfig.InitTimeout's default: far beyond a
+// healthy build (a database connection and ping, the subscription-secret
+// sweep, a few git commands, the builder hook), well inside the
+// scheduler's scan deadline.
+const DefaultInitTimeout = 2 * time.Minute
 
 // NewServicePool creates a service pool backed by the given resolver.
 // The provided context is used as the parent for pool-lifetime goroutines
@@ -310,6 +352,7 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 		secretClient:   cfg.SecretClient,
 		dbPolicy:       cfg.DBPolicy,
 		codeRepoBase:   cfg.CodeRepoBase,
+		initTimeout:    cfg.InitTimeout,
 		ctx:            poolCtx,
 		cancel:         cancel,
 
@@ -459,15 +502,34 @@ func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet,
 				return p.initializeEntry(ctx, canonicalID, *cfg, newEntry)
 			}
 
+			if entry.abandoned {
+				// Its build outlived InitTimeout and is still running:
+				// fail at once rather than start a second build beside it.
+				err := entry.initErr
+				p.mu.Unlock()
+				return nil, err
+			}
+
 			if entry.evicting {
 				// Entry is being phased out. Wait until it is fully removed
 				// from the map before starting a fresh initialization —
 				// otherwise the old initiator's Release(workspaceID) would
 				// decrement the wrong entry's refcount.
 				gone := entry.gone
+				// While its build is still in flight, wake on its outcome
+				// too: an abandoned build never closes gone (the entry
+				// stays until the build returns), so a waiter that only
+				// watched gone would outlive InitTimeout; looping lets the
+				// abandoned check above fail it at once. A nil channel
+				// never fires.
+				var ready <-chan struct{}
+				if !entry.readyClosed {
+					ready = entry.ready
+				}
 				p.mu.Unlock()
 				select {
 				case <-gone:
+				case <-ready:
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
@@ -549,7 +611,7 @@ func (p *ServicePool) removeLocked(id string, entry *poolEntry) {
 // inserted the entry into p.entries with refCount=1 before releasing the
 // mutex.
 func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, cfg Config, entry *poolEntry) (*ServiceSet, error) {
-	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretEnvelopeMode, p.secretClient, p.dbPolicy, p.codeRepoBase)
+	ss, late, buildErr := p.buildWithTimeout(ctx, canonicalID, cfg)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -560,6 +622,9 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 		if ss != nil {
 			ss.close("shutdown")
 		}
+		if late != nil {
+			go closeLateBuild(late)
+		}
 		closedErr := fmt.Errorf("service pool is closed")
 		// Close may already have set initErr and signaled waiters; the
 		// helpers below are idempotent either way.
@@ -568,6 +633,19 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 		}
 		p.removeLocked(canonicalID, entry)
 		publishReadyLocked(entry)
+		return nil, entry.initErr
+	}
+
+	if late != nil {
+		// The build outlived InitTimeout: the entry stays, failing every
+		// Get, until the build returns (poolEntry.abandoned).
+		entry.abandoned = true
+		// The initiator's reference goes with its error: no caller holds
+		// an abandoned entry.
+		entry.refCount = 0
+		entry.initErr = fmt.Errorf("init workspace %q services: %w", canonicalID, buildErr)
+		publishReadyLocked(entry)
+		go p.finishAbandoned(canonicalID, entry, late)
 		return nil, entry.initErr
 	}
 
@@ -588,6 +666,137 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 
 	observe.Logger(ctx).Info("workspace service set initialized", "workspace_id", canonicalID)
 	return ss, nil
+}
+
+// builtSet is one buildServiceSet result.
+type builtSet struct {
+	ss  *ServiceSet
+	err error
+}
+
+// buildWithTimeout runs buildServiceSet on the pool-lifetime context and
+// waits for it at most InitTimeout (see PoolConfig.InitTimeout). A build
+// that outlives the wait is abandoned: the error returned wraps
+// ErrWorkspaceUnavailable and late, non-nil, delivers the build's result
+// when it returns; the caller must drain it (finishAbandoned,
+// closeLateBuild).
+func (p *ServicePool) buildWithTimeout(ctx context.Context, canonicalID string, cfg Config) (*ServiceSet, <-chan builtSet, error) {
+	timeout := p.initTimeout
+	if timeout <= 0 {
+		timeout = DefaultInitTimeout
+	}
+	done := make(chan builtSet, 1)
+	// The build's one-shot calls run under the same bound (InitContext).
+	buildCtx := withInitDeadline(p.ctx, time.Now().Add(timeout))
+	go func() {
+		// The build runs in its own goroutine, out of reach of the
+		// caller's recovery (net/http's per request, MultiScheduler's per
+		// scan): a panic in it — the builder hook included — would end the
+		// process every tenant shares (codex review round 5). It is
+		// recovered here, logged with its stack, and delivered as a build
+		// error; the services built before the panic are not closed (their
+		// closers are local to buildServiceSet).
+		defer func() {
+			if r := recover(); r != nil {
+				// buildServiceSet closed what it had started and re-panicked
+				// with the original value and stack (buildPanic).
+				value, stack := any(r), debug.Stack()
+				if bp, ok := r.(*buildPanic); ok {
+					value, stack = bp.value, bp.stack
+				}
+				observe.Logger(ctx).Error("workspace service set build panicked; recovered as an initialization error",
+					"workspace_id", canonicalID, "panic", fmt.Sprint(value), "stack", string(stack))
+				// The panic value stays in the log: the error may reach a
+				// response.
+				done <- builtSet{err: fmt.Errorf("%w: building workspace %q services panicked", ErrWorkspaceUnavailable, canonicalID)}
+			}
+		}()
+		ss, err := buildServiceSet(buildCtx, cfg, p.builder, p.secretCipher, p.secretEnvelopeMode, p.secretClient, p.dbPolicy, p.codeRepoBase)
+		done <- builtSet{ss, err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case b := <-done:
+		return b.ss, nil, b.err
+	case <-timer.C:
+	}
+	observe.Logger(ctx).Error("workspace service set initialization timed out; the workspace is unavailable until the abandoned build returns",
+		"workspace_id", canonicalID, "init_timeout", timeout)
+	return nil, done, fmt.Errorf("%w: initialization of workspace %q services did not finish within %s; unavailable until it returns",
+		ErrWorkspaceUnavailable, canonicalID, timeout)
+}
+
+// finishAbandoned waits for an abandoned build (poolEntry.abandoned). A
+// successful result is installed in the entry and served from then on,
+// unless the workspace was evicted while the build ran (the result was
+// built from the configuration the eviction invalidated), the pool closed
+// or the entry was replaced. Otherwise what the build returned is closed —
+// its database pool unregistered before any replacement can register one,
+// since the entry still refuses every Get — and only then is the entry
+// removed, so the next Get builds afresh. A pool closed meanwhile has
+// removed the entry already; removeLocked is then a no-op.
+func (p *ServicePool) finishAbandoned(canonicalID string, entry *poolEntry, late <-chan builtSet) {
+	b := <-late
+	log := observe.Logger(p.ctx)
+	p.mu.Lock()
+	if b.err == nil && b.ss != nil && !p.closed && !entry.evicting && p.entries[canonicalID] == entry {
+		entry.services = b.ss
+		entry.abandoned = false
+		entry.initErr = nil
+		entry.refCount = 0
+		entry.lastAccess = time.Now()
+		p.mu.Unlock()
+		log.Info("workspace service set build finished after its init timeout; installed", "workspace_id", canonicalID)
+		return
+	}
+	p.mu.Unlock()
+	if b.ss != nil {
+		b.ss.close("init-error")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.removeLocked(canonicalID, entry)
+	log.Info("abandoned workspace service set build returned and was not installed",
+		"workspace_id", canonicalID, "error", b.err)
+}
+
+// initDeadlineKey carries a service-set build's init deadline
+// (PoolConfig.InitTimeout) on the pool-lifetime context the build runs on.
+type initDeadlineKey struct{}
+
+func withInitDeadline(ctx context.Context, deadline time.Time) context.Context {
+	return context.WithValue(ctx, initDeadlineKey{}, deadline)
+}
+
+// InitContext returns ctx bounded by the deadline of the service-set build
+// it is part of (PoolConfig.InitTimeout), for the one-shot calls of a
+// build and of a ServiceSetBuilder — a bootstrap write, a subscription
+// upsert — so a database that never answers fails the build instead of
+// holding it. Goroutines a builder starts must keep ctx itself, which
+// lives as long as the service set. Outside a pool build there is no
+// deadline: the result is ctx with a cancel.
+func InitContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if d, ok := ctx.Value(initDeadlineKey{}).(time.Time); ok {
+		return context.WithDeadline(ctx, d)
+	}
+	return context.WithCancel(ctx)
+}
+
+// buildPanic is the value buildServiceSet re-panics with once it has
+// closed what the build started: the original panic and its stack.
+type buildPanic struct {
+	value any
+	stack []byte
+}
+
+func (b *buildPanic) String() string { return fmt.Sprint(b.value) }
+
+// closeLateBuild waits for an abandoned build and closes what it built.
+func closeLateBuild(late <-chan builtSet) {
+	if b := <-late; b.ss != nil {
+		b.ss.close("init-error")
+	}
 }
 
 // Release decrements the reference count for a workspace service set.
@@ -640,6 +849,16 @@ func (p *ServicePool) Evict(workspaceID string) {
 		p.evictGen[workspaceID]++
 	}
 	if entry, ok := p.entries[workspaceID]; ok {
+		if entry.abandoned {
+			// Its build is still running. Removing the entry here would
+			// let a second build start beside it; marking it evicting
+			// makes finishAbandoned close what the build returns (built
+			// from the configuration this eviction invalidates) instead of
+			// installing it.
+			entry.evicting = true
+			entry.evictReason = "invalidate"
+			return
+		}
 		if entry.refCount > 0 {
 			// Mark for deferred close — Release will handle cleanup.
 			entry.evicting = true
@@ -692,6 +911,9 @@ func (p *ServicePool) EvictIdle() {
 
 	now := time.Now()
 	for id, entry := range p.entries {
+		if entry.abandoned {
+			continue // finishAbandoned removes it
+		}
 		if entry.refCount == 0 && now.Sub(entry.lastAccess) > p.idleTimeout {
 			if entry.services != nil {
 				entry.services.close("idle")
@@ -846,6 +1068,35 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// reason simply ignore it.
 	var closers []func(reason string)
 
+	// A panic anywhere in the build — the builder hook included — must not
+	// leak what the build already started (the database pool, the queue
+	// goroutine, a hook's delivery or bootstrap-retry goroutines): close it
+	// all, then re-panic with the original value and stack, so the pool's
+	// recovery still reports it as an initialization error (INIT-024
+	// TASK-008).
+	var ss *ServiceSet
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		stack := debug.Stack()
+		if ss != nil && ss.close != nil {
+			ss.close("init-error")
+		} else {
+			for i := len(closers) - 1; i >= 0; i-- {
+				closers[i]("init-error")
+			}
+		}
+		panic(&buildPanic{value: r, stack: stack})
+	}()
+
+	// The build's one-shot calls (the database ping, the secret sweep, its
+	// git commands) run under the build's init deadline when the pool set
+	// one; what the build starts keeps ctx (PoolConfig.InitTimeout).
+	initCtx, cancelInit := InitContext(ctx)
+	defer cancelInit()
+
 	// Derive the per-workspace code-repo containment base BEFORE
 	// opening any database pool. perWorkspaceCodeRepoBase may
 	// fail closed (invalid workspace ID, non-directory, symlink
@@ -867,10 +1118,11 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		// it for saturation observability. The PostgresStore reads
 		// through the underlying pgxpool; the WorkspaceDBPool owns
 		// teardown and metric registration.
-		wp, err := NewWorkspaceDBPool(ctx, cfg.ID, dbURL, dbPolicy)
+		wp, err := NewWorkspaceDBPool(initCtx, cfg.ID, dbURL, dbPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("connect to workspace database: %w", err)
 		}
+		closers = append(closers, func(reason string) { wp.Close(reason) })
 		pgStore = store.NewPostgresStoreWithQuerier(wp)
 		pgStore.SetSecretCipher(cipher)
 		// Bind the workspace's subscription signing secrets to its
@@ -880,12 +1132,11 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		// delivery, so nothing reads a signing secret first. A sweep
 		// error is logged inside and does not fail the build; a
 		// binding error does.
-		if _, err := PrepareSubscriptionSecrets(ctx, pgStore, cipher, cfg.ID, secretEnvelopeMode, observe.Logger(ctx)); errors.Is(err, ErrSubscriptionSecretBinding) {
+		if _, err := PrepareSubscriptionSecrets(initCtx, pgStore, cipher, cfg.ID, secretEnvelopeMode, observe.Logger(ctx)); errors.Is(err, ErrSubscriptionSecretBinding) {
 			wp.Close("init-error")
 			return nil, err
 		}
 		st = pgStore
-		closers = append(closers, func(reason string) { wp.Close(reason) })
 	}
 
 	// Git client.
@@ -907,7 +1158,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	gitClient := git.NewCLIClient(repoPath, PrimaryClientOptions(gitOpts)...)
 
 	// Configure credential helper in repo-local git config if set.
-	if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {
+	if err := gitClient.ConfigureCredentialHelper(initCtx); err != nil {
 		observe.Logger(ctx).Warn("failed to configure credential helper", "error", err)
 	}
 
@@ -1056,7 +1307,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 			}
 			return nil, fmt.Errorf("projection authoritative branch: %w", err)
 		}
-		_ = projSync.ProbeAuthoritativeRef(ctx)
+		_ = projSync.ProbeAuthoritativeRef(initCtx)
 	}
 
 	// Validation engine.
@@ -1114,7 +1365,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		authSvc = auth.NewService(st)
 	}
 
-	ss := &ServiceSet{
+	ss = &ServiceSet{
 		Config:     cfg,
 		Store:      st,
 		Auth:       authSvc,

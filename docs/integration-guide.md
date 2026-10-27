@@ -38,6 +38,15 @@ The management platform owns:
 - Workspace identity passed per-request via `X-Workspace-ID` header.
 - `smp_workspace_id` set per workspace via `POST /workspaces`.
 - Credentials resolved per-push from workspace config.
+- One multi-workspace scheduler scans every active workspace through the workspace pool: step and
+  run timeouts, the orphan scan and bounded merge retries (INIT-024 TASK-008). Each workspace is
+  scanned with its own store, git clients and credentials; at most
+  `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES` at once, each under `SPINE_SCHEDULER_WORKSPACE_BUDGET`
+  per tick. A workspace whose scan hangs is skipped by later ticks until it ends and does not hold
+  up the others; every scan is cancelled at a hard 10-minute deadline. Like the projection sync, each tick takes a pool reference per workspace, so an
+  active workspace's services stay resident (`SPINE_WS_POOL_IDLE_TIMEOUT` does not evict it). It
+  assumes a single leader: every replica scans every workspace (see `KNOWN-LIMITATIONS.md`,
+  "Shared Working Tree", item 9).
 
 ---
 
@@ -136,7 +145,7 @@ The value is case-insensitive; anything else refuses to start. Without a key the
 Rows written before a key existed are **not** re-encrypted by later writes (the bootstrap and the update paths skip unchanged secrets — audit finding P3-1). Instead, every time Spine opens a workspace store it runs a sweep:
 
 - **File mode**: at startup, before the internal subscription bootstrap.
-- **Shared mode** (`WORKSPACE_RESOLVER=db|platform-binding`): when a process builds a workspace's services — on the first request for it after the process starts, and again after the workspace is evicted (idle for `SPINE_WS_POOL_IDLE_TIMEOUT`, default 10 minutes, or, in `platform-binding` mode, a binding invalidation, which reaches only the replica that receives it). A request to a workspace the process already holds does **not** sweep it and logs nothing.
+- **Shared mode** (`WORKSPACE_RESOLVER=db|platform-binding`): when a process builds a workspace's services — on the first request for it, or the first background tick that scans it (the projection sync and, since INIT-024 TASK-008, the scheduler), after the process starts, and again after the workspace is evicted (idle for `SPINE_WS_POOL_IDLE_TIMEOUT`, default 10 minutes, or, in `platform-binding` mode, a binding invalidation, which reaches only the replica that receives it). A request to a workspace the process already holds does **not** sweep it and logs nothing.
 - **On demand**: `spine secrets reencrypt` (file mode) or `spine secrets reencrypt --all-workspaces` (`WORKSPACE_RESOLVER=db` only: every workspace in the registry, `SPINE_REGISTRY_DATABASE_URL` — **active and inactive**, unlike `spine migrate --all-workspaces`, because an inactive workspace's rows still need the key that sealed them). The command prints one line of counters per workspace and one line per refused row (subscription ids and reasons are printed quoted, so a value planted in a workspace database cannot forge or erase an output line), and exits non-zero unless every workspace is clean.
   - **`SPINE_SECRET_ENVELOPE_MODE` must be set explicitly for the command, to the mode `spine serve` runs with.** The command writes every workspace database and cannot see serve's mode; it refuses to run with the variable unset rather than assume `migrate` (which would convert — and so launder — legacy rows a `strict` deployment refuses) or inherit a stray `downgrade` (which would rewrite every `enc:v2` row to `enc:v1`, which `strict` then refuses).
   - **In file mode the workspace id must be stated too:** set `SPINE_WORKSPACE_ID` to the value `spine serve` runs with, or pass `--workspace default` for a deployment that leaves it unset. The id is part of every `enc:v2` value's associated data, so the command refuses to fall back to `default` (an ops job whose environment was copied from `spine migrate`, which needs no workspace id, would otherwise seal every legacy row under `default`, report the workspace clean, and leave a serve bound to its real id refusing every row). The command prints the id it binds in its first line (`workspace_id=`).
@@ -322,7 +331,8 @@ Response (200):
 }
 ```
 
-Deactivation immediately stops serving requests for this workspace and invalidates caches.
+Deactivation immediately stops serving requests for this workspace and invalidates caches. The
+shared-mode scheduler no longer scans it from its next tick; a scan already running finishes.
 
 ### Process Metrics
 
@@ -823,7 +833,10 @@ spec:
 | `SPINE_GIT_PUSH_USERNAME` | No | `x-access-token` | Username for token-based push auth |
 | `SPINE_GIT_PUSH_ENABLED` | No | `true` | Set to `false` to disable git push |
 | `SMP_WORKSPACE_ID` | No | - | Management platform workspace ID (dedicated mode) |
-| `SPINE_ORPHAN_THRESHOLD` | No | - | Duration before recovering orphaned steps |
+| `SPINE_ORPHAN_THRESHOLD` | No | 30 days | How long an active run may go without step activity before it is reported as an orphan; it is failed past three thresholds. Unset or `0`: the default. A negative value refuses to start in the shared modes (single mode ignores it, with a startup Warn). |
+| `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES` | No | `4` | Shared modes (`WORKSPACE_RESOLVER=db` or `platform-binding`): how many workspaces one scheduler tick scans at once. A whole number from 1 to 256; unset, empty or blank means the default, any other value refuses to start (in every mode). A scan that has stalled (no progress for the tick's wait, `SPINE_SCHEDULER_WORKSPACE_BUDGET` + 30 s) keeps running and is not counted against later ticks. |
+| `SPINE_WS_POOL_INIT_TIMEOUT` | No | `2m` | Shared modes: how long a request, a scheduler scan or the projection sync waits for a workspace's services to be built, and the deadline of the build's one-shot calls (database ping, secret sweep, git commands, bootstrap writes). Past it callers get an error until the abandoned build returns; a build that then succeeds is served. Raise it for a workspace whose healthy build is slower; add `connect_timeout=<seconds>` to a workspace's database URL to bound connection setup independently. Unset, empty or blank means the default; any other value than a positive Go duration refuses to start (in every mode). See `KNOWN-LIMITATIONS.md`, "Shared Working Tree", item 9. |
+| `SPINE_SCHEDULER_WORKSPACE_BUDGET` | No | `30s` | Shared modes: the soft time budget of one workspace's scan per tick. A scan stops between items once it is spent and resumes where it stopped on the next tick; it never cancels a git command. A positive Go duration (`45s`, `2m`); unset, empty or blank means the default, any other value refuses to start (in every mode). |
 | `SPINE_STEP_ENTRY_POLICY` | No | `strict` | Engine step-entry policy (INIT-023 TASK-007). `strict` (or unset): assign/claim enforce run status, actor eligibility, execution mode, preconditions, `required_skills` on assign and separation of duties (which counts a planning run's starter as an author, so a planning start needs an authenticated caller — INIT-024 TASK-001); cancelled/failed runs close their live steps; the gateway's engine-less assign fallback is disabled. `legacy`: pre-INIT-023 behaviour, logged as a `WARN` at startup (migration escape hatch, to be removed). Any other value refuses to start. See [Security Model](/architecture/security-model.md) §4.4.1. |
 | `SPINE_GOVERNANCE_GUARD` | No | on | Governance-path guards (ADR-016; INIT-023 TASK-006). On (unset, `on`, `true`, `1`, `yes`): a governed merge that changes `.spine/`, `.spine.yaml`, `workflows/`, `<artifacts_dir>/workflows/` or a YAML file directly inside any directory named `workflows` (INIT-024 TASK-002) waits in `committing`, with no timeout, until an operator approves or rejects its bound commit (`POST /runs/{run_id}/governance-decision`; `GET /runs/{run_id}/governance` shows the state), and the projection installs a branch-protection relaxation only with an operator record (an approved merge or an honoured override push). `off`, `false`, `0` or `no` (any case) turn both guards off, logged as a `WARN` at startup. Any other value keeps them on, with a `WARN` naming the value. See [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) and §12. |
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |

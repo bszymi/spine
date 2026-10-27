@@ -1536,9 +1536,104 @@ What that implies, and what it leaves open:
    nothing either. A *permanent* failure after a local merge (a rejected or
    unauthenticated push, a refusal) still routes the run while its merge stays on the local `main`,
    as before TASK-012; re-syncing local `main` is a follow-up.
-9. **The multi-workspace scheduler is bounded but not wired** (owner question 3): in the `db` and
-   `platform-binding` resolver modes no scheduler retries committing runs at all. Wiring
-   `MultiScheduler` into `spine serve` is a follow-up.
+9. **The multi-workspace scheduler is wired; a single leader is assumed** (INIT-024 TASK-008, the
+   open half of P3-27). In the `db` and `platform-binding` resolver modes `spine serve` runs
+   `MultiScheduler` over the workspace pool, so step and run timeouts, the orphan scan and the
+   bounded merge retries fire in every active workspace, each with its own store, git clients and
+   credentials. A tenant cannot hold up the others: one scan per workspace at a time, a tick that
+   makes no progress for its wait (`SPINE_SCHEDULER_WORKSPACE_BUDGET` + 30 s) stops waiting and later
+   ticks skip the stalled workspace until its scan ends, every scan is cancelled at a hard 10-minute
+   deadline, and a panic in one workspace's scan is recovered. What remains:
+   - **More than one replica.** There is no leader election (TASK-008 Decision 3, like the projection
+     sync and every INIT-023 lock): every replica scans every workspace. The scheduler's own writes
+     are compare-and-swap (INIT-023 TASK-008), so a timeout, a run-timeout termination or a
+     recovery applies once, but each replica retries a committing run's merge (the tree lock and the
+     merge-attempt gate are per process; item 7 says what the conditional writes cover across
+     processes). Run one replica per registry, or accept the duplicate merge attempts.
+   - **No startup crash recovery in the shared modes.** Single mode runs `RecoverOnStartup` before it
+     serves (a `pending` run activated, an `assigned` step reset, a completed step routed on, a
+     committing run retried); the shared modes run it for no workspace. Committing runs are still
+     retried by the loop and orphaned active runs failed by the orphan scan (after three thresholds),
+     but a run a crash left `pending`, or on a completed step that was never routed, waits for an
+     operator. Per-workspace startup recovery is a follow-up (TASK-008 owner question 3).
+   - **`platform-binding` schedules only resolved workspaces.** The platform has no enumeration
+     endpoint, so the scheduler lists the bindings the process has resolved since it started
+     (`PlatformBindingProvider.ListIDs`, the cache's ids): after a restart a workspace is scheduled
+     only once a request has resolved it (as with the projection sync).
+   - **How long a workspace that should stop is still scheduled**, per mode. A scan already running
+     when it happens finishes (within the scan deadline below).
+     - `db`: `POST /workspaces/{id}/deactivate` on this replica drops the resolver caches and evicts
+       the workspace, so the next tick skips it. A row deactivated any other way (SQL, another
+       replica's API) is still listed and resolved for up to the db provider's 60 s cache TTL.
+     - `platform-binding`: a binding is re-fetched once its 5-minute cache TTL has passed, and a
+       platform 404 drops it then. While the platform errors (5xx, network) a cached binding is
+       served stale for up to 30 minutes more (`StaleGrace`), so up to 35 minutes in all. The
+       invalidation webhook drops it at once, but only on the replica that receives it. A workspace
+       the platform answers 403 for (or whose secrets cannot be read) stays listed: every tick then
+       logs an Error for it, and each scan's resolve fetches it from the platform again.
+   - **A stalled scan holds what it holds until its deadline.** A scan no tick waits for any more
+     keeps its workspace's tree lock, one git process, one goroutine and its pool reference, and is not
+     counted against later ticks' `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES`. Every scan runs under a
+     hard 10-minute deadline (`MultiSchedulerConfig.ScanDeadline`; no variable): past it the scan's
+     context is cancelled and the scan returns, giving back its pool reference, with an Error. The git
+     commands it runs on that context are stopped with SIGTERM (git's handlers remove its lock files;
+     a remote helper exits with it). A code repository's first clone is not: the git pool runs it
+     detached, shared by every caller waiting for it, so it goes on after the scan has stopped waiting
+     for it. Until the deadline a request for an evicted workspace (a deactivation, a binding
+     invalidation, a credential rotation) waits for that reference: up to the deadline, or less if the
+     request's own deadline comes first. A sequence on a shared working tree (the primary
+     repository's merge and push) runs detached from the cancellation and ends within its own 5-minute
+     bound.
+   - **Building a cold workspace's services is bounded by the pool, not by the scan** (the build runs
+     on the pool's lifetime context, which the services it starts need). The pool waits for a build
+     at most its init timeout (`SPINE_WS_POOL_INIT_TIMEOUT`, default 2 minutes); every caller waiting
+     on the build — the scan, requests, the projection sync, a request already waiting on an evicted
+     entry — then gets an error (`ErrWorkspaceUnavailable`), and so does every caller until the
+     abandoned build returns: no second build starts beside it (a late build registers its database
+     pool over the replacement's). The build's one-shot calls — the database ping and the first
+     connections, the subscription-secret sweep, its git commands, the first bootstrap-admin write
+     and the internal subscription upsert — run under a deadline of the same length, so a database
+     that accepts the connection and never answers fails the build at the timeout instead of holding
+     it. When the abandoned build returns, a successful result is installed and served (a slow but
+     healthy workspace is not rebuilt for ever), unless the workspace was evicted meanwhile or the
+     pool closed; otherwise what it built is closed and the next caller builds afresh. A panic in a
+     build is recovered: what the build had started is closed, and callers get the error.
+     **An operator with a workspace that keeps failing this way:** check that its database answers
+     (connection and authentication); if its healthy build is simply slower than the timeout (a large
+     subscription sweep, a slow database), raise `SPINE_WS_POOL_INIT_TIMEOUT`; to bound connection
+     setup independently of Spine, add `connect_timeout=<seconds>` to the workspace's database URL. A
+     build stuck in a call nothing bounds (a builder step that does not use the init context) keeps
+     the workspace unavailable — every request fails at once, nothing hangs — until it returns or the
+     process restarts.
+   - **An attempt cut by the scan deadline records nothing** — its outcome write uses the expired
+     context — so, like a lock wait cut short (item 8), it does not count against the merge retry
+     budget: a code repository whose remote never answers keeps its run in `committing`, retried on
+     later ticks, each attempt held up to the deadline (only that workspace waits). On shutdown a stalled scan is waited for only until the 10 s
+     shutdown deadline. As many tenants stalling in one tick as there are slots delay the others by one
+     wait: the workspaces that tick left undispatched come first in the next tick of the same kind.
+   - **Each tick lists every candidate row.** The scans read, per workspace and per tick, every
+     unfinished step execution (`ListActiveStepExecutions`, `adapters/store/postgres_steps.go`), every
+     run past its timeout, every stale active run and every committing run (`postgres_runs.go`), with
+     no `LIMIT`; the soft budget bounds the work done on them, not the read. A workspace with a very
+     large backlog is loaded into the shared process every 30 s (timeouts) and 60 s (orphans, merge
+     retries). Paging is a follow-up.
+   - **`platform-binding` reads secrets on every scan.** Listing for a tick reads none (`ListIDs`), but
+     each scan resolves its workspace through the pool, and a platform-binding resolve dereferences
+     the binding's three secret references every time (the provider caches no secret value; the
+     secret client's own cache decides what reaches the backend): about three reads per workspace per
+     scan, three scans a minute at the default intervals. The projection sync's `List` adds three
+     more per cached binding per poll.
+   - **A slow scan still lengthens its tick.** A tick waits as long as it makes progress, and the
+     three kinds of scan (timeouts, orphans, merge retries) share one loop, as in single mode. A
+     tenant whose scan is slow but never stalls (each merge retry just under the wait, every tick —
+     a push that fails after its merge landed is retried every tick, item 7) lengthens each of its
+     ticks by up to one workspace budget plus one wait, so the other tenants' next scan of another
+     kind starts that much later: their timeouts are late, never lost. A scan that ends just after
+     each wait costs one wait on every tick that dispatches it (every other tick of its loop, since
+     the tick in between skips it).
+   - **A recovered panic** releases what the scan released by `defer` (the pool reference, the tree
+     lock, transactions); anything held otherwise stays held, the same assumption as net/http's
+     per-request recovery behind every HTTP handler.
 10. **`classifyGitError`'s bare `"lock"` substring** also matches paths in git's stderr (an untracked
     `blocked-notes.md` in the way of a checkout reads as "repository locked", transient). The retry
     budget caps the loop; matching `index.lock': File exists` precisely is a follow-up. Likewise

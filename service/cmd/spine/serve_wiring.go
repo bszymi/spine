@@ -243,8 +243,12 @@ type serveDeps struct {
 // serveRuntime bundles the ServerConfig with the long-lived background
 // services the serve loop must start and stop.
 type serveRuntime struct {
-	Config         gateway.ServerConfig
-	Scheduler      *scheduler.Scheduler
+	Config    gateway.ServerConfig
+	Scheduler *scheduler.Scheduler
+	// MultiScheduler is the shared-mode (db, platform-binding) scheduler
+	// over the workspace pool (INIT-024 TASK-008); nil in single mode,
+	// which keeps Scheduler.
+	MultiScheduler *scheduler.MultiScheduler
 	ProjSync       *projection.Service
 	MultiProjSync  *workspace.MultiProjectionSync
 	DeliveryCancel context.CancelFunc
@@ -461,6 +465,13 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	if deps.Store != nil {
 		sched = buildScheduler(deps.Store, deps.Events, orch, deps.OrphanThreshold)
 	}
+	// Shared modes have no process-level store, so no scheduler above:
+	// the multi-workspace scheduler scans every workspace through the
+	// pool instead (INIT-024 TASK-008, audit P3-27; serve_scheduler.go).
+	multiSched, err := buildMultiScheduler(deps, log)
+	if err != nil {
+		return nil, err
+	}
 
 	var deliveryCancel context.CancelFunc
 	var deliverySubscriber *delivery.DeliverySubscriber
@@ -564,6 +575,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	return &serveRuntime{
 		Config:         cfg,
 		Scheduler:      sched,
+		MultiScheduler: multiSched,
 		ProjSync:       projSync,
 		MultiProjSync:  multiProjSync,
 		DeliveryCancel: deliveryCancel,

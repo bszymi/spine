@@ -139,6 +139,14 @@ type WorkspaceDBPool struct {
 // given policy. The pool is registered with the global pool
 // registry so per-workspace metrics can be emitted by the
 // /metrics endpoint.
+//
+// ctx bounds the startup only — the ping, and the first minimum
+// connections pgx opens in the background (its health check tops them up
+// later on its own context) — so a service-set build passes its init
+// deadline (INIT-024 TASK-008): a database that accepts the connection and
+// never answers then fails the build instead of holding it, and closing
+// the pool after the failed ping does not wait for connections that never
+// finish.
 func NewWorkspaceDBPool(ctx context.Context, workspaceID, databaseURL string, policy PoolPolicy) (*WorkspaceDBPool, error) {
 	if workspaceID == "" {
 		return nil, errors.New("workspace pool: workspaceID is required")

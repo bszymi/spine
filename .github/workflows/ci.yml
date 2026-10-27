@@ -294,6 +294,27 @@ jobs:
             exit 1
           fi
 
+      # INIT-024 / EPIC-003 / TASK-008: a WORKSPACE_RESOLVER=db deployment
+      # (a registry and three workspace databases, wired exactly as serveCmd
+      # wires them) runs the multi-workspace scheduler: step and run
+      # timeouts, the orphan scan and merge retries fire in every workspace
+      # on its own database, a workspace added at runtime is scanned and a
+      # deactivated one is not, and no tick leaves a pool reference. The
+      # only Postgres-backed evidence for the open half of audit P3-27;
+      # must pass, never skip.
+      - name: Shared-mode multi-workspace scheduler (integration; must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags integration -count=1 -run '^TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces$' -v ./service/cmd/spine/ 2>&1 | tee integration-multi-scheduler.log
+          if grep -E '^[[:space:]]*--- SKIP: ' integration-multi-scheduler.log; then
+            echo "::error::the shared-mode scheduler integration test skipped — it must pass, never skip"
+            exit 1
+          fi
+          if ! grep -qE '^--- PASS: TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces ' integration-multi-scheduler.log; then
+            echo "::error::TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces did not pass"
+            exit 1
+          fi
+
   # INIT-023 / EPIC-001 / TASK-002: the git client's ref grammar (exact
   # `show-ref --verify` lookups, `--end-of-options`, `git switch
   # --no-guess`, `<oid>^{commit}` push sources, `worktree add --detach`)
