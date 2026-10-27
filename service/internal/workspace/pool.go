@@ -907,7 +907,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	gitClient := git.NewCLIClient(repoPath, PrimaryClientOptions(gitOpts)...)
 	// Once per build of the workspace's services, not per request: warn
 	// when its tree is already over the checkout budget (INIT-024 TASK-003).
-	go WarnIfOverCheckoutBudget(gitClient, cfg.ID, observe.Logger(ctx))
+	go WarnIfOverCheckoutBudget(context.WithoutCancel(ctx), gitClient, cfg.ID, observe.Logger(ctx))
 
 	// Configure credential helper in repo-local git config if set.
 	if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {

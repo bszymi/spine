@@ -143,9 +143,10 @@ func (s *attrSet) add(text []byte) {
 		if len(line) == 0 || line[0] == '#' {
 			continue
 		}
-		// The pattern: a C-quoted string, or — as git falls back to when
-		// the quote does not close — everything up to the first blank
-		// (git's blanks are space, tab, CR and LF).
+		// The pattern: a C-quoted string, or everything up to the first
+		// blank (git's blanks are space, tab, CR and LF). A quote that does
+		// not close is split at the first blank too: git 2.54 drops such a
+		// line, so counting its attributes can only over-estimate.
 		var pattern, rest []byte
 		if end := quotedEnd(line); line[0] == '"' && end >= 0 {
 			pattern, rest = line[:end+1], line[end+1:]

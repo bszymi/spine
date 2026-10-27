@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -58,7 +59,7 @@ func TestWarnIfOverCheckoutBudget(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-			workspace.WarnIfOverCheckoutBudget(git.NewCLIClient(repo, tc.opts...), "ws-1", log)
+			workspace.WarnIfOverCheckoutBudget(context.Background(), git.NewCLIClient(repo, tc.opts...), "ws-1", log)
 			got := buf.String()
 			if tc.want == "" {
 				if got != "" {

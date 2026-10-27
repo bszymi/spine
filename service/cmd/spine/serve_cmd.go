@@ -147,7 +147,7 @@ func serveCmd() *cobra.Command {
 			gitClient := buildPrimaryGitClient(repoPath, gitOpts)
 			// Once at start: warn when the workspace tree is already over
 			// the checkout budget (INIT-024 TASK-003).
-			go workspace.WarnIfOverCheckoutBudget(gitClient, os.Getenv("SPINE_WORKSPACE_ID"), log)
+			go workspace.WarnIfOverCheckoutBudget(context.WithoutCancel(ctx), gitClient, os.Getenv("SPINE_WORKSPACE_ID"), log)
 			if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {
 				log.Warn("failed to configure credential helper", "error", err)
 			}

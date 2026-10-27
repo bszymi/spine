@@ -28,11 +28,13 @@ const checkoutBudgetWarnTimeout = 60 * time.Second
 // its own goroutine: it reads, never writes, and a failure to measure is
 // logged at Debug (an empty repository has no HEAD tree). A client with
 // no budget measures nothing.
-func WarnIfOverCheckoutBudget(c *git.CLIClient, workspaceID string, log *slog.Logger) {
+// ctx should not be the request's own (pass context.WithoutCancel): the
+// measure is bounded by checkoutBudgetWarnTimeout.
+func WarnIfOverCheckoutBudget(ctx context.Context, c *git.CLIClient, workspaceID string, log *slog.Logger) {
 	if c == nil || c.CheckoutLimits().Budget == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), checkoutBudgetWarnTimeout)
+	ctx, cancel := context.WithTimeout(ctx, checkoutBudgetWarnTimeout)
 	defer cancel()
 	_, err := git.MeasureTree(ctx, c, "HEAD")
 	var tl *git.TreeTooLargeError
