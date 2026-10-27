@@ -1148,12 +1148,19 @@ The following limitations have been resolved:
     converted files are rewritten; real changes (tracked edits, staged changes, untracked files)
     stay as they were — a recorded path keeps the bytes it was checked out with (CRLF, an expanded
     `$Id$`), so committing it as is records those bytes;
-  - a linked worktree: marked when the line is added, renormalised when a call is made on its own
-    path (one Spine never calls on — an operator's — stays converted, with its mark); a worktree
-    that cannot be marked is logged at Warn and left as it is;
-  - a tree whose marker has no record (an earlier build of this change wrote it): its tracked
-    state is quarantined first (`git stash create`, SHA at Warn), then every unstaged difference
-    is rewritten; staged changes are still never rewritten;
+  - a linked worktree: marked (its real changes recorded) when the line is added, renormalised
+    when a call is made on its own path (one Spine never calls on — an operator's — stays
+    converted, with its mark); its record was never compared under the line, so that call
+    quarantines the tracked state first (`git stash create`, SHA at Warn) before rewriting the
+    unrecorded differences — an edit made there after the line is in the quarantine, not in the
+    tree; a worktree that cannot be marked is logged at Warn and left as it is;
+  - a retried renormalisation (the first failed: HEAD over the budget, a torn ref, a cancelled
+    request) rewrites only the files whose fingerprint still matches the one taken before the
+    first attempt's rewrite; a file edited since is left as it is;
+  - a tree whose marker has no record (an earlier build of this change wrote it), or whose record
+    was never fingerprinted (a crash right after the line): its tracked state is quarantined
+    first, then every unrecorded unstaged difference is rewritten; staged changes are still never
+    rewritten;
   - only the calling tree's hold is taken while the line is added; a sequence running in another
     worktree of the same repository at that moment runs on under the new attributes (one-time).
   A tree whose renormalisation fails stays marked and is retried by the next call. A path marked

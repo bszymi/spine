@@ -334,7 +334,7 @@ func TestNeutralAttributes_UnbornHEADClearsTheMark(t *testing.T) {
 // the line lives in the common directory, so it changes every worktree,
 // but only the calling one was marked. Adding it now records and marks
 // every worktree; a call on a linked worktree then renormalises it,
-// keeping its real edit.
+// keeping its recorded edit and quarantining what it cannot prove.
 func TestNeutralAttributes_LinkedWorktreesAreMarked(t *testing.T) {
 	ctx := context.Background()
 	repo := rnClone(t, false)
@@ -351,15 +351,28 @@ func TestNeutralAttributes_LinkedWorktreesAreMarked(t *testing.T) {
 	if !rnMarked(t, wt) {
 		t.Fatal("the linked worktree was not marked when the line was added")
 	}
+	// Its record was never proven by a comparison under the line (that
+	// call renormalised only its own tree), so an edit made after the
+	// line cannot be told from a conversion: quarantined first.
+	logs := rnLogs(t)
+	testutil.WriteFile(t, wt, "plain.bin", "abc after the line")
 	if err := git.NewCLIClient(wt).EnsureNeutralWorkTree(ctx); err != nil {
 		t.Fatal(err)
 	}
 	rnStored(t, wt)
 	if b := rnRead(t, wt, "real.txt"); b != "one\nlinked edit\n" {
-		t.Errorf("the linked worktree's edit = %q, want it kept", b)
+		t.Errorf("the linked worktree's recorded edit = %q, want it kept", b)
 	}
 	if rnMarked(t, wt) {
 		t.Error("the linked worktree is still marked")
+	}
+	i := strings.Index(logs.String(), "quarantine_sha=")
+	if i < 0 {
+		t.Fatalf("no quarantine for the unproven linked worktree:\n%s", logs.String())
+	}
+	sha := strings.Fields(logs.String()[i+len("quarantine_sha="):])[0]
+	if got := tbGit(t, wt, nil, "show", sha+":plain.bin"); got != "abc after the line" {
+		t.Errorf("quarantine %s holds plain.bin = %q, want the later edit", sha, got)
 	}
 }
 
@@ -407,5 +420,45 @@ func TestNeutralAttributes_LineWaitsForTheTreesHolder(t *testing.T) {
 	}
 	if rnMarked(t, repo) {
 		t.Error("still marked")
+	}
+}
+
+// TestNeutralAttributes_EditAfterTheRecordIsKept (codex review round 4,
+// P1): the record holds the real changes as they were when the line was
+// added; a renormalisation that failed then (HEAD over the budget) and
+// is retried later must not take an edit made in between for a
+// conversion. Both an edit to a file that was clean then and an edit to
+// a converted file survive the retry byte for byte; the untouched
+// converted file goes to its stored bytes.
+func TestNeutralAttributes_EditAfterTheRecordIsKept(t *testing.T) {
+	ctx := context.Background()
+	repo := rnClone(t, false)
+	logs := rnLogs(t)
+	tight := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{MaxEntries: 1}))
+	if err := tight.EnsureNeutralWorkTree(ctx); !errors.Is(err, git.ErrRenormalisePending) {
+		t.Fatalf("first call (HEAD over the budget): %v", err)
+	}
+	testutil.WriteFile(t, repo, "plain.bin", "abc edited later")
+	testutil.WriteFile(t, repo, "f.txt", "a\r\nb\r\nedited later\r\n")
+	if err := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{})).EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if b := rnRead(t, repo, "plain.bin"); b != "abc edited later" {
+		t.Errorf("plain.bin = %q, want the later edit kept", b)
+	}
+	if b := rnRead(t, repo, "f.txt"); b != "a\r\nb\r\nedited later\r\n" {
+		t.Errorf("f.txt = %q, want the later edit kept", b)
+	}
+	if b := rnRead(t, repo, "g.md"); b != "$Id$\nx\n" {
+		t.Errorf("g.md = %q, want its stored bytes", b)
+	}
+	if rnMarked(t, repo) {
+		t.Error("still marked")
+	}
+	if !strings.Contains(logs.String(), "changed_since_recorded=2") {
+		t.Errorf("want the two later edits counted:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "quarantine_sha=") {
+		t.Errorf("a proven retry quarantined:\n%s", logs.String())
 	}
 }

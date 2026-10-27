@@ -50,12 +50,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/core/worktreefs"
 )
 
 // NeutralCheckoutAttributes is the attributes line a budgeted repository
@@ -260,9 +262,12 @@ func ensureNeutral(ctx context.Context, repoDir string, beforeAdd func() error) 
 // was added. It is written (atomically) before the line is, and holds the
 // RECORD (review round 4): every tracked path that differed from HEAD or
 // the index under the old attributes — the tree's real uncommitted
-// changes, staged or not, which renormalising leaves as they are. It is
-// removed once the tree's conversion-only paths are at their stored bytes
-// (or there are none, or HEAD is unborn).
+// changes, staged or not, which renormalising leaves as they are — and,
+// once the call that wrote it has compared the tree under the line, the
+// PROOF: a fingerprint of each conversion-only file as it was then (codex
+// review round 4), so a later call rewrites only files still exactly as
+// they were. It is removed once the tree's conversion-only paths are at
+// their stored bytes (or there are none, or HEAD is unborn).
 const renormaliseMarker = "spine-renormalise-pending"
 
 // renormaliseRecordHeader opens a marker that carries a record. A marker
@@ -274,21 +279,42 @@ const renormaliseRecordHeader = "spine-renormalise-record v1\n"
 // maxRenormaliseRecordBytes bounds a marker, written or read.
 const maxRenormaliseRecordBytes = 64 << 20
 
-// writeRenormaliseRecord writes the marker at path with the record paths:
-// the header, the count, then each path NUL-terminated. It writes a
-// temporary file in the same directory and renames it into place, so a
-// marker is whole or absent; a link at the path is replaced, never
-// followed.
-func writeRenormaliseRecord(path string, paths []string) error {
+// renormaliseRecord is a marker's content: the real changes, and the
+// proof (nil until the comparison under the line has been made).
+type renormaliseRecord struct {
+	changes []string
+	proof   map[string]string // conversion-only path -> its fingerprint
+}
+
+// writeRenormaliseRecord writes the marker at path: the header, "changes
+// <n>" and n NUL-terminated paths, then, with a proof, "proof <m>" and m
+// NUL-terminated path / fingerprint pairs. It writes a temporary file in
+// the same directory and renames it into place, so a marker is whole or
+// absent; a link at the path is replaced, never followed.
+func writeRenormaliseRecord(path string, rec renormaliseRecord) error {
 	var b bytes.Buffer
 	b.WriteString(renormaliseRecordHeader)
-	b.WriteString(strconv.Itoa(len(paths)) + "\n")
-	for _, p := range paths {
+	b.WriteString("changes " + strconv.Itoa(len(rec.changes)) + "\n")
+	for _, p := range rec.changes {
 		b.WriteString(p)
 		b.WriteByte(0)
 	}
+	if rec.proof != nil {
+		b.WriteString("proof " + strconv.Itoa(len(rec.proof)) + "\n")
+		keys := make([]string, 0, len(rec.proof))
+		for p := range rec.proof {
+			keys = append(keys, p)
+		}
+		sort.Strings(keys)
+		for _, p := range keys {
+			b.WriteString(p)
+			b.WriteByte(0)
+			b.WriteString(rec.proof[p])
+			b.WriteByte(0)
+		}
+	}
 	if b.Len() > maxRenormaliseRecordBytes {
-		return fmt.Errorf("the record of uncommitted changes is larger than %d bytes", maxRenormaliseRecordBytes)
+		return fmt.Errorf("the renormalise record is larger than %d bytes", maxRenormaliseRecordBytes)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".spine-renormalise-*")
 	if err != nil {
@@ -308,43 +334,65 @@ func writeRenormaliseRecord(path string, paths []string) error {
 // readRenormaliseRecord reads the marker's record. ok is false when the
 // marker carries none (an older marker, a damaged one, or not a regular
 // file).
-func readRenormaliseRecord(path string) (paths []string, ok bool, err error) {
+func readRenormaliseRecord(path string) (rec renormaliseRecord, ok bool, err error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
-		return nil, false, err
+		return rec, false, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, false, nil
+		return rec, false, nil
 	}
 	f, err := os.Open(path) //nolint:gosec // G304: a fixed name in git's own directory
 	if err != nil {
-		return nil, false, err
+		return rec, false, err
 	}
 	defer func() { _ = f.Close() }()
 	b, err := io.ReadAll(io.LimitReader(f, maxRenormaliseRecordBytes+1))
 	if err != nil {
-		return nil, false, err
+		return rec, false, err
 	}
 	rest, found := bytes.CutPrefix(b, []byte(renormaliseRecordHeader))
 	if !found || len(b) > maxRenormaliseRecordBytes {
-		return nil, false, nil
+		return renormaliseRecord{}, false, nil
 	}
-	count, rest, found := bytes.Cut(rest, []byte("\n"))
-	n, convErr := strconv.Atoi(string(count))
-	if !found || convErr != nil || n < 0 {
-		return nil, false, nil
+	// section reads "<name> <count>\n" and then count*per NUL-terminated
+	// fields.
+	section := func(name string, per int) ([]string, bool) {
+		line, after, found := bytes.Cut(rest, []byte("\n"))
+		label, count, _ := strings.Cut(string(line), " ")
+		n, convErr := strconv.Atoi(count)
+		if !found || label != name || convErr != nil || n < 0 {
+			return nil, false
+		}
+		fields := make([]string, 0, n*per)
+		for i := 0; i < n*per; i++ {
+			field, tail, found := bytes.Cut(after, []byte{0})
+			if !found {
+				return nil, false
+			}
+			fields = append(fields, string(field))
+			after = tail
+		}
+		rest = after
+		return fields, true
 	}
-	if n == 0 {
-		return nil, len(rest) == 0, nil
+	changes, okChanges := section("changes", 1)
+	if !okChanges {
+		return renormaliseRecord{}, false, nil
 	}
-	if len(rest) == 0 || rest[len(rest)-1] != 0 {
-		return nil, false, nil
+	rec = renormaliseRecord{changes: changes}
+	if len(rest) == 0 {
+		return rec, true, nil
 	}
-	fields := strings.Split(string(rest[:len(rest)-1]), "\x00")
-	if len(fields) != n {
-		return nil, false, nil
+	pairs, okProof := section("proof", 2)
+	if !okProof || len(rest) != 0 {
+		return renormaliseRecord{}, false, nil
 	}
-	return fields, true, nil
+	rec.proof = make(map[string]string, len(pairs)/2)
+	for i := 0; i < len(pairs); i += 2 {
+		rec.proof[pairs[i]] = pairs[i+1]
+	}
+	return rec, true, nil
 }
 
 // renormalisePending reports whether the marker is there.
@@ -450,16 +498,21 @@ func requireRepositoryTop(ctx context.Context, repoDir string) error {
 //     — identified positively — needs nothing; otherwise git compares
 //     every tracked file's content with the index under the new
 //     attributes (forceContentCompare: stat data alone would call a
-//     long-lived converted tree clean), and the files that differ, whose
+//     long-lived converted tree clean). The files that differ, whose
 //     index entry matches HEAD and that are not in the record, are the
-//     conversion-only ones: HEAD's tree is measured against the client's
-//     budget (when it has one) and they are rewritten from the index
-//     (`checkout-index -f -u`). Recorded paths, staged changes and
-//     untracked files are left exactly as they are (one Warn gives their
-//     count). A marker without a record (written by an earlier build, or
-//     damaged) falls back to quarantining the tracked state first
-//     (`git stash create`, the SHA logged at Warn) and then rewriting
-//     every unstaged difference.
+//     conversion-only ones when this call recorded the tree and has held
+//     it since; their fingerprints are added to the marker first (the
+//     PROOF), so a later call — a retry — rewrites only files still
+//     exactly as they were then, and leaves a file edited since as it is
+//     (codex review round 4). HEAD's tree is measured against the
+//     client's budget (when it has one) and they are rewritten from the
+//     index (`checkout-index -f -u`). Recorded paths, staged changes and
+//     untracked files are left exactly as they are (one Warn gives the
+//     counts). A marker with no record (written by an earlier build, or
+//     damaged), or a record no call has proven (a linked worktree's, or
+//     a crash right after the line), falls back to quarantining the
+//     tracked state first (`git stash create`, the SHA logged at Warn)
+//     and then rewriting every unstaged difference not recorded.
 //   - The mark is cleared only then. A renormalisation that fails or is
 //     interrupted (HEAD over the budget, a torn ref, a cancelled request,
 //     a crash) is retried by the next call; the error, returned
@@ -487,12 +540,17 @@ func (c *CLIClient) EnsureNeutralWorkTree(ctx context.Context) error {
 			release()
 		}
 	}()
+	recorded := false // this call recorded this tree, under the hold it still has
 	for {
 		err := ensureNeutral(ctx, c.repoPath, func() error {
 			if !bare && release == nil {
 				return errNeedTreeHold
 			}
-			return c.markWorkTrees(ctx, op, gitDir, bare)
+			if err := c.markWorkTrees(ctx, op, gitDir, bare); err != nil {
+				return err
+			}
+			recorded = !bare
+			return nil
 		})
 		if !errors.Is(err, errNeedTreeHold) {
 			if err != nil {
@@ -509,7 +567,7 @@ func (c *CLIClient) EnsureNeutralWorkTree(ctx context.Context) error {
 	if bare {
 		return nil
 	}
-	if err := c.renormalise(ctx, op, filepath.Join(gitDir, renormaliseMarker)); err != nil {
+	if err := c.renormalise(ctx, op, filepath.Join(gitDir, renormaliseMarker), recorded); err != nil {
 		return fmt.Errorf("%w: %w", ErrRenormalisePending, err)
 	}
 	return nil
@@ -531,7 +589,7 @@ func (c *CLIClient) markWorkTrees(ctx context.Context, op, selfGitDir string, ba
 		if err != nil {
 			return err
 		}
-		if err := writeRenormaliseRecord(filepath.Join(selfGitDir, renormaliseMarker), paths); err != nil {
+		if err := writeRenormaliseRecord(filepath.Join(selfGitDir, renormaliseMarker), renormaliseRecord{changes: paths}); err != nil {
 			return &GitError{Kind: ErrKindPermanent, Op: op, Message: "cannot record the work tree's uncommitted changes; info/attributes not written", Err: err}
 		}
 	}
@@ -569,7 +627,7 @@ func (c *CLIClient) markOtherWorkTree(ctx context.Context, op, dir, selfGitDir s
 	if err != nil {
 		return err
 	}
-	return writeRenormaliseRecord(filepath.Join(gd, renormaliseMarker), paths)
+	return writeRenormaliseRecord(filepath.Join(gd, renormaliseMarker), renormaliseRecord{changes: paths})
 }
 
 // realChanges lists the tracked paths of the work tree at dir ("" for
@@ -580,7 +638,8 @@ func (c *CLIClient) markOtherWorkTree(ctx context.Context, op, dir, selfGitDir s
 func (c *CLIClient) realChanges(ctx context.Context, op, dir string) ([]string, error) {
 	args := []string{"status", "--porcelain=v1", "-z", "--untracked-files=no"}
 	if dir != "" {
-		args = append([]string{"-C", dir}, args...)
+		// Another tree, not held: read only, never rewrite its index.
+		args = append([]string{"--no-optional-locks", "-C", dir}, args...)
 	}
 	out, _, err := c.runWith(ctx, op, runOpts{}, args...)
 	if err != nil {
@@ -636,8 +695,14 @@ var renormaliseHeadProbeHook func()
 
 // renormalise is EnsureNeutralWorkTree's second half: the marked tree's
 // conversion-only paths brought to their stored bytes under the tree's
-// hold, the mark cleared.
-func (c *CLIClient) renormalise(ctx context.Context, op, marker string) error {
+// hold, the mark cleared. recorded says this call wrote the record and has
+// held the tree since: then every file that differs under the line and is
+// not recorded can only be a conversion. Otherwise (a retry, a linked
+// worktree, a crash) that has to be proven by the record's proof —
+// codex review round 4: an edit made after the record is not in it — and
+// a file that changed since is left as it is; with no proof at all the
+// tracked state is quarantined first.
+func (c *CLIClient) renormalise(ctx context.Context, op, marker string, recorded bool) error {
 	if pending, err := renormalisePending(marker); err != nil || !pending {
 		return err
 	}
@@ -665,12 +730,12 @@ func (c *CLIClient) renormalise(ctx context.Context, op, marker string) error {
 	} else if unborn {
 		return done() // nothing checked out
 	}
-	record, haveRecord, err := readRenormaliseRecord(marker)
+	rec, haveRecord, err := readRenormaliseRecord(marker)
 	if err != nil {
 		return err
 	}
-	keep := make(map[string]bool, len(record))
-	for _, p := range record {
+	keep := make(map[string]bool, len(rec.changes))
+	for _, p := range rec.changes {
 		keep[p] = true
 	}
 	index, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "--git-path", "index")
@@ -689,18 +754,53 @@ func (c *CLIClient) renormalise(ctx context.Context, op, marker string) error {
 	if err != nil {
 		return err
 	}
-	var rewrite []string
+	var differ []string
 	for _, ch := range parseTrackedStatus(status) {
 		// The index entry matches HEAD and the file's content differs.
 		if ch.x == ' ' && ch.y == 'M' && !keep[ch.path] {
-			rewrite = append(rewrite, ch.path)
+			differ = append(differ, ch.path)
 		}
+	}
+	// Which of them are conversion-only, and whether to quarantine first.
+	var rewrite []string
+	changedSince, quarantine := 0, !haveRecord
+	switch {
+	case !haveRecord:
+		rewrite = differ
+	case rec.proof != nil:
+		now, err := c.fingerprints(ctx, op, differ)
+		if err != nil {
+			return err
+		}
+		for _, p := range differ {
+			if fp := rec.proof[p]; fp != "" && now[p] == fp {
+				rewrite = append(rewrite, p)
+			} else {
+				changedSince++
+			}
+		}
+	case recorded && len(differ) == 0:
+	case recorded:
+		// Prove them for a retry before anything can fail.
+		proof, err := c.fingerprints(ctx, op, differ)
+		if err != nil {
+			return err
+		}
+		rec.proof = proof
+		if err := writeRenormaliseRecord(marker, rec); err != nil {
+			return &GitError{Kind: ErrKindPermanent, Op: op, Message: "cannot write the renormalise proof", Err: err}
+		}
+		rewrite = differ
+	default:
+		// Recorded by another call, never proven (a linked worktree, or
+		// a crash right after the line).
+		rewrite, quarantine = differ, true
 	}
 	log := observe.Logger(ctx)
 	if len(rewrite) == 0 {
-		if len(record) > 0 {
+		if len(rec.changes) > 0 || changedSince > 0 {
 			log.Warn("neutral checkout attributes added: tracked paths with uncommitted changes left as they were (they keep the bytes they were checked out with)",
-				"repo_path", c.repoPath, "left_as_they_were", len(record))
+				"repo_path", c.repoPath, "left_as_they_were", len(rec.changes), "changed_since_recorded", changedSince)
 		}
 		return done()
 	}
@@ -708,7 +808,7 @@ func (c *CLIClient) renormalise(ctx context.Context, op, marker string) error {
 		return err
 	}
 	sha := ""
-	if !haveRecord {
+	if quarantine {
 		if sha, err = c.quarantineTracked(ctx, op); err != nil {
 			return err
 		}
@@ -722,14 +822,71 @@ func (c *CLIClient) renormalise(ctx context.Context, op, marker string) error {
 		"checkout-index", "-f", "-u", "-z", "--stdin"); err != nil {
 		return err
 	}
-	if haveRecord {
-		log.Warn("work tree checked out with conversions brought to stored bytes after the neutral checkout attributes were added",
-			"repo_path", c.repoPath, "rewritten", len(rewrite), "left_as_they_were", len(record))
+	if quarantine {
+		log.Warn("work tree checked out with conversions brought to stored bytes after the neutral checkout attributes were added; its files could not be proven conversion-only, so the tracked state was quarantined first",
+			"repo_path", c.repoPath, "rewritten", len(rewrite), "left_as_they_were", len(rec.changes), "quarantine_sha", sha)
 	} else {
-		log.Warn("work tree checked out with conversions brought to stored bytes after the neutral checkout attributes were added; its marker had no record of uncommitted changes, so the tracked state was quarantined first",
-			"repo_path", c.repoPath, "rewritten", len(rewrite), "quarantine_sha", sha)
+		log.Warn("work tree checked out with conversions brought to stored bytes after the neutral checkout attributes were added",
+			"repo_path", c.repoPath, "rewritten", len(rewrite), "left_as_they_were", len(rec.changes), "changed_since_recorded", changedSince)
 	}
 	return done()
+}
+
+// fingerprints identifies each path's working-tree entry without reading
+// through it, as the shared tree's phantom bookkeeping does
+// (worktreefs.LstatEntry follows no link and opens nothing): a regular
+// file is "blob <id>" — its bytes hashed under the attributes in force,
+// which under the neutral line are its raw bytes (`hash-object
+// --stdin-paths`; a path holding a newline cannot be passed and gets no
+// fingerprint, so it is never proven) — a link "symlink <target>",
+// anything else its type, a missing entry "absent", an unreachable one
+// "unreachable".
+func (c *CLIClient) fingerprints(ctx context.Context, op string, paths []string) (map[string]string, error) {
+	fp := make(map[string]string, len(paths))
+	if len(paths) == 0 {
+		return fp, nil
+	}
+	tree, err := worktreefs.Open(c.repoPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tree.Close() }()
+	var regular []string
+	for _, p := range paths {
+		fi, target, err := tree.LstatEntry(p)
+		var pe *worktreefs.PathError
+		switch {
+		case err == nil && fi.Mode().IsRegular():
+			if !strings.Contains(p, "\n") {
+				regular = append(regular, p)
+			}
+		case err == nil && fi.Mode()&fs.ModeSymlink != 0:
+			fp[p] = "symlink " + target
+		case err == nil:
+			fp[p] = "type " + fi.Mode().Type().String()
+		case errors.Is(err, fs.ErrNotExist):
+			fp[p] = "absent"
+		case errors.As(err, &pe) && (pe.Reason == worktreefs.ReasonSymlink || pe.Reason == worktreefs.ReasonNotDir):
+			fp[p] = "unreachable " + string(pe.Reason) + " " + pe.Component
+		default:
+			return nil, err
+		}
+	}
+	if len(regular) > 0 {
+		out, _, err := c.runWith(ctx, op, runOpts{stdin: strings.NewReader(strings.Join(regular, "\n") + "\n")},
+			"hash-object", "--stdin-paths")
+		if err != nil {
+			return nil, err
+		}
+		sums := strings.Fields(out)
+		if len(sums) != len(regular) {
+			return nil, &GitError{Kind: ErrKindPermanent, Op: op, Message: "hash-object printed an unexpected number of ids"}
+		}
+		for i, p := range regular {
+			fp[p] = "blob " + sums[i]
+		}
+	}
+	return fp, nil
 }
 
 // headUnborn reports whether HEAD is unborn, identified positively

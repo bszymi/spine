@@ -81,10 +81,13 @@ change.
     whose content differs, whose index entry matches HEAD and that are not in the record are
     rewritten from the index (HEAD's tree is measured first). Recorded paths, staged changes and
     untracked files are left exactly as they are, and one Warn gives their count; a recorded path
-    keeps the bytes it was checked out with until it is committed or discarded. A marker without
-    a record (written by an earlier build of this change, or damaged) falls back to quarantining
-    the tracked state first (`git stash create`, the SHA logged at Warn) and then rewriting every
-    unstaged difference;
+    keeps the bytes it was checked out with until it is committed or discarded. Before rewriting,
+    the call adds a fingerprint of each such file to the marker, so a retry (after HEAD over the
+    budget, a torn ref, a cancelled request) rewrites only files still exactly as they were and
+    leaves a file edited since as it is. A marker without a record (written by an earlier build of
+    this change, or damaged), or with a record no call has fingerprinted (a linked worktree's, or a
+    crash right after the line), falls back to quarantining the tracked state first (`git stash
+    create`, the SHA logged at Warn) and then rewriting every unstaged difference not recorded;
   - the mark is cleared only then. An unborn HEAD is identified positively; a renormalisation that
     fails or is interrupted (HEAD over the budget, a torn ref, a cancelled request, a crash) is
     retried by the next call and returns its error meanwhile (matching
