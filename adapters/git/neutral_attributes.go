@@ -67,6 +67,14 @@ var ErrNeutralAttributesMissing = errors.New("git: the repository's info/attribu
 // NeutralAttributesMissingMessage is the GitError.Message of that refusal.
 const NeutralAttributesMissingMessage = "the checkout budget needs the neutral checkout attributes as the last line of info/attributes"
 
+// ErrRenormalisePending is matched (errors.Is) by an EnsureNeutralWorkTree
+// error returned after the line is in place: the work tree is still
+// marked, not yet at its stored bytes, and the next call retries. The
+// wrapped cause (a budget refusal, an obstruction, a cancelled request)
+// is matched too. A caller that only needs the line — the git HTTP
+// endpoint's push measure — can go on; one that works in the tree cannot.
+var ErrRenormalisePending = errors.New("git: the neutral checkout attributes are in place, but the work tree is not yet brought to its stored bytes (the next call retries)")
+
 // maxInfoAttributesBytes bounds the read of an existing info/attributes.
 const maxInfoAttributesBytes = 1 << 20
 
@@ -332,8 +340,9 @@ func requireRepositoryTop(ctx context.Context, repoDir string) error {
 // budget, an obstruction, a cancelled request, a crash) is retried by the
 // next call — the error is returned meanwhile — rather than leaving the
 // tree converted under a file that already ends in the line (codex review
-// round 3). A bare repository is never marked; a file that already ended
-// in the line, with no mark, leaves the file and the tree alone.
+// round 3). Such an error matches ErrRenormalisePending. A bare
+// repository is never marked; a file that already ended in the line, with
+// no mark, leaves the file and the tree alone.
 //
 // Only a marked tree is held (so the per-push call of the git HTTP
 // endpoint never waits behind a sequence once the line is there and the
@@ -355,6 +364,15 @@ func (c *CLIClient) EnsureNeutralWorkTree(ctx context.Context) error {
 	if err := ensureNeutral(ctx, c.repoPath, marker); err != nil || marker == "" {
 		return err
 	}
+	if err := c.renormalise(ctx, op, marker); err != nil {
+		return fmt.Errorf("%w: %w", ErrRenormalisePending, err)
+	}
+	return nil
+}
+
+// renormalise is EnsureNeutralWorkTree's second half: the marked tree
+// brought to its stored bytes under the tree's hold, the mark cleared.
+func (c *CLIClient) renormalise(ctx context.Context, op, marker string) error {
 	if pending, err := renormalisePending(marker); err != nil || !pending {
 		return err
 	}

@@ -491,8 +491,8 @@ func TestNeutralAttributes_FailedRenormalisationIsRetried(t *testing.T) {
 	tight := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{MaxEntries: 1}))
 	err := tight.EnsureNeutralWorkTree(ctx)
 	var tooLarge *git.TreeTooLargeError
-	if !errors.As(err, &tooLarge) {
-		t.Fatalf("first call: want the HEAD-over-budget refusal, got %v", err)
+	if !errors.As(err, &tooLarge) || !errors.Is(err, git.ErrRenormalisePending) {
+		t.Fatalf("first call: want the HEAD-over-budget refusal as ErrRenormalisePending, got %v", err)
 	}
 	if has, herr := git.HasNeutralCheckoutAttributes(ctx, repo); herr != nil || !has {
 		t.Fatalf("fixture: the line was not written by the failed call (%v, %v)", has, herr)

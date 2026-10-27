@@ -321,3 +321,64 @@ func TestBudgetHook_WarnsOnceWhenHooksPathIsOverridden(t *testing.T) {
 		t.Fatalf("the warning does not name exactly the hooks that will not run:\n%s", got)
 	}
 }
+
+// TestBudgetHook_PendingRenormalisationDoesNotStopThePush (codex review
+// round 3): a served work tree whose renormalisation cannot finish yet —
+// here an untracked file stands where a tracked directory was — does not
+// refuse pushes (the hook's measure needs only the line, which is in
+// place): each push warns and retries (the install runs per receive-pack
+// request), and once the obstruction is gone
+// the next push brings the tree to its stored bytes and stops warning.
+func TestBudgetHook_PendingRenormalisationDoesNotStopThePush(t *testing.T) {
+	repo := t.TempDir()
+	nulGit(t, repo, nil, "init", "-q", "-b", "main")
+	if err := os.MkdirAll(filepath.Join(repo, "d"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "d", "x"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nulGit(t, repo, nil, "add", "-A")
+	nulGit(t, repo, nil, "commit", "-q", "-m", "base")
+	if err := os.RemoveAll(filepath.Join(repo, "d")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "d"), []byte("in the way\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := budgetHandler(t, repo)
+	url := budgetServer(t, h, repo)
+	work := budgetClone(t, url)
+	const warn = "not yet brought to its stored bytes"
+	for i := 0; i < 2; i++ {
+		nulGit(t, work, nil, "commit", "-q", "--allow-empty", "-m", fmt.Sprint(i))
+		if out, err := gitPush(t, work, url, fmt.Sprintf("HEAD:refs/heads/f%d", i)); err != nil {
+			t.Fatalf("push %d with the renormalisation pending was refused: %v\n%s", i, err, out)
+		}
+	}
+	if n := strings.Count(logs.String(), warn); n < 2 {
+		t.Fatalf("want a warning at each push while pending, got %d:\n%s", n, logs.String())
+	}
+	if ok, err := git.HasNeutralCheckoutAttributes(context.Background(), repo); !ok || err != nil {
+		t.Fatalf("served repository lacks the neutral checkout attributes: %v %v", ok, err)
+	}
+	if err := os.Remove(filepath.Join(repo, "d")); err != nil {
+		t.Fatal(err)
+	}
+	logs.Reset()
+	nulGit(t, work, nil, "commit", "-q", "--allow-empty", "-m", "2")
+	if out, err := gitPush(t, work, url, "HEAD:refs/heads/f2"); err != nil {
+		t.Fatalf("push after the obstruction was removed: %v\n%s", err, out)
+	}
+	if strings.Contains(logs.String(), warn) {
+		t.Fatalf("still pending after the obstruction was removed:\n%s", logs.String())
+	}
+	if b, err := os.ReadFile(filepath.Join(repo, "d", "x")); err != nil || string(b) != "x\n" {
+		t.Fatalf("the retried renormalisation did not restore d/x: %q %v", b, err)
+	}
+}

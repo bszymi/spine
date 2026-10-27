@@ -234,9 +234,16 @@ func (h *Handler) installBudgetHook(ctx context.Context, repoPath string) (strin
 	h.warnOverriddenHooks(ctx, repoPath, dir)
 	// The hook's measure needs the served repository to carry the neutral
 	// checkout attributes (it refuses without them), and so does every
-	// checkout of what it admits.
+	// checkout of what it admits. A work tree still waiting for its
+	// renormalisation does not stop the push — the measure needs only the
+	// line — and is retried by the next push; the tree's own operations
+	// report it.
 	if err := git.NewCLIClient(repoPath).EnsureNeutralWorkTree(ctx); err != nil {
-		return "", fmt.Errorf("neutral checkout attributes: %w", err)
+		if !errors.Is(err, git.ErrRenormalisePending) {
+			return "", fmt.Errorf("neutral checkout attributes: %w", err)
+		}
+		observe.Logger(ctx).Warn("served repository's work tree not yet brought to its stored bytes; the push goes on and the next push retries",
+			"repo_path", repoPath, "error", err)
 	}
 	path := filepath.Join(dir, "pre-receive")
 	switch fi, err := os.Lstat(path); {
