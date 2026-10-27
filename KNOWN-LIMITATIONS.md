@@ -1138,9 +1138,26 @@ The following limitations have been resolved:
   file does not end in it — the last line that is not blank or a comment, by git's own rules
   (only space, tab and CR are blanks). `merge` is left alone, so `binary` and `merge=union` merge
   as before. The writer only writes at the top of a repository (never a repository that merely
-  contains the directory it is given), and when it first adds the line to a work tree checked out
-  with conversions it brings that tree to the stored bytes (quarantining its tracked state); a
-  tree whose renormalisation failed stays marked and is retried by the next call.
+  contains the directory it is given). When it first adds the line it brings trees checked out with
+  conversions to their stored bytes, by content, leaving real uncommitted changes in place (the
+  CHANGELOG has the steps); what each tree kind sees:
+  - the shared workspace tree (standalone, home branch): its converted files are rewritten when
+    the line is added (`spine serve` start or the workspace build); its real changes are left by
+    that step and then, as before, quarantined and reset by the restore around its next sequence;
+  - a code-repository clone the pool reuses and a served repository's work tree: only the
+    converted files are rewritten; real changes (tracked edits, staged changes, untracked files)
+    stay as they were — a recorded path keeps the bytes it was checked out with (CRLF, an expanded
+    `$Id$`), so committing it as is records those bytes;
+  - a linked worktree: marked when the line is added, renormalised when a call is made on its own
+    path (one Spine never calls on — an operator's — stays converted, with its mark); a worktree
+    that cannot be marked is logged at Warn and left as it is;
+  - a tree whose marker has no record (an earlier build of this change wrote it): its tracked
+    state is quarantined first (`git stash create`, SHA at Warn), then every unstaged difference
+    is rewritten; staged changes are still never rewritten;
+  - only the calling tree's hold is taken while the line is added; a sequence running in another
+    worktree of the same repository at that moment runs on under the new attributes (one-time).
+  A tree whose renormalisation fails stays marked and is retried by the next call. A path marked
+  assume-unchanged or skip-worktree is trusted as git trusts it: not compared, not rewritten.
   Not neutralised (operator configuration): a host `merge.<name>.driver` named by a `merge=`
   attribute, and `pull.twohead` (Spine never pulls). Consequences: an LFS pointer stays a pointer,
   `git add` keeps CRLF, does not collapse `$Id: … $`, runs no clean filter (a file Spine writes at

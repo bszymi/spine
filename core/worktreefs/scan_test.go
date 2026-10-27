@@ -64,13 +64,17 @@ var allowed = map[string]bool{
 	// top-level path, to refuse a directory that is not its repository's
 	// top (nothing opened or written).
 	"adapters/git/neutral_attributes.go:requireRepositoryTop": true,
-	// Codex review round 3: the renormalise marker, a fixed name in the
-	// work tree's own git directory (`git rev-parse --absolute-git-dir`),
-	// never a working-tree path; created O_EXCL (a link is not followed),
-	// Lstat'd and removed.
-	"adapters/git/neutral_attributes.go:markRenormalisePending":  true,
+	// Codex review round 3 / review round 4: the renormalise marker, a
+	// fixed name in a work tree's own git directory (`git rev-parse
+	// --absolute-git-dir`), never a working-tree path — written as a
+	// temporary file renamed into place (a link is replaced, not
+	// followed), Lstat'd, read and removed; and the index file's own
+	// time (`git rev-parse --git-path index`, Lstat'd, regular only).
+	"adapters/git/neutral_attributes.go:writeRenormaliseRecord":  true,
+	"adapters/git/neutral_attributes.go:readRenormaliseRecord":   true,
 	"adapters/git/neutral_attributes.go:renormalisePending":      true,
 	"adapters/git/neutral_attributes.go:clearRenormalisePending": true,
+	"adapters/git/neutral_attributes.go:forceContentCompare":     true,
 	// MkdirTemp/RemoveAll of the private GIT_INDEX_FILE directory in
 	// os.TempDir (INIT-023 TASK-005): plumbing only, no working tree.
 	"adapters/git/commitbinder.go:CLIClient.CommitFilesOnto": true,

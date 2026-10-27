@@ -195,6 +195,9 @@ type heldTickets struct {
 
 type heldTicketsKey struct{}
 
+// Lock order with the neutral attributes' writer (INIT-024 TASK-003
+// review round 4): a tree's hold is taken BEFORE an info/attributes
+// file's mutex (neutralWriteMu), never while holding one.
 var (
 	treeMu    sync.Mutex
 	treeLocks = map[string]*treeLock{}
