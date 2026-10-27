@@ -106,7 +106,7 @@ Spine encrypts sensitive fields before persisting them. Currently this applies t
 - **Key source**: `SPINE_SECRET_ENCRYPTION_KEY` — base64-encoded 32 bytes (AES-256), supplied out-of-band from the database. Generate with `openssl rand -base64 32`. This is the **primary** key: every new or re-encrypted value is sealed with it.
 - **Previous keys**: `SPINE_SECRET_PREVIOUS_KEYS` — a comma-separated list of base64 keys that still **decrypt** values sealed before a rotation, but never seal. Together the keys form a key ring. Setting previous keys without a primary key is a startup error.
 - **Key ids**: each key has a derived, non-secret 16-hex-character id, `kid` (an HKDF-SHA256 output of the key). `spine serve` logs `primary_key_id` and `previous_key_ids` at startup; operators configure no labels. Errors name a key by its position, never by its value.
-- **Production gate**: Starting with `SPINE_ENV=production` and no key is refused at startup. Other environments log a warning and fall back to plaintext so local development does not require extra configuration.
+- **Production gate**: Starting with `SPINE_ENV=production` and no key is refused at startup. `SPINE_ENV=staging` and `development` log a warning and fall back to plaintext so local development does not require extra configuration. `SPINE_ENV` itself is required: an unset or unknown value refuses to start rather than falling back.
 - **Escrow**: losing a key means the values it sealed cannot be decrypted. Back up every key, including retired ones (see *Key rotation* below), alongside other production secrets (cloud KMS, a secrets manager).
 
 ### Wire Formats
@@ -172,7 +172,7 @@ Neither undoes a plant that a `migrate` sweep already converted: that row is a v
 
 ### Runbooks
 
-Every `spine secrets reencrypt` run below uses the same `SPINE_SECRET_ENCRYPTION_KEY`, `SPINE_SECRET_PREVIOUS_KEYS` and **`SPINE_SECRET_ENVELOPE_MODE`** as `spine serve`, and in file mode the same **`SPINE_WORKSPACE_ID`** (the command refuses to run with the mode unset, or in file mode with the workspace id unset and no `--workspace`).
+Every `spine secrets reencrypt` run below uses the same `SPINE_SECRET_ENCRYPTION_KEY`, `SPINE_SECRET_PREVIOUS_KEYS`, **`SPINE_SECRET_ENVELOPE_MODE`** and **`SPINE_ENV`** as `spine serve`, and in file mode the same **`SPINE_WORKSPACE_ID`** (the command refuses to run with the mode or `SPINE_ENV` unset, or in file mode with the workspace id unset and no `--workspace`).
 
 **Verifying every workspace** (used by the steps below). Verify only once the rollout of the change being verified has **completed** — no process with the previous setting remains. While processes with the old and new setting overlap, an old-setting process that first loads a workspace after a new-setting process swept it sweeps it back: to `enc:v1` (a `downgrade` process during the switch to `migrate`), to the old primary key (a step-2 process during a key promotion), or to `enc:v2` (a `migrate` process during a rollback's switch to `downgrade`). Nothing fails while both settings run, but nothing sweeps that workspace again until some process rebuilds it.
 
@@ -566,6 +566,7 @@ Last-Event-ID: <optional replay cursor>
 - `Last-Event-ID`: on reconnect, replays up to the last 100 missed events after that cursor.
 - Response headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`.
 - Heartbeat: `: keepalive` comment every 30s. Per-event write deadline is 5s — slow clients get dropped rather than back-pressuring the emitter.
+- Revalidation: before each heartbeat the stream re-checks its bearer (revocation, expiry, actor status, `events.read`). When the check fails — or cannot complete — the server writes `: reauthentication required` and closes the stream; a reconnect with the same bearer then gets `401`. Events broadcast between a revocation and the next heartbeat are still delivered (INIT-024 TASK-007).
 - Per-actor concurrency cap: default 5, tune via `SPINE_SSE_MAX_CONN_PER_ACTOR` (≤0 disables the cap — not recommended). In shared multi-workspace mode the cap is counted per (workspace, actor): the same actor ID in another workspace (every workspace has its own `smp-admin`) has its own slots.
 - Frame safety (INIT-023 TASK-015). Event IDs embed workflow identifiers (step, divergence-point and branch IDs). An event whose ID contains a control character, invalid UTF-8, U+0085, U+2028 or U+2029 is sent **without its `id:` line** (an unsafe event type likewise loses its `event:` line); its JSON `data` still carries the true `event_id`. The client's last event ID therefore stays at the previous event, and a reconnect replays from there (at-least-once). `data:` lines never contain a raw line break, and U+0085, U+2028 and U+2029 inside JSON strings are written as `\u0085`, `\u2028` and `\u2029`, which decode to the same value. See `KNOWN-LIMITATIONS.md` for the replay residual.
 
@@ -806,7 +807,7 @@ spec:
 | `SPINE_SERVER_PORT` | No | `8080` | HTTP server port |
 | `SPINE_LOG_LEVEL` | No | `info` | Log level: debug, info, warn, error |
 | `SPINE_LOG_FORMAT` | No | `json` | Log format: json or text |
-| `SPINE_ENV` | No | - | Runtime environment: `production`, `staging`, `development`. When `production`, `SPINE_DEV_MODE` is refused and `SPINE_SECRET_ENCRYPTION_KEY` is required. |
+| `SPINE_ENV` | **Yes** (`spine serve`, `spine secrets reencrypt`) | - | Runtime environment: `production`, `staging` or `development` (case-insensitive, surrounding whitespace ignored). Unset, blank or any other value refuses to start, naming the three values (INIT-024 TASK-007: an unset or mistyped value used to run every production gate on its lenient branch). When `production`, `SPINE_DEV_MODE` is refused and `SPINE_SECRET_ENCRYPTION_KEY`, `SPINE_CODE_REPO_BASE` and a strong `SMP_ADMIN_TOKEN` are required. |
 | `SPINE_DEV_MODE` | No | - | `1` or `true` lets unauthenticated requests through the `/api/v1` auth gate. Dev-only; refused at startup when `SPINE_ENV=production`. Does not affect the `/git` endpoint. |
 | `SPINE_GIT_HTTP_DEV_NO_AUTH` | No | - | `1`, `true`, `yes` or `on` lets every client clone/fetch over `/git` without a bearer. Development only: refused at startup unless `SPINE_ENV=development`. Pushes still need a bearer. |
 | `SPINE_SECRET_ENCRYPTION_KEY` | Yes (production) | - | Base64-encoded 32-byte AES-256 key for at-rest secret encryption (webhook signing secrets). Generate with `openssl rand -base64 32`. See [Secrets at Rest](#secrets-at-rest). |

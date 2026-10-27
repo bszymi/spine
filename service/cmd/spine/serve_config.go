@@ -369,7 +369,10 @@ func requireSecureDBURL(url string) error {
 	return fmt.Errorf("database URL uses sslmode=disable; set SPINE_INSECURE_LOCAL=1 to acknowledge (local development only) or use sslmode=require/verify-full")
 }
 
-// resolveRuntimeEnv returns the normalized SPINE_ENV value.
+// resolveRuntimeEnv returns the normalized SPINE_ENV value: production,
+// staging or development (case and surrounding whitespace ignored), or ""
+// for an unset or unknown value. Only requireRuntimeEnv decides whether ""
+// may run; callers past that gate always see a known value.
 func resolveRuntimeEnv() string {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("SPINE_ENV")))
 	switch v {
@@ -378,6 +381,49 @@ func resolveRuntimeEnv() string {
 	default:
 		return ""
 	}
+}
+
+// runtimeEnvMaxEcho bounds how much of an unknown SPINE_ENV value the
+// refusal quotes, so a stray multi-kilobyte value cannot flood the log.
+const runtimeEnvMaxEcho = 64
+
+// requireRuntimeEnv is the SPINE_ENV startup gate of `spine serve` and
+// `spine secrets reencrypt` (INIT-024 TASK-007, review finding N-16). It
+// returns the normalized value, or an error naming the three accepted
+// values when SPINE_ENV is unset, blank or anything else.
+//
+// Every production gate keys on the exact value "production": the
+// SPINE_SECRET_ENCRYPTION_KEY and SPINE_CODE_REPO_BASE requirements, the
+// SMP_ADMIN_TOKEN strength refusal, the SPINE_DEV_MODE refusal and the
+// pooled bootstrap's strict collision handling. resolveRuntimeEnv maps an
+// unset or mistyped value ("prod", "prodution") to "", which took the
+// non-production branch of every one of them, so a deployment that
+// forgot or misspelled the variable silently ran with plaintext webhook
+// secrets, a weak platform bearer and dev-mode auth allowed. Refusing to
+// start makes the choice explicit: the only ways to leave the production
+// gates off are SPINE_ENV=staging and SPINE_ENV=development, written
+// down. Owner question 2 default (refuse rather than treat unset as
+// production), pending the owner.
+//
+// An accepted spelling is any ASCII case of the three words with
+// surrounding whitespace, which resolveRuntimeEnv maps to exactly that
+// word, so no accepted value can reach a gate as anything else. The
+// refusal quotes an unknown value (bounded, %q-escaped): SPINE_ENV is not
+// a secret.
+func requireRuntimeEnv() (string, error) {
+	if env := resolveRuntimeEnv(); env != "" {
+		return env, nil
+	}
+	raw := os.Getenv("SPINE_ENV")
+	const accepted = "set it to production, staging or development (the production startup gates apply only to SPINE_ENV=production)"
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("SPINE_ENV is not set; %s", accepted)
+	}
+	shown := raw
+	if len(shown) > runtimeEnvMaxEcho {
+		shown = shown[:runtimeEnvMaxEcho] + "..."
+	}
+	return "", fmt.Errorf("SPINE_ENV=%q is not a known runtime environment; %s", shown, accepted)
 }
 
 // devModeEnabled reports whether SPINE_DEV_MODE is set to an

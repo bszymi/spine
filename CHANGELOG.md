@@ -6,6 +6,89 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-003 TASK-007: session and auth hygiene)
+
+Closes review findings N-14, N-15, N-16 and N-17 (all P3, standalone `spine serve`). No runtime
+schema change. SMP embeds none of the changed server packages; `core/evidence` gains additive
+fields only.
+
+### Security
+
+- **Open event streams re-validate their bearer (N-14).** `GET /api/v1/events/stream` checked the
+  bearer once, at connect, so a stream kept delivering a workspace's events after its token was
+  revoked or expired, its actor suspended, or its `events.read` role lost. Every heartbeat (30 s)
+  now re-runs those checks against the stream's own bearer and closes the stream with a
+  `: reauthentication required` comment frame when one fails — or when the check cannot complete
+  (fail closed). The reconnect gets the normal `401`.
+- **No workspace is built for an unauthenticated request (N-15).** In shared mode
+  (`WORKSPACE_RESOLVER=db` or `platform-binding`) the workspace middleware built the workspace's
+  ServiceSet — database pool, bootstrap admin, secret sweep — before the bearer was looked at, and a
+  build failure answered `500` where a missing workspace answered `401`. The ServiceSet is now built
+  only for a request with a well-formed bearer (it is needed to validate it), and every refusal
+  before the bearer is validated — missing or malformed header, unresolved, inactive or unbuildable
+  workspace, missing auth service, unknown, expired or revoked token, suspended actor, token-store
+  error — is one `401` with one body, and a request without a well-formed bearer is refused before
+  the workspace is resolved (no registry query or platform binding fetch). On `/git` in shared mode
+  every failure of a well-formed bearer is the uniform `401` too, where a build failure or a
+  missing auth service answered `503` and a token-store error `500`; the `/git` cases of a missing
+  or malformed header and of a push with receive-pack off are made uniform by INIT-024 TASK-006.
+  Causes are logged at `Warn`/`Error`.
+- **A workspace connection string never reaches an error or a log.** pgx's parse error quotes the
+  workspace's `database_url` and masks only a userinfo password, so a password given as a query
+  parameter appeared in `pool.Get` errors, in the multi-workspace projection sync's `Error` log on
+  every poll and in the shared-mode request path. The pool now reports the parse reason without
+  the string (`workspace.ErrInvalidDatabaseURL`), and masks the string's credentials in connect and
+  ping errors.
+- **`SPINE_ENV` is required (N-16).** `spine serve` and `spine secrets reencrypt` refuse to start
+  unless `SPINE_ENV` is `production`, `staging` or `development` (case and surrounding whitespace
+  ignored). An unset or mistyped value used to run every production gate — secret key required,
+  `SPINE_CODE_REPO_BASE` required, weak `SMP_ADMIN_TOKEN` refused, `SPINE_DEV_MODE` refused — on its
+  lenient branch.
+- **Run-branch evidence is labelled unverified (N-17).** `run.status` showed evidence read from the
+  author-writable run branch as fact. Each repository entry now says where it was read from and
+  whether that is the authoritative branch, and `spine run inspect` marks the rest `UNVERIFIED`.
+
+### Changed (standalone)
+
+- **Boot:** `SPINE_ENV` must be set. The shipped `docker-compose.yaml` sets
+  `SPINE_ENV=development`; set your deployment's value explicitly (owner question 2 default:
+  refuse rather than treat unset as production, pending the owner).
+- **Wire, shared mode:** pre-authentication `401`s on `/api/v1` are all `authentication required`
+  (they used to carry `authorization header required`, `invalid authorization header format`,
+  `invalid token`, `token expired`, `token revoked` or `actor suspended`). A caller whose workspace
+  cannot be built, or whose token store errors, gets that `401` instead of `500`/`503`. Single
+  mode is unchanged.
+- **Wire, `run.status`:** each `evidence.repositories[]` entry gains `source_ref` and `verified`
+  (always serialized), and `evidence` gains `unverified_repositories` (omitted when empty).
+- **SSE:** a stream whose bearer stops validating closes at the next heartbeat; clients reconnect.
+
+### Upgrade note: set `SPINE_ENV` before upgrading
+
+`spine serve` and `spine secrets reencrypt` no longer start without `SPINE_ENV`. Before rolling
+this out, add `SPINE_ENV=production` (or `staging` / `development`) to every deployment manifest,
+compose file, systemd unit and job that runs either command; a process that used to start with it
+unset, or misspelled (`prod`, `Production1`), now exits with `SPINE_ENV is not set` / `… is not a
+known runtime environment`. A deployment that ran unset in production was running with the
+production gates off: before it sets `SPINE_ENV=production`, it must also meet them — a
+`SPINE_SECRET_ENCRYPTION_KEY`, an absolute `SPINE_CODE_REPO_BASE`, an `SMP_ADMIN_TOKEN` of at least
+32 characters and 8 distinct characters (or none), and `SPINE_DEV_MODE` off — or it will refuse to
+start on the next gate. The shipped `docker-compose.yaml` sets `SPINE_ENV=development`.
+
+### Changed (embedders)
+
+- `evidence.RepositorySummary` gains `SourceRef string` (`source_ref,omitempty`) and `Verified bool`
+  (`verified`, always serialized); `evidence.RunSummary` gains `UnverifiedRepositories []string`
+  (`unverified_repositories,omitempty`). `Querier.SummarizeForRun` marks a record verified only when
+  it was read from its authoritative branch (`main`, or `WithPrimaryBranch`) and that is not the
+  run's own branch; `BuildSummary` does the same against `main`, so a direct caller passing `HEAD`
+  gets unverified records. Ref selection, `Status` and every other field are unchanged. SMP does not
+  import `core/evidence`.
+- (Standalone-internal, listed for completeness: `service/internal/workspace.BuildPgxpoolConfig`
+  and `NewWorkspaceDBPool` return `ErrInvalidDatabaseURL` with the parse reason instead of pgx's
+  `*pgconn.ParseConfigError`; `service/internal/...` is not importable by embedders.)
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-003 TASK-006: workspace-scoped trusted-CIDR clone)
 
 Closes review finding N-2 (P2, standalone shared mode). No runtime schema change. Standalone

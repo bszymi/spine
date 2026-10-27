@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,10 +90,19 @@ var ErrPoolSaturated = errors.New("workspace pool saturated")
 
 // BuildPgxpoolConfig parses databaseURL and applies the policy. The
 // returned *pgxpool.Config is suitable for pgxpool.NewWithConfig.
+//
+// A parse error never carries the connection string (INIT-024 TASK-007,
+// review round 1): pgconn's ParseConfigError quotes it, and redacts only a
+// userinfo password — a password given as a query parameter
+// (`?password=`, `sslpassword=`) is printed as is. Every caller logs or
+// returns this error: the pool's build error reaches the shared-mode
+// request path, MultiProjectionSync logs it at Error on every poll, and the
+// workspace endpoints surface it. connStringFreeError keeps the reason and
+// drops the string.
 func BuildPgxpoolConfig(databaseURL string, policy PoolPolicy) (*pgxpool.Config, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse database URL: %w", err)
+		return nil, fmt.Errorf("parse database URL: %w", connStringFreeError(err, databaseURL))
 	}
 	policy = policy.withDefaults()
 	cfg.MinConns = policy.MinConns
@@ -138,11 +150,11 @@ func NewWorkspaceDBPool(ctx context.Context, workspaceID, databaseURL string, po
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("open workspace pool: %w", err)
+		return nil, fmt.Errorf("open workspace pool: %w", connStringFreeError(err, databaseURL))
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("ping workspace pool: %w", err)
+		return nil, fmt.Errorf("ping workspace pool: %w", connStringFreeError(err, databaseURL))
 	}
 
 	wp := &WorkspaceDBPool{
@@ -439,4 +451,93 @@ func snapshotPoolGauges() []observe.PoolGaugeSnapshot {
 
 func init() {
 	observe.SetPoolGaugeProvider(snapshotPoolGauges)
+}
+
+// ErrInvalidDatabaseURL marks a workspace connection string pgx could not
+// parse. The wrapping error carries pgx's reason, never the string itself.
+var ErrInvalidDatabaseURL = errors.New("invalid database connection string")
+
+// connStringFreeError returns err with nothing of databaseURL's
+// credentials in its text (INIT-024 TASK-007, review round 1).
+//
+//   - A *pgconn.ParseConfigError ("cannot parse `<string>`: <reason>") is
+//     replaced by ErrInvalidDatabaseURL with the reason only.
+//   - Any error's text (the reason included) then has every credential the
+//     string carries — userinfo password, password= and sslpassword= in
+//     the query or in key=value form — and the string itself replaced by
+//     "xxxxx". Connect and ping errors (pgconn.ConnectError names host,
+//     user and database) normally carry none and keep their wrapping.
+//
+// A replaced error does not wrap the original: its Error() is the leak.
+func connStringFreeError(err error, databaseURL string) error {
+	if err == nil {
+		return nil
+	}
+	secrets := connStringSecrets(databaseURL)
+	var parseErr *pgconn.ParseConfigError
+	if errors.As(err, &parseErr) {
+		reason := ""
+		msg := parseErr.Error()
+		if i := strings.LastIndex(msg, "`: "); i >= 0 {
+			reason = msg[i+len("`: "):]
+		}
+		reason = maskSecrets(reason, databaseURL, secrets)
+		if reason == "" {
+			return ErrInvalidDatabaseURL
+		}
+		return fmt.Errorf("%w: %s", ErrInvalidDatabaseURL, reason)
+	}
+	msg := err.Error()
+	if masked := maskSecrets(msg, databaseURL, secrets); masked != msg {
+		return errors.New(masked)
+	}
+	return err
+}
+
+// maskSecrets replaces the connection string and each credential in msg.
+func maskSecrets(msg, databaseURL string, secrets []string) string {
+	if databaseURL != "" {
+		msg = strings.ReplaceAll(msg, databaseURL, "xxxxx")
+	}
+	for _, s := range secrets {
+		msg = strings.ReplaceAll(msg, s, "xxxxx")
+	}
+	return msg
+}
+
+// connStringCredential matches a password or sslpassword setting in a
+// URL query or a key=value connection string, and a URL userinfo
+// password; it backs up url.Parse for strings it cannot parse.
+var connStringCredential = regexp.MustCompile(`(?:^|[?&\s])(?:ssl)?password\s*=\s*('[^']*'|[^&\s]+)|://[^/@:]*:([^@/]*)@`)
+
+// connStringSecrets lists the credential values databaseURL carries, in
+// raw and URL-decoded form. Values shorter than 3 bytes are left out:
+// replacing them would mangle the message without protecting anything.
+func connStringSecrets(databaseURL string) []string {
+	var out []string
+	add := func(v string) {
+		v = strings.Trim(v, "'")
+		if len(v) < 3 {
+			return
+		}
+		out = append(out, v)
+		if dec, err := url.QueryUnescape(v); err == nil && dec != v && len(dec) >= 3 {
+			out = append(out, dec)
+		}
+	}
+	if u, err := url.Parse(databaseURL); err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql") {
+		if pw, ok := u.User.Password(); ok {
+			add(pw)
+		}
+		for _, k := range []string{"password", "sslpassword"} {
+			for _, v := range u.Query()[k] {
+				add(v)
+			}
+		}
+	}
+	for _, m := range connStringCredential.FindAllStringSubmatch(databaseURL, -1) {
+		add(m[1])
+		add(m[2])
+	}
+	return out
 }

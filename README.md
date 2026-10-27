@@ -21,6 +21,7 @@ spine init-repo my-project
 # Start the runtime server (requires PostgreSQL)
 export SPINE_DATABASE_URL=postgres://localhost:5432/spine?sslmode=disable
 export SPINE_INSECURE_LOCAL=1   # acknowledges sslmode=disable for local use
+export SPINE_ENV=development    # required: production, staging or development
 spine migrate
 spine serve
 
@@ -46,7 +47,7 @@ spine validate --all
 
 | Variable | Purpose |
 |----------|---------|
-| `SPINE_ENV=production` | Activates production checks (refuses dev-mode auth bypass, requires secret encryption). `SPINE_GIT_HTTP_DEV_NO_AUTH` is refused unless `SPINE_ENV=development`. |
+| `SPINE_ENV=production` | **Required in every environment** (`production`, `staging` or `development`): `spine serve` and `spine secrets reencrypt` refuse to start when it is unset or unknown. `production` activates the production checks (refuses dev-mode auth bypass, requires secret encryption). `SPINE_GIT_HTTP_DEV_NO_AUTH` is refused unless `SPINE_ENV=development`. |
 | `SPINE_DATABASE_URL=…?sslmode=require` | `sslmode=disable` is refused unless `SPINE_INSECURE_LOCAL=1`. |
 | `SPINE_SECRET_ENCRYPTION_KEY` | Base64 32-byte AES-256 key for at-rest webhook-secret encryption. Generate with `openssl rand -base64 32`. |
 | `SPINE_SECRET_PREVIOUS_KEYS` | Optional. Comma-separated previous keys that still decrypt during a key rotation (never seal). |

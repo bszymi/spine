@@ -89,12 +89,29 @@ type RepositorySummary struct {
 	Actor       string                `json:"actor,omitempty"       yaml:"actor,omitempty"`
 	GeneratedAt *time.Time            `json:"generated_at,omitempty" yaml:"generated_at,omitempty"`
 
-	Checks         []CheckSummary               `json:"checks,omitempty"          yaml:"checks,omitempty"`
-	FailingChecks  []string                     `json:"failing_checks,omitempty"  yaml:"failing_checks,omitempty"`
-	PendingChecks  []string                     `json:"pending_checks,omitempty"  yaml:"pending_checks,omitempty"`
-	MissingChecks  []string                     `json:"missing_checks,omitempty"  yaml:"missing_checks,omitempty"`
-	Policies       []domain.ValidationPolicyRef `json:"policies,omitempty"        yaml:"policies,omitempty"`
-	ChangedPaths   *domain.ChangedPathsSummary  `json:"changed_paths,omitempty"   yaml:"changed_paths,omitempty"`
+	Checks        []CheckSummary               `json:"checks,omitempty"          yaml:"checks,omitempty"`
+	FailingChecks []string                     `json:"failing_checks,omitempty"  yaml:"failing_checks,omitempty"`
+	PendingChecks []string                     `json:"pending_checks,omitempty"  yaml:"pending_checks,omitempty"`
+	MissingChecks []string                     `json:"missing_checks,omitempty"  yaml:"missing_checks,omitempty"`
+	Policies      []domain.ValidationPolicyRef `json:"policies,omitempty"        yaml:"policies,omitempty"`
+	ChangedPaths  *domain.ChangedPathsSummary  `json:"changed_paths,omitempty"   yaml:"changed_paths,omitempty"`
+
+	// SourceRef is the Git ref the evidence record was read from (INIT-024
+	// TASK-007, review finding N-17). It is chosen by the reader
+	// (RefsForRun), never taken from the file — unlike BranchName, which
+	// is the record's own claim. Empty when Present is false.
+	SourceRef string `json:"source_ref,omitempty" yaml:"source_ref,omitempty"`
+
+	// Verified is true only when the record was read from the workspace's
+	// authoritative branch, which only a governed merge (or an operator
+	// override) writes. It is false for a record read from the run branch
+	// — or any other ref — which the run's author can push anything to:
+	// its status and check rows are the author's claim, not a server
+	// record, and readers must present them as unverified. "Verified"
+	// means "passed the run's governed merge", not a signature over the
+	// content. Always serialized, so a false is explicit (false, too,
+	// when Present is false).
+	Verified bool `json:"verified" yaml:"verified"`
 }
 
 // RunSummary is the top-level evidence summary for a Run, returned by
@@ -110,6 +127,14 @@ type RunSummary struct {
 	MissingRepositories []string            `json:"missing_repositories,omitempty"  yaml:"missing_repositories,omitempty"`
 	FailingRepositories []string            `json:"failing_repositories,omitempty"  yaml:"failing_repositories,omitempty"`
 	PendingRepositories []string            `json:"pending_repositories,omitempty"  yaml:"pending_repositories,omitempty"`
+
+	// UnverifiedRepositories lists the repositories whose evidence is
+	// present but not Verified (read from the author-writable run branch;
+	// INIT-024 TASK-007, N-17). Status rolls those records up like any
+	// other, so a "passed" headline with a non-empty list is a claim the
+	// run's author made, not one the server recorded. Lexically sorted;
+	// omitted when empty.
+	UnverifiedRepositories []string `json:"unverified_repositories,omitempty" yaml:"unverified_repositories,omitempty"`
 }
 
 // BuildSummary loads evidence for every affected repository on the
@@ -136,7 +161,22 @@ type RunSummary struct {
 // matches the loop's "sort emitted findings deterministically" rule
 // (loop-state.md, iter 21) and keeps the response byte-stable across
 // runs that touch the same repo set.
+//
+// Provenance (INIT-024 TASK-007, N-17): each present repository records
+// the ref it was read from (SourceRef) and is Verified only when that ref
+// is [PrimaryAuthoritativeBranchDefault] and not the run's own branch.
+// [Querier] passes its configured authoritative branch instead.
 func BuildSummary(ctx context.Context, reader GitReader, refs []string, run *domain.Run) (*RunSummary, error) {
+	return buildSummary(ctx, reader, refs, PrimaryAuthoritativeBranchDefault, run)
+}
+
+// buildSummary is BuildSummary with the authoritative branch named:
+// evidence read from exactly that ref is Verified, evidence read from any
+// other ref is not. A run whose branch name equals the authoritative ref
+// (never produced by the engine, which names run branches spine/run/...)
+// gets no verified evidence: the ref cannot then be told apart from the
+// author-writable one.
+func buildSummary(ctx context.Context, reader GitReader, refs []string, authoritative string, run *domain.Run) (*RunSummary, error) {
 	if run == nil {
 		return nil, fmt.Errorf("evidence: nil run")
 	}
@@ -154,7 +194,10 @@ func BuildSummary(ctx context.Context, reader GitReader, refs []string, run *dom
 	}
 
 	for _, repoID := range repos {
-		summary.Repositories = append(summary.Repositories, summarizeRepository(ctx, reader, refs, run, repoID))
+		repo := summarizeRepository(ctx, reader, refs, run, repoID)
+		repo.Verified = repo.Present && authoritative != "" &&
+			repo.SourceRef == authoritative && repo.SourceRef != run.BranchName
+		summary.Repositories = append(summary.Repositories, repo)
 	}
 
 	classify(summary)
@@ -188,6 +231,7 @@ func summarizeRepository(ctx context.Context, reader GitReader, refs []string, r
 			continue
 		}
 		populateFromEvidence(&out, res.Evidence)
+		out.SourceRef = ref
 		return out
 	}
 
@@ -305,6 +349,9 @@ func classify(s *RunSummary) {
 		return
 	}
 	for _, r := range s.Repositories {
+		if r.Present && !r.Verified {
+			s.UnverifiedRepositories = append(s.UnverifiedRepositories, r.RepositoryID)
+		}
 		switch {
 		case !r.Present:
 			s.MissingRepositories = append(s.MissingRepositories, r.RepositoryID)

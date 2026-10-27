@@ -42,11 +42,19 @@ func serveCmd() *cobra.Command {
 				return err
 			}
 
+			// SPINE_ENV must name a known environment (INIT-024
+			// TASK-007, N-16): an unset or mistyped value used to run
+			// every production gate below on its non-production branch.
+			// Checked before every other environment-dependent gate.
+			runtimeEnv, err := requireRuntimeEnv()
+			if err != nil {
+				return err
+			}
+
 			if err := validateOperatorToken(os.Getenv("SPINE_OPERATOR_TOKEN")); err != nil {
 				return err
 			}
 
-			runtimeEnv := resolveRuntimeEnv()
 			devMode := devModeEnabled()
 			if err := guardDevModeEnv(runtimeEnv, devMode); err != nil {
 				return err

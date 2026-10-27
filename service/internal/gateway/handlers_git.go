@@ -501,27 +501,20 @@ func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) (*domai
 		return nil, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format")
 	}
 
-	// Use workspace-scoped auth if available, otherwise server-level.
-	// The Release must run on every path that Get succeeded on — even
-	// when ss.Auth is nil or ValidateToken below fails — otherwise
-	// repeated auth failures leak pool references and eventually
-	// exhaust the workspace pool.
+	// Shared mode: the resolved workspace's own auth service only
+	// (validatePooledGitAuth, INIT-024 TASK-007). Otherwise the
+	// server-level one.
 	//
 	// cfg may be nil when the caller invoked us before workspace
 	// resolution succeeded (TASK-031 defers state-leaking workspace
 	// errors past the auth gate). Skip the pool lookup in that case
-	// — server-level auth still applies in single mode.
-	authSvc := s.auth
+	// — server-level auth still applies in single mode, and in shared
+	// mode (no server-level auth) handleGit answers the uniform 401.
 	if cfg != nil && s.servicePool != nil {
-		ss, err := s.servicePool.Get(r.Context(), cfg.ID)
-		if err == nil {
-			defer s.servicePool.Release(cfg.ID)
-			if ss.Auth != nil {
-				authSvc = ss.Auth
-			}
-		}
+		return s.validatePooledGitAuth(r, cfg.ID, token)
 	}
 
+	authSvc := s.auth
 	if authSvc == nil {
 		return nil, domain.NewError(domain.ErrUnavailable, "authentication not configured")
 	}
@@ -556,6 +549,65 @@ func (s *Server) logTrustedPeerResolveFailure(r *http.Request, workspaceID strin
 func isUnauthorizedError(err error) bool {
 	var se *domain.SpineError
 	return errors.As(err, &se) && se.Code == domain.ErrUnauthorized
+}
+
+// validatePooledGitAuth validates a /git bearer in shared mode against the
+// workspace's own auth service (INIT-024 TASK-007, review finding N-15 —
+// the /git half of authenticatePooled).
+//
+// The ServiceSet is built only here, after validateGitAuth has seen a
+// well-formed bearer. Until the bearer is validated every failure is the
+// gate's uniform 401 message, and its cause is logged instead:
+//
+//   - a ServiceSet build failure. It used to fall back to the
+//     process-level auth service, which shared mode leaves nil, and so
+//     answer 503 "authentication not configured" where a missing
+//     workspace answered 401 — an existence oracle for any caller sending
+//     "Bearer x";
+//   - a workspace whose ServiceSet has no auth service (same 503). It is
+//     never served by the process-level service either: that would check
+//     this tenant's bearer against another store;
+//   - a token-store error (it used to surface as a 500);
+//   - an unknown, expired or revoked token or an inactive actor, whose
+//     distinct messages ("invalid token", "token expired", ...) answered
+//     only for a workspace that resolved. (INIT-024 TASK-006 also makes
+//     handleGit answer every /git 401 with the uniform message, which
+//     covers the missing and malformed headers this function refuses
+//     before any build.)
+//
+// There is no fallback to the server-level auth service in shared mode,
+// whatever is configured: a test server that sets one on a pooled server
+// must give the workspaces' ServiceSets their auth instead.
+func (s *Server) validatePooledGitAuth(r *http.Request, workspaceID, token string) (*domain.Actor, error) {
+	log := observe.Logger(r.Context())
+	uniform := domain.NewError(domain.ErrUnauthorized, "authorization required for external git access")
+
+	// The Release must run on every path that Get succeeded on — even
+	// when ss.Auth is nil or ValidateToken below fails — otherwise
+	// repeated auth failures leak pool references and eventually
+	// exhaust the workspace pool.
+	ss, err := s.servicePool.Get(r.Context(), workspaceID)
+	if err != nil {
+		log.Warn("workspace services could not be built for a git request that is not yet authenticated; answering the uniform 401",
+			"workspace_id", workspaceID, "error", describePreauthErr(err))
+		return nil, uniform
+	}
+	defer s.servicePool.Release(workspaceID)
+	if ss.Auth == nil {
+		log.Error("workspace has no auth service (no runtime database?); answering the uniform 401",
+			"workspace_id", workspaceID)
+		return nil, uniform
+	}
+	actor, err := ss.Auth.ValidateToken(r.Context(), token)
+	if err != nil {
+		var se *domain.SpineError
+		if !errors.As(err, &se) || se.Code != domain.ErrUnauthorized {
+			log.Warn("git bearer validation failed on the workspace token store; answering the uniform 401",
+				"workspace_id", workspaceID, "error", describePreauthErr(err))
+		}
+		return nil, uniform
+	}
+	return actor, nil
 }
 
 // gitForwardingHeaders are request headers a proxy adds. Their presence
