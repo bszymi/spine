@@ -139,8 +139,12 @@ func TestIsReadOnly(t *testing.T) {
 		{"info refs receive-pack", "GET", "/info/refs", "service=git-receive-pack", false},
 		{"upload-pack POST", "POST", "/git-upload-pack", "", true},
 		{"receive-pack POST", "POST", "/git-receive-pack", "", false},
-		{"GET objects", "GET", "/objects/pack/pack-abc.pack", "", true},
+		{"GET objects", "GET", "/objects/pack/pack-0123456789abcdef0123456789abcdef01234567.pack", "", true},
 		{"GET HEAD", "GET", "/HEAD", "", true},
+		// INIT-024 TASK-004: a dumb-protocol GET is a read only at one of
+		// git-http-backend's own paths (protocol_path.go).
+		{"GET objects, not a pack name", "GET", "/objects/pack/pack-abc.pack", "", false},
+		{"GET below the repository root", "GET", "/.git/HEAD", "", false},
 		{"random POST", "POST", "/something", "", false},
 		// Review round 1 (INIT-023 TASK-015): git-http-backend keeps the
 		// last of a repeated parameter, url.Values.Get the first, so a
@@ -195,7 +199,8 @@ func TestIsReceivePack(t *testing.T) {
 		{"POST receive-pack", "POST", "/git-receive-pack", "", true},
 		{"POST upload-pack", "POST", "/git-upload-pack", "", false},
 		{"GET HEAD", "GET", "/HEAD", "", false},
-		{"GET objects", "GET", "/objects/pack/pack-abc.pack", "", false},
+		{"GET objects", "GET", "/objects/pack/pack-0123456789abcdef0123456789abcdef01234567.pack", "", false},
+		{"POST receive-pack below the repository root", "POST", "/.git/git-receive-pack", "", false},
 		// Review round 1 (INIT-023 TASK-015): any receive-pack value of a
 		// repeated service makes the request a push, whichever comes last.
 		{"info refs repeated service, receive-pack last", "GET", "/info/refs", "service=git-upload-pack&service=git-receive-pack", true},

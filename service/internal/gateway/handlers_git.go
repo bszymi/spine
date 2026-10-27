@@ -124,7 +124,14 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// url.ParseQuery does not (`service&git-receive-pack`), so such a
 	// request never takes a token-less read path, and the handler then
 	// refuses it with 400 (INIT-023 TASK-015 review round 2).
-	push := githttp.IsReceivePack(r)
+	//
+	// Both are decided on the git path the handler is handed (gitPath,
+	// relative to the repository), not on the /git/<ws>/... URL: the
+	// handler accepts exactly the protocol paths of the repository root
+	// (INIT-024 TASK-004), so the gateway and the handler classify the
+	// same bytes.
+	gitReq := withGitPath(r, gitPath)
+	push := githttp.IsReceivePack(gitReq)
 	// pushDisabled marks a canonical push request with the flag off: the
 	// handler refuses it with the flag's 403 before touching any
 	// repository. It is not an auth bypass (above); it only keeps the
@@ -132,7 +139,7 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// gets that 403 rather than a repository error. A non-canonical
 	// info/refs query is not one: the handler answers it 400 (wave 3
 	// review), after the auth gate like any other request.
-	pushDisabled := push && !githttp.IsNonCanonicalInfoRefs(r) && !s.gitHTTP.ReceivePackEnabled()
+	pushDisabled := push && !githttp.IsNonCanonicalInfoRefs(gitReq) && !s.gitHTTP.ReceivePackEnabled()
 	// The trusted-CIDR read bypass is scoped to the workspace the request
 	// resolved to (INIT-024 TASK-006, review finding N-2). It used to be
 	// decided from the peer address alone, so in shared mode a runner
@@ -316,6 +323,17 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.gitHTTP.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// withGitPath returns a shallow copy of r whose URL path is gitPath (the
+// query is kept), for the push and read classification, which matches the
+// exact path the git handler is handed.
+func withGitPath(r *http.Request, gitPath string) *http.Request {
+	u := *r.URL
+	u.Path, u.RawPath = gitPath, ""
+	c := r.WithContext(r.Context())
+	c.URL = &u
+	return c
 }
 
 // parseGitPath extracts the workspace ID, optional repository ID, and
