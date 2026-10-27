@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: "Checkout and merge amplification budget, pre-receive tree limits, SMP-facing MeasureTree"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
@@ -132,9 +132,11 @@ before a checkout.
   SMP's `CheckTreeDiff` today caps changed paths (`SMP_GIT_MAX_DIFF_PATHS=100000`) and tree-object
   size but never sums blob bytes, so it admits ~400 GiB. SMP may call `git.MeasureTree`, or keep
   its own measure plus a differential test against `git.TreeBudget.Check`.
-- **Shared at the bump:** Spine's `CLIClient` refuses an over-budget tree. In practice SMP reaches
-  Spine's `EnterBranch` only in place (branch `""`, a measured no-op), so the behaviour SMP picks
-  up is the availability of `git.MeasureTree`; its own checkouts stay SMP's responsibility.
+- **Nothing changes at the bump** (as built; Deviation 1): the budget is library opt-in — a
+  `CLIClient` without `WithTreeBudget` / `WithMutateTimeout`, in a process that never calls
+  `git.SetDefaultCheckoutLimits`, behaves exactly as before — and default-on only in `spine
+  serve`. What SMP picks up is the availability of `git.MeasureTree` / `git.TreeBudget.Check`; its
+  own checkouts stay SMP's responsibility.
 - The SMP companion task owns the receiver-side budget at SMP's `/git/{workspace}` gateway.
 
 ## Decisions
@@ -193,8 +195,10 @@ record both runs.
 
 ## Compatibility
 
-- **Shared behaviour change** (initiative §7b): Spine's git client now refuses an over-budget
-  checkout or merge, by default.
+- **Not a shared behaviour change** (as built; Deviation 1): the library budget is opt-in, with
+  the zero value = today's behaviour; it is on by default only in `spine serve`, which refuses an
+  over-budget checkout, merge (measured by its result tree), clone or push. The initiative §7b
+  row for TASK-003 should say so (TASK-010).
 - New env vars at `spine serve`: `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`,
   `SPINE_GIT_TREE_MAX_PATH_BYTES`, `SPINE_GIT_MUTATE_TIMEOUT`.
 - `MeasureTree`, `TreeBudget`, `WithTreeBudget`, `WithMutateTimeout` and `ErrTreeTooLarge` are
@@ -219,3 +223,393 @@ record both runs.
   touches the semaphore. TASK-005 rebases on this task.
 - `service/cmd/spine/main.go`: this task registers `git-hook`.
 - `adapters/git/branchwrite.go`, `treebudget.go`: this task only.
+
+---
+
+## Implementation Notes
+
+*(Implementation, 2026-10-23. Branch `init/INIT-024-TASK-003-checkout-merge-amplification-budget`, cut
+from `init/INIT-024-scaffold` `12376b55` (= `a560c210` + the INIT-024 artifacts; no code differs). Run
+on macOS, git 2.54.0, go 1.26.5, and on git 2.39.5 in the local `golang:1.26-bookworm` image for the
+`git-floor` job. Scratch logs: SMP repo `tmp/init027-orchestration/i24/t003/`.)*
+
+### Rulings and owner-question defaults (recorded, pending the owner)
+
+- **Cross-repo rule (2) binds (orchestrator ruling), so the library budget is opt-in** — Design 2
+  argued default-on; see Deviation 1. `spine serve` turns it on by default.
+- **OQ1 — default taken:** 200,000 entries / 2 GiB / 16 MiB of path bytes, all configurable
+  (`git.TreeBudget`; `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`,
+  `SPINE_GIT_TREE_MAX_PATH_BYTES`).
+- **OQ2 — default taken as the `spine serve` value:** a 2-minute mutate deadline
+  (`SPINE_GIT_MUTATE_TIMEOUT`); the library default is none (rule 2), which is the OQ2
+  alternative's shape for embedders.
+- **INIT-024 OQ3 (standalone defaults) — applied:** no off switch; an unset variable is the
+  default, any non-positive or unparsable value refuses to start. The pre-receive hook is on
+  whenever receive-pack is.
+
+### What was built
+
+| Commit | Change |
+|---|---|
+| `83c43684` | `adapters/git/treebudget.go` (new): `TreeBudget` (`Effective`, `Measure`, `Check`), `DefaultTreeBudget`, `MeasureTree`, `TreeStats`, `TreeLimit*`, `ErrTreeTooLarge` + `*TreeTooLargeError` in `*GitError{Permanent, TreeTooLargeMessage}`, `*MutateTimeoutError` in `*GitError{Permanent, MutateTimeoutMessage}`, `CheckoutLimits`, `SetDefaultCheckoutLimits` / `DefaultCheckoutLimits` (process default, `atomic.Pointer`), `WithTreeBudget`, `WithMutateTimeout`, `CLIClient.CheckoutLimits()`; the streamed `ls-tree -r -t -l -z --full-tree` parser (`treeListingSink`: running totals only, a partial record bounded by the path budget, stops and SIGTERMs git at the first crossing; read-class env via the extracted `commandEnv`); the `.gitattributes` expansion scan (Adversarial 1). `limits.go`: `DefaultTree*`, `DefaultMutateTimeout`. `cli.go`: `Checkout` (branch tree), `Merge` (target + source, before the switch), `Clone` (Adversarial 3), `runSink` deadline for local `opMutate` ops (not push), `measure_tree` op class. `commitbinder.go`: `mergeSHA` (MergeBound / Merge with SourceSHA), `ResetBranch` (`to` before `update-ref`), `runWith` deadline. `treelock.go`: restore switch to the home branch, `resetTreeOverRefusedSwitch`. `branchwrite.go`: `EnterBranchWithLimits` (`EnterBranch` = it with the process default): measure before `MkdirTemp`; with a deadline `worktree add --no-checkout` + own `reset --hard` (Adversarial 2); `enterInPlace` client carries the limits. `service/internal/githttp/budget_hook.go` (new): hook script, `installBudgetHook` (per receive-pack POST, atomic, never replaces a foreign hook or follows a link), `hooksPathEnv` (`core.hooksPath` pinned via `GIT_CONFIG_PARAMETERS`), `PreReceiveHookMain`, the package-`init` hook entry (`HookProcessEnv`, Deviation 4); `handler.go`: `Config.TreeBudget`, hook built in `NewHandler` (receive-pack on), installed + pinned in `ServeHTTP`. `service/cmd/spine`: hidden `git-hook pre-receive` (`cmd_git_hook.go`), `serve_checkout_limits.go` (`loadCheckoutLimits`, `installCheckoutLimits` before any client), `processTreeBudget` into the git handler. `core/worktreefs/scan_test.go` allowlist (function names moved). Docs: `KNOWN-LIMITATIONS.md` ("Checkout Budget"; the "Not covered" line), `docs/integration-guide.md` (§7 hook paragraph; four env rows), `CHANGELOG.md`, `architecture/git-integration.md` §8.1. Tests below. |
+| `8407fb74` | Codex round 1 (2 x P2): the clone's separate `reset --hard` runs with the clone's own `-c` args and environment; Clone splits whenever a budget or a deadline is set. |
+| `121bd781` | Codex round 2 (P2): a failed or stopped clone checkout empties a pre-existing destination again. |
+| `34bdab7a` | Codex round 3 (P2): the shared tree's restore measures HEAD before its `reset --hard` (HEAD's ref can move under the tree with no measured checkout); docs. |
+| (this commit) | Implementation Notes; status In Progress; integration-guide wording of the hook script. |
+
+### Acceptance criteria — evidence
+
+"Red" = the test run against a `git archive` of `init/INIT-024-scaffold` (code = `a560c210`) with a
+compile-only shim declaring the new names with today's behaviour (`zz_redshim.go`: every option a
+no-op, `Measure`/`Check` nil, `EnterBranchWithLimits` = `EnterBranch`); for githttp the base variant
+of the test drops the two lines that configure a hook the base does not have
+(`tmp/.../t003/base/`, logs `red-*.log`). "Green" = the branch.
+
+| AC | Status | Evidence |
+|---|---|---|
+| 1 | done | `TestEnterBranch_RefusesOverBudgetTree` (PoC shape: one 4 KiB blob x 50 entries, budget 64 KiB; explicit limits and the process default). **Red:** "EnterBranch admitted the amplifying tree and wrote 51 files, 204950 bytes" (both subtests). **Green:** `ErrTreeTooLarge` (total_bytes), `TMPDIR` empty, one worktree registered; a small branch still enters. Also `TestEnterBranch_RefusesEntryAndPathBombs` (2,000 empty-blob entries; depth-150 tree; one 200-byte path) — red: all three "admitted". |
+| 2 | done | `TestMerge_RefusesOverBudgetTree` (branch source, `SourceSHA`, `fast-forward`, over-budget *target*, plus a within-budget merge), `TestMergeBound_RefusesOverBudgetTree`, `TestCheckout_RefusesOverBudgetTree`: refused, `main` at base, HEAD on main, `status --porcelain` empty, no `docs/`. **Red:** "err = <nil>, want ErrTreeTooLarge" in every subtest. |
+| 3 | done | `TestMeasureTree_CountsEntriesAndBytes`: blobs (file, executable, symlink), gitlink, directories, bytes and path bytes equal `git ls-tree -r -l` / `-r -t -z --name-only` through a branch, a commit and a tree id; a blob, a missing ref and an option-shaped tree-ish are errors. `TestMeasureTree_StopsAtFirstBudgetCrossing`: a 20,000-entry tree (listing > 1 MiB); for each limit the measure hook (`SetMeasureHookForTest`) shows the parser was handed < 1/4 of the listing and parsed <= 400 records; the default budget measures it to the end. New API, so no red. |
+| 4 | done | `TestTreeBudget_RealRepositoryPasses`: HEAD = 1,961 entries, 21,420,845 bytes, 133,291 path bytes, expansion 1 (git 2.39.5 container; >= 100x headroom on entries and path bytes, ~100x on bytes). |
+| 5 | done | `TestPrereceive_RefusesOverBudgetTreePush` (real `git push` through `Handler.ServeHTTP`): `remote: spine: push refused: "refs/heads/feature-bomb": tree exceeds the checkout budget (the tree's files total more than 65536 bytes (checkout budget MaxTotalBytes)); raise SPINE_GIT_TREE_MAX_BYTES to admit it` and `[remote rejected] (pre-receive hook declined)`; ref absent; the commit is not in the repository (quarantine discarded); a within-budget push lands. **Red:** `* ...:refs/heads/feature-bomb [new branch]` (the push lands). Also `TestPrereceive_BudgetHookCannotBeRedirected` (repo `core.hooksPath`, an edited Spine hook, a deleted hook, a foreign hook — red: lands), `TestBudgetHook_ScriptQuoting`, `TestBudgetHook_ProcessEntryRefusesMisuse`. |
+| 6 | done | `TestGitHookPreReceive_RefusesOverBudgetTip` (bytes and entries, each naming its variable), `_AdmitsWithinBudget` (two creates of one tip, a delete, default flags, empty input), `_RefusesUnmeasurable` (blob tip, missing object, malformed line, abbreviated id, bad flag, stray argument), `_IsHidden`. New command (absent at the base). |
+| 7 | done | `TestCLIClient_MutateTimeoutCancels` (300 ms deadline, a 5 s smudge filter): `Checkout` (runSink), `read-tree -m -u` (runWith) and `EnterBranchWithLimits` each return the permanent `*MutateTimeoutError` (`errors.Is` `context.DeadlineExceeded`) within 4 s, git's exit status is "terminated" (SIGTERM, macOS and Linux), no `index.lock`; without a deadline the same checkout completes. **Red:** "a command stopped at its deadline reported success" x 3. The worktree subtest first failed on the branch (5.1 s): Adversarial 2. Clone: `TestClone_MutateTimeoutBoundsTheCheckout` (codex round 1). |
+| 8 | done | `TestErrTreeTooLarge_IsPermanent`: permanent, not retryable, matches only `ErrTreeTooLarge`; read-bound errors never match it; the message names `MaxTotalBytes` and the limit and never echoes the tree-ish. |
+| 9 | done | Gates below: `go test ./...` all ok; `git-floor` rc=0; `scenario-git-http` rc=0. |
+| 10 | done | SMP gate below: no SMP change; only the two by-design gitread contract failures that SMP main has against `a560c210`. SMP's own N-1 half (CheckTreeDiff byte sum, `boundRunBranchCheckout`, `RealGitOperator.MergeBound`, the gateway receiver) is the SMP companion task (INIT-027 EPIC-005 TASK-011). |
+| 11 | done | `KNOWN-LIMITATIONS.md` "Checkout Budget" (bounds, opt-in/standalone, pre-receive, attribute expansion, non-atomicity, deadline, refusals) and the "Not covered" line; `docs/integration-guide.md` §7 + env table; `CHANGELOG.md` (Security / Changed (operators) / Changed (embedders)); `architecture/git-integration.md` §8.1. |
+
+### Adversarial self-review (ways around the budget)
+
+| # | Attempt | Result |
+|---|---|---|
+| 1 | *(Superseded by review round 2: the scanner described here was removed; attributes are now neutralised — see "Review round 2".)* **`.gitattributes` expansion** inside the byte budget: `ident` (4 → 47 bytes per `$Id$`, 71 with SHA-256), `text eol=crlf` (2x), `working-tree-encoding=UTF-32` (4x) | **Real, fixed.** Measured on git 2.54: 50,000 stored bytes under `* ident text eol=crlf` wrote 490,000; 16,008 under `* ident` wrote 188,148. The measure reads the tree's `.gitattributes` and applies the worst-case product of the expanding attributes they set. *(Superseded in review round 1: the first version's loose substring match and its jump to the worst case above 64 files refused legitimate trees; see "Review round 1", ruling 2.)* `TestTreeBudget_AttributeExpansionIsCounted` (ident, macro, UTF-32 refused; eol-only and `binary` admitted; the factor bounds what git really wrote) — **red:** "admitted a tree that wrote 188148 bytes" (ident), 188169 (macro), 64178 (UTF-32). `TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase`. |
+| 2 | **`worktree add` vs the deadline**: worktree add writes the tree in a child `git reset --hard` the SIGTERM never reaches | **Real, fixed** (the AC 7 worktree subtest took 5.1 s against a 300 ms deadline): with a deadline the worktree is added `--no-checkout` and filled by our own deadlined `reset --hard`. |
+| 3 | **`Clone`** writes the remote's default branch unmeasured (a code repository registered by a workspace admin) | **Real, fixed:** `--no-checkout`, measure HEAD, `reset --hard`; a refusal removes the clone. `TestClone_RefusesOverBudgetTree` — **red:** fails at the base. Codex rounds 1–2 hardened this path. |
+| 4 | **Hook recursion**: the hook execs `os.Executable()`, which in any test binary is the test binary — handed `git-hook pre-receive` it ran its whole suite inside git, recursively (found by the first full githttp run: 660 s, nested `remote: --- FAIL` lines) | **Fixed** by the package-`init` entry (`HookProcessEnv`, Deviation 4): every binary that can serve a push runs the hook before `main`/`TestMain`. The full githttp suite (every existing push test now passes through the real hook) runs in ~10 s. |
+| 5 | merge vs checkout vs worktree add vs read-tree vs restore | Checkouts, worktrees, read-trees and restores are measured before the command: `TestTreeBudget_ResetBranchIsBounded`, `TestTreeBudget_InPlaceRestoreIsBounded` (red: both fail at the base); the restore's own `reset --hard` of a moved HEAD was codex round 3's find. **Merges were not** (corrected in review round 1): each side was measured, never the union a merge leaves, so a result reached ~2x every limit and two merges from one base walked `main` over the budget — now the merge's result tree is measured (review round 1, ruling 1). `CommitFilesOnto`'s private-index `read-tree` (no `-u`) writes only an index of a bound, already-measured commit. |
+| 6 | many small files / one huge blob / deep trees / long paths | entries / bytes / path bytes (AC 1 tests); a deep tree's paths sum quadratically, so depth is bounded too. |
+| 7 | packed vs loose, deltas | Sizes come from object headers (for a delta, its result-size header), independent of representation; AC 5 measures objects as pushed (pack, in quarantine), the adapter tests loose objects. |
+| 8 | symlinks / gitlinks | Counted as entries (`TestTreeBudget_GitlinksAndSymlinksCount`); a symlinked `.gitattributes` is the worst case. |
+| 9 | sparse checkout | The full tree is measured: an over-estimate, safe. |
+| 10 | pre-receive limit vs post-receive mutate path | Both measure (same budget in `spine serve`). Residual: a branch moved between the client's measure and git's switch is written at its new tip; in standalone every tip passed pre-receive. `MergeBound` merges the exact measured commit (KNOWN-LIMITATIONS). |
+| 11 | repeated small pushes that each pass | Every measure is of the whole tree, never a delta: `TestTreeBudget_RepeatedSmallPushesAreMeasuredWhole`. Residual: concurrent worktrees of different branches each get the full budget (no per-tenant quota; out of scope). |
+| 12 | redirecting or removing the hook | `core.hooksPath` pinned per receive-pack; hook rewritten each push; a foreign hook refuses pushes (AC 5 tests). |
+| 13 | not covered | smudge filter *drivers* the host configures (git-lfs), the host's `core.autocrlf`, package-level `StageAndCommit` (not deadlined; one staged file), a smudge filter left running after its git is stopped — all in KNOWN-LIMITATIONS. |
+
+### Deviations
+
+1. **Library opt-in, not default-on** (orchestrator ruling: INIT-024 rule 2 binds). The zero value
+   of a client (no `WithTreeBudget` / `WithMutateTimeout`, no `SetDefaultCheckoutLimits`) measures
+   nothing, starts no extra process and keeps every argv (the argv itself is pinned by the
+   existing `TestRefGrammar_ArgvShape`, which passes unchanged; `TestTreeBudget_OffStartsNoProcess`
+   and `TestMerge_NoBudgetRunsNoMergeTree` only assert that no `ls-tree` / `merge-tree` runs —
+   corrected in review round 1). `spine serve` sets the
+   process default. So the initiative §7b Rule 4 row for TASK-003 ("Spine's client refuses an
+   over-budget tree") is **not** a shared-behaviour change at the bump — SMP behaviour is unchanged
+   until it opts in. TASK-010 should reconcile §7b and §5.
+2. **Mutate deadline:** library default none, `spine serve` 2 min; it covers local mutating
+   commands only (not `push` or a clone's fetch), and an expiry is *permanent*
+   (`MutateTimeoutMessage`).
+3. **Hook install point:** on every receive-pack POST in `ServeHTTP` (not cached in
+   `ensureReceivePackConfig`, which is untouched — smaller TASK-005 overlap; a removed hook is put
+   back before the next push), plus the `core.hooksPath` pin the design did not mention.
+4. **Hook entry:** besides the hidden `spine git-hook pre-receive`, githttp's package `init` runs
+   the hook when `SPINE_INTERNAL_GIT_HOOK=pre-receive` (the script exports it) — needed because the
+   hook execs the *installing* binary (Adversarial 4).
+5. **More exported API** than the design listed (additive): `CheckoutLimits`,
+   `SetDefaultCheckoutLimits`, `DefaultCheckoutLimits`, `CLIClient.CheckoutLimits`,
+   `EnterBranchWithLimits`, `TreeStats`, `TreeLimit*`, `TreeTooLargeError`, `TreeTooLargeMessage`,
+   `MutateTimeoutError`, `MutateTimeoutMessage`, `DefaultTree*`, `DefaultMutateTimeout`,
+   `MeasureTrace`, `TreeBudget.Effective/Measure`; githttp `Config.TreeBudget`,
+   `PreReceiveHookMain`, `Env*`, `HookProcessEnv`. No interface gained a method.
+6. **Entries include directories** (`ls-tree -r -t`); AC 3 compares files+gitlinks with
+   `ls-tree -r -l` and Entries with `ls-tree -r -t`.
+7. **Own streamed listing**, not TASK-004's (wave 3, not landed); TASK-004 may fold its sink into
+   `treeListingSink` when it rebases.
+8. **Beyond the design** (adversarial): attribute expansion, `Clone`, the worktree split.
+9. **`buildGitHTTPHandler`** takes the budget from the process default (no signature change; less
+   TASK-006 overlap in `serve_wiring.go`).
+10. A tag pointing at a blob is now refused at pre-receive (not measurable; operator-only refs).
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | rc=0 |
+| `make build`; `go build -o … ./cmd/embed-smoketest && ./embed-smoketest` | rc=0; rc=0 |
+| `go vet ./...` plain / `-tags integration` / `-tags scenario` | rc=0 / 0 / 0 |
+| `go test -p 4 ./...` | rc=0 at `34bdab7a` (an earlier run's only failure, `core/worktreefs TestNoUnconfinedWorktreeIO` naming the moved functions, was fixed in the allowlist) |
+| touched packages `-race` (`adapters/git`, `githttp`, `cmd/spine`) | rc=0 at `34bdab7a` |
+| integration `-tags integration` (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `core/artifact`, `core/workflow`), own DB `s24003_ci_final` (dropped) | rc=0 at `34bdab7a` |
+| `scenario-git-http` job: `TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*` | rc=0 at `34bdab7a` (87 / 26 / 130 passes, 0 skips) |
+| `git-floor` (golang:1.26-bookworm, git 2.39.5, `--pull=never`, read-only mounts): both CI steps + this task's githttp/cmd tests | STEP1 / STEP2 / EXTRA rc=0 at `34bdab7a`; a verbose run (at `83c43684`) showed every TASK-003 test PASS on 2.39.5, the SIGTERM exit status included |
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | rc=0 at `34bdab7a` |
+| golangci-lint v2.11.4 on touched packages vs the scaffold | 0 new issues (7 found and fixed: 5 errcheck, 2 builtinShadow); `--enable-only=gosec`: 0 issues |
+| `gofmt -l` on changed files | clean (`cmd_migrate.go` is pre-existing) |
+| codex | see below |
+
+### SMP compatibility gate
+
+Run twice — at `8407fb74` and at the final code commit `34bdab7a` (the worktree's only uncommitted
+files then were this artifact and a docs sentence), with identical results. `smp` (SMP main
+`3addd44b`, `../spine` = this worktree): `go build ./...` rc=0;
+`go vet` plain / integration / scenario / faultinject rc=0; `go test -race -p 4` over the
+initiative §5 packages (`cmd/customer-app`, `internal/customer/{githttp,gitread,projectionwriter,
+spinecore/...,spineembedded/...,stepevents,workspace/...,run/...}`, `internal/engine/...`): only
+`gitread` `TestClient_ErrorContractEqualsCLIClient/*/dangling_gitlink` and
+`TestClient_SpineReadFileRendersTheGitlinksPatch` — the two by-design contract tests SMP main fails
+against `a560c210` (RULES; identical in the TASK-001 gate); `dev/testgate` Spine-runtime leg PASS
+(2,143 passed, 0 failed, 3 allowed skips) and githttp leg PASS (588 passed, 1 allowed skip); no
+`ws_*` database or role left, and the `s24003_*` databases were dropped. No SMP change.
+
+### Codex (`codex review --base init/INIT-024-scaffold`, plain; model `gpt-6.1-sol` confirmed in each review sub-session)
+
+| Round | Review session | Findings | Disposition |
+|---|---|---|---|
+| 1 | `01a1682b-c43d-7b81-81b0-59ea78b92ae0` | P2 the clone's `reset --hard` lost `WithoutAmbientCredentials` isolation (host smudge filters/credentials); P2 a deadline-only client left the clone checkout undeadlined | Both real, fixed `8407fb74`; `TestClone_CheckoutKeepsTheCloneEnvironment`, `TestClone_MutateTimeoutBoundsTheCheckout` — red at `83c43684` (filter ran; 5.05 s), green |
+| 2 | `01a1690a-b77a-7c33-95ce-6ce0749eb1aa` | P2 a failed checkout into an existing empty directory left partial files | Real, fixed `121bd781`; `TestClone_FailedCheckoutLeavesTheDirectoryEmpty` — red at `8407fb74` (left `.gitattributes a.md`), green |
+| 3 | `01a16989-5013-74e1-8166-5e2c9a0fb172` | P2 `restoreHeld`'s `reset --hard` wrote an over-budget HEAD before (or without) the budgeted switch home — reproduced with `update-ref` of the checked-out home branch | Real, fixed `34bdab7a`; `TestTreeBudget_RestoreMeasuresHEADBeforeItsReset` — red at `121bd781` ("restore over an over-budget HEAD: <nil>"), green; KNOWN-LIMITATIONS: an over-budget home branch blocks the shared tree (fail closed) |
+| 4 | `01a169b6-8117-7eb1-82a9-f7f48dea370b` | none ("No actionable defects") | — clean at `34bdab7a` |
+
+### Not run
+
+- The full `make test-scenario` with a registry DB (only the CI job's three scenario groups; known
+  ~31 pre-existing failures). Command: `SPINE_TEST_DATABASE_URL=… SPINE_REGISTRY_TEST_DATABASE_URL=…
+  make test-scenario`.
+- GitHub CI (nothing is pushed; INIT-024 OQ1).
+- A Linux-host measurement of a real terabyte-class bomb: deliberately not run (disk safety); every
+  fixture expands to <= ~200 KiB even when not refused.
+
+### SMP adoption (for the SMP companion, INIT-027 EPIC-005 TASK-011)
+
+- **API.** Before each of its own checkouts and merges — `boundRunBranchCheckout`
+  (`internal/customer/spinecore/artifactservice.go`), `RealGitOperator.MergeBound`, and at its
+  `/git/{workspace}` receiver — SMP calls
+  `git.TreeBudget{MaxEntries: e, MaxTotalBytes: b, MaxPathBytesTotal: p}.Check(ctx, client.CLIClient, sha)`
+  with a `gitread.NewClient(clonePath)` client (its embedded `*git.CLIClient`), or
+  `git.MeasureTree` / `TreeBudget.Measure` for the `TreeStats`. A refusal is
+  `errors.Is(err, git.ErrTreeTooLarge)`; `errors.As(err, &*git.TreeTooLargeError)` gives `Limit`,
+  `Max`, `Seen` for the message (it never contains the sha). The measure requires the repository to
+  carry `git.NeutralCheckoutAttributes` last in `info/attributes` (`git.ErrNeutralAttributesMissing`
+  otherwise); SMP's own writer must write exactly that constant (TASK-018). Measure a commit or tree id
+  SMP already resolved, so the measured object is the one it then checks out. For a merge, check
+  its RESULT: after switching to the target, compute it with `git merge-tree --write-tree
+  <target-tip> <source>` (git >= 2.38) under `GIT_ALLOC_LIMIT` and `TreeBudget.Check` that tree —
+  the client path does exactly this (review rounds 1-2).
+  The measure inherits the process environment, so it also works inside a pre-receive hook (git's
+  quarantine variables).
+- **Optional:** `gitread.WithCLIOptions(git.WithTreeBudget(b), git.WithMutateTimeout(d))` turns the
+  budget and deadline on for every Spine `CLIClient` path SMP reaches (an in-place `EnterBranch` has
+  no home branch in SMP, so it measures nothing; `Clone` would split and measure);
+  `git.SetDefaultCheckoutLimits` does it process-wide. Either is opt-in; nothing changes at the bump.
+- **Knob names (suggested, mirroring Spine's):** `SMP_GIT_TREE_MAX_ENTRIES`,
+  `SMP_GIT_TREE_MAX_BYTES`, `SMP_GIT_TREE_MAX_PATH_BYTES`, `SMP_GIT_MUTATE_TIMEOUT`; same parsing
+  rule (unset = default, non-positive or unparsable refuses to start).
+- **Recommended SMP limits:** Spine's defaults — 200,000 entries, 2 GiB (2147483648), 16 MiB
+  (16777216), 2 min — except `MaxEntries` no higher than `SMP_GIT_MAX_DIFF_PATHS` (100,000 today) so
+  the two caps agree; SMP's own tree is 4,393 entries / 33 MB. A hosted multi-tenant pilot may take
+  OQ1's tighter alternative (50k / 512 MiB).
+- **Differential test:** if SMP keeps its own byte sum in `gitread.CheckTreeDiff`, pin it against
+  `git.TreeBudget.Check` on the same fixtures (the PoC bomb, an `ident` tree, a deep tree).
+
+### Review round 1 (2026-10-26; security + correctness lenses on `9263fbd1`; 0 P1)
+
+| Ruling | Finding | What was done | Tests (mutation / red) |
+|---|---|---|---|
+| 1 | P2 (both): merges measured by side, never by result — ~2x each limit; two admitted merges from one base push `main` over budget and everything wedges, deletes can't repair it | `treebudget_merge.go`: `checkMergeBudget` computes the result with `git merge-tree --write-tree --no-messages --name-only` on the target tip read **inside the working-tree hold** the merge already takes (`lockTree`; a governed merge's `WithWorkingTree` sequence) and measures that tree on all three limits before the switch; `sameMergeBase` re-reads HEAD after the switch and refuses (transient) a tip that moved. The target is measured alone only when the switch to it is a checkout (HEAD elsewhere); a result equal to the target's tree (up-to-date replay) is not measured; the source is never measured alone (it is never what a merge writes; on a fast-forward it *is* the result). Wired into `Merge` and `mergeSHA` (MergeBound / Merge with SourceSHA). Ordering guarantee: every in-process writer of a tree takes the same per-path hold, so a second merge waits for the first and computes on its result (`TestMerge_ConcurrentMergesSeeEachOther`); an out-of-process writer is caught by the post-switch tip check, except one that moves the checked-out branch between that check and `git merge` (KNOWN-LIMITATIONS). `git.CheckBudgetGitVersion` (>= 2.38); `spine serve` refuses to start below it. Startup warning: `workspace.WarnIfOverCheckoutBudget` measures HEAD once — at `spine serve` start (single mode) and when a shared-mode workspace's services are built — in a goroutine, and logs one Warn naming the limit, its variable and the remedy. KNOWN-LIMITATIONS "Bound", new "A merge is measured by its result", "Not atomic…", "An over-budget home branch…" rewritten; self-review row 5 corrected. | `TestMerge_ResultTreeIsMeasured` (correctness repro, Merge + MergeBound: two 61-entry branches from one base, MaxEntries 100 → second refused, main ≤ 100, no `d2/`, tree clean) — **red at `9263fbd1`** ("err = <nil>, want ErrTreeTooLarge", both paths; `red-rr1.log`); `TestMerge_DisjointSidesAreMeasuredTogether` (security repro: two disjoint 60 KiB sides, 64 KiB → refused; and path bytes); `TestMerge_RepairOfAnOverBudgetMainIsAdmitted` (121-entry main, MaxEntries 100: growing merge refused, up-to-date replay admitted, deleting merge admitted → ≤ 100) — the disjoint-sides, repair and concurrent tests also fail at `9263fbd1`; `TestMerge_SwitchToAnOverBudgetTargetIsMeasured`; `TestMerge_ConcurrentMergesSeeEachOther`; `TestMerge_TargetMovedAfterTheMeasureIsRefused` (both paths); `TestMerge_NoBudgetRunsNoMergeTree`; `TestCheckBudgetGitVersion`; `TestWarnIfOverCheckoutBudget`. Mutations, each caught: drop the result measure (6 tests fail), measure the target always (repair fails), drop the switch measure (2 fail), drop the up-to-date skip (repair fails), drop the moved-tip check (moved-tip fails). |
+| 2 | P2: `.gitattributes` heuristic (substring match; 188x above 64 files) | `treebudget_attrs.go`: every `.gitattributes` read in one `git cat-file --batch` (read bounds applied) up to 1 MiB of attribute text (each file at size + 64); parsed: comments, C-quoted patterns, `-a`/`!a`/`a=false`-style values ignored, whole names only (`text`, `text=auto`, `eol=crlf`, legacy `crlf`, `ident`, `working-tree-encoding` ≠ UTF-8, `filter`), `[attr]` macros expanded recursively (depth 8, cycles cut; every definition), built-in `binary`. Past the cap or for a symlinked `.gitattributes` → worst case with the reason. A `filter=<name>` whose smudge/process driver the git config defines → refused at any limit (`Expansion` +Inf), read with the clone's own environment for a budgeted clone (`measureEnv`). The refusal names the stored size, the factor and the attributes (`TreeTooLargeError.Stored/Reason`); the hook names the size it needs. | `TestTreeBudget_AttributeParsing` (26 cases incl. the "accidentally" comment, macros, cycles, quoted patterns, unsets), `TestTreeBudget_ReviewReproductionsAreAdmitted` (65 dirs of `* text=auto` → x2 admitted; "accidentally" + `*.bin -text` → x1 admitted — **red at `9263fbd1`**: refused "up to 188x" and "up to 23.5x"), `TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase` (70 harmless files read; > 1 MiB and symlink → worst case + reason), `TestTreeBudget_RefusalNamesTheFactor`, `TestTreeBudget_FilterDriverIsUnbounded`, `TestTreeBudget_AttributeExpansionIsCounted` (real `ident`, UTF-32 refused; `eol=crlf` x2 admitted) unchanged. |
+| 3 | P3: `limits.go` path-budget comment false; tree object > `GIT_ALLOC_LIMIT` unmeasurable | Comment corrected (one NUL per entry; ~16.2 MiB listing at both defaults; N-6); 16 MiB kept (OQ1). The alloc refusal now returns `TreeObjectTooLargeMessage` (says raising `SPINE_GIT_TREE_*` does not help; the allocation limit is 4x the per-blob limit; no `spine serve` knob, `WithMaxBlobBytes` / `WithMaxGitAllocBytes` for embedders); residual in KNOWN-LIMITATIONS. | `TestTreeBudget_TreeObjectOverTheAllocLimitSaysWhatItIs` |
+| 4 | P3: hook refuses blob tags; dedupe by commit id | `tipTrees`: one `git cat-file --batch-check` types every tip (`<oid>`, `<oid>^{}`, `<oid>^{tree}`); commit or tag-of-commit → its tree measured once per tree id; blob/tree tips admitted. | `TestGitHookPreReceive_AdmitsWithinBudget` (raw blob + tag of a blob), `TestBudgetHook_TagsArePeeledAndTreesMeasuredOnce` (`--tags` push with a GPG-key blob tag through the handler; 5 tags + a branch of one commit → 1 measure) |
+| 5 | P3: hooksPath override silent | `warnOverriddenHooks`: once per repo per handler, `git rev-parse --git-path hooks` (repo/global/system `core.hooksPath`) vs the pinned dir → one Warn naming the executable, non-sample hooks that will not run. | `TestBudgetHook_WarnsOnceWhenHooksPathIsOverridden` |
+| 6 | P3: refused clone refetched on every access | `gitpool`: an `ErrTreeTooLarge` clone failure → `domain.ErrPayloadTooLarge` (permanent, wraps the git error), remembered for 10 min keyed by clone URL + process budget; expired entries dropped; another remote or a changed budget is a fresh attempt. | `TestClient_CheckoutBudgetRefusalIsRememberedForATime` (3 accesses → 1 clone; after TTL, after a budget change, another remote → new attempts) |
+| 7 | P3 docs | README env table, `.env.example` (4 vars), `docs/git-push-guide.md` §5 (`spine: push refused …`, unmeasurable, `500 push gate unavailable`), this artifact's Compatibility and SMP impact (library opt-in; default-on only in `spine serve`), integration guide §7 (blob tips, hooksPath Warn, git >= 2.38, startup Warn), CHANGELOG. | — |
+| 8 | P3 (security P3-2): clone fetch neither size-bounded nor deadlined | **Documented, not changed**: git has no fetch-side `maxInputSize`, and a fixed deadline on the network part would fail legitimate large clones (the mutate deadline is 2 min). KNOWN-LIMITATIONS names the operator controls (code-repo base on its own filesystem/quota, egress policy, who may register code repos) and the refusal cache. | — |
+| 9 | false claims | Deviation 1 now cites `TestRefGrammar_ArgvShape`; the limits.go entry figures say which count (1,961 budget entries / 21,420,845 bytes for Spine HEAD, 1,624 files at a560c210). | — |
+
+**Handoffs (recorded, not implemented):**
+- **TASK-004:** collides in `cli.go` `runSink` (deadline block; env moved to `commandEnv`), the
+  `opClasses` map (gofmt realigned every line; `measure_tree` added), the `limits.go` const block
+  after `minSinkGrowth` and its header. It should NOT reuse `treeListingSink` as is (`ls-tree -l`
+  specific, keeps no paths): move its NUL-record core — bounded carry, stop + cancel on the first
+  refusal, unterminated-output check — into `listing.go` and build both on it (per-record caps
+  differ: 4096 vs the remaining path budget). Its kept-bytes / listing cap must be >= the path
+  budget + one byte per entry + a margin, or be derived from the budget (the 16 MiB path default
+  plus 200,000 NULs is ~16.2 MiB). Its premise "budget-bounded listings" does not hold for SMP
+  (the budget is opt-in there).
+- **TASK-005:** collides in `handler.go` `ServeHTTP` (hook install before `prereceive`, the CGI
+  `Env` append), `NewHandler` (`newBudgetHook`) and the `Handler` struct (`budgetHook`,
+  `hooksWarned`); `ensureReceivePackConfig` is untouched. The hook is a fresh process whose CGI
+  environment is built from scratch and that carries only budget flags (no DB, actor or run), so
+  N-9 needs a callback channel; per-push data must go through `cgiHandler.Env`, because the
+  per-repo script is shared and rewritten on every push (concurrent pushes would race on it).
+  Moving the semaphore slot after the command read would put the hook install outside the slot.
+
+**Commits (review round 1):** `30af374b` (rulings 1–9), `1480414c`, `3a3d15b3`, `366fc202` (codex
+below), `04cde224` (gosec G118: the start-of-life warning takes a detached context), and the notes
+commit.
+
+**Codex after review round 1** (`codex review --base init/INIT-024-scaffold`, plain; `gpt-6.1-sol`
+confirmed in each review sub-session; 3 rounds, the maximum):
+
+| Round | Review session | Findings (codex's rating) | Disposition |
+|---|---|---|---|
+| A1 | `01a17876-bdfa-7482-9465-5d7bc1a088df` | P1 a fan-out self-referencing macro (`[attr]loop loop …`, 20 ways) cost ~20^8 visits in Go, beyond any timeout; P1 the macro depth limit (8) hid the end of a longer chain (`ident`, a filter); P1 attributes past the scan cap could name a configured smudge driver, which the finite worst case does not bound | All real, fixed `1480414c`: macros are a worklist, each expanded at most once, no depth limit; past the cap (or a symlinked file) with any smudge/process driver configured on the host → refused (+Inf). `TestTreeBudget_MacrosAreExpandedOnceAndFully`, `TestTreeBudget_UnscannedAttributesWithAFilterDriverAreRefused` — **red at `30af374b`** ("did not finish in 5 s"; "err = <nil>") |
+| A2 | `01a1787a-6980-7dc3-a929-8c5fcbe21b72` | P1 `* ident\0hidden` sets ident in git (C-string line) but parsed as an unknown attribute: 480,000 bytes written under a 100,000-byte budget | Real, fixed `3a3d15b3`: a NUL ends the line and the scan reads on (superset of git's blob reader, which stops the file, and its worktree reader, which stops the line). Parsing cases + an end-to-end `nul-terminated` case in `TestTreeBudget_AttributeExpansionIsCounted` — **red at `1480414c`** ("admitted a tree that wrote 188155 bytes") |
+| A3 | `01a1788a-c263-7111-9407-715dde9221af` | P1 a macro named like a built-in attribute (`[attr]text ident` + `* text`) is expanded by git but was only classified | Real, fixed `366fc202`: every set name with a definition is expanded, whatever it also means. With it, checked against git 2.54: CR is a blank between pattern and attributes (`*\rident` sets ident — git wrote 48 bytes for `$Id$\n`), and an unclosed quoted pattern is split at the first blank (git drops the line; counting it only over-estimates). Cases in `TestTreeBudget_AttributeParsing` and `built-in-named macro` end to end — **red at `3a3d15b3`** ("wrote 188164 bytes"; "factor 2, want 23.5"; `*\rident` 1; filter behind the macro not found). No fourth codex round (the limit); these last changes were not codex-reviewed. |
+
+**Adversarial note (attribute parser vs git) — withdrawn in review round 2.** It claimed the scan
+was a superset of what git applies. It was not: a bare `[attr]` line (a glob pattern to git) and a
+quoted pattern git fails to unquote were still read differently, and a merge was measured under the
+current working tree's attributes. The scanner was removed (Review round 2).
+
+**Gates after review round 1** (all at `04cde224`; heavy legs under the shared heavy-suite lock):
+
+| Gate | Result |
+|---|---|
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | rc=0 |
+| `go test -p 4 ./...` | rc=0, no failures |
+| `scenario-git-http` (`TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*`), own DB | rc=0 (87 / 26 / 130 passes, 0 skips) |
+| integration (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `core/artifact`, `core/workflow`) | rc=0 |
+| `-race`: `adapters/git`, `githttp`, `cmd/spine` (ci.sh), `gitpool`, `workspace` (separately) | rc=0 |
+| `git-floor` (golang:1.26-bookworm, git 2.39.5, `--pull=never`): both CI steps, the githttp/cmd/gitpool/workspace budget tests, and a verbose run of `TestMerge_*` (`merge-tree --write-tree` on 2.39.5), `TestCheckBudgetGitVersion`, the attribute tests | STEP1 / STEP2 / EXTRA / EXTRA2 rc=0 |
+| golangci-lint v2.11.4 (touched packages incl. `gitpool`, `workspace`) vs the scaffold | 0 new (one new gosec G118 fixed in `04cde224`); `--enable-only=gosec`: 0 issues |
+| `gofmt -l` on changed files | clean |
+| SMP compatibility gate (`../spine` at `04cde224`; only this artifact uncommitted) | build and vet x4 rc=0; `-race` §5 packages: only the two by-design `gitread` contract tests; testgate runtime PASS (2,143 passed) and githttp PASS (588 passed); no `ws_*` / `s24003_*` databases left. No SMP change. |
+
+**Not run (review round 1):** a fourth codex round (the limit is three); GitHub CI (nothing is
+pushed); the full `make test-scenario` with a registry DB (command as above).
+
+### Review round 2 (2026-10-27; delta review of `1a2a8898`: 3 P1) — design change
+
+**Deviation 11 (design change, ruled by the coordinator on the reviewer's recommendation): the
+attribute scanner is removed and checkouts are made attribute-neutral instead.** The scanner tried
+to predict how git would expand a tree's content from its `.gitattributes`. Each round found inputs
+it read differently from git — codex rounds A1–A3 five, and this review two more (P1-A: a bare
+`[attr]` line is a glob pattern to git; P1-B: a quoted pattern git fails to unquote splits
+elsewhere) — and it could never see the operator's attribute files or config. So enforcement no
+longer predicts git: `git.NeutralCheckoutAttributes` (`* -text -ident -filter !eol
+!working-tree-encoding !conflict-marker-size`), the last line of `$GIT_COMMON_DIR/info/attributes`
+(highest precedence), turns every content conversion off for every checkout, merge and linked
+worktree, and the measure is plain stored bytes. `!merge` is deliberately not in the line: it would
+change `binary` and `merge=union` results (`TestNeutralAttributes_MergeDriversUnchanged`).
+
+| Ruling | What was done | Tests (red at `1a2a8898` / mutation) |
+|---|---|---|
+| 1 neutral attributes | `adapters/git/neutral_attributes.go`: `NeutralCheckoutAttributes`; `EnsureNeutralCheckoutAttributes` (locates the common dir, keeps operator lines in order, moves an earlier copy of the line to the end, idempotent — no rewrite when already last — atomic temp+rename, refuses a non-regular file / link); `HasNeutralCheckoutAttributes`; the measure's `requireNeutralCheckoutAttributes` (fail closed, permanent `ErrNeutralAttributesMissing`; the LAST attribute line must be the neutral one — comments and blanks after it are fine). Called by `spine serve` at start (single mode), in `buildServiceSet`, on every receive-pack POST (`installBudgetHook`, so the hook's measure and the served repo agree), in a budgeted `Clone` between `--no-checkout` and `reset --hard`, and by the gitpool when it reuses a clone in a budgeted process. The library stays opt-in: nothing writes the file unless the host calls the writer (or turns a budget on, which makes the measure require it). | `TestNeutralAttributes_EveryShapeWritesStoredBytes` — 17 shapes (the reviewer's combo; `ident`; `[attr]` as a pattern, with space and tab; `[attr]` + UTF-32; both failed-unquote shapes; NUL; CR; macro named like a built-in; 12-macro chain; UTF-32; `text eol=crlf`; `crlf`; `filter=` with a required host driver; attributes past 1 MiB; host config only) under a hostile global config (`core.attributesFile` `* ident text eol=crlf`, `core.autocrlf`, `core.eol=crlf`, `filter.x.smudge` `required=true`, diff3): a budgeted linked worktree and a budgeted main checkout each write exactly the measured stored bytes, on git 2.54 and 2.39.5 — **red at `1a2a8898`**: every shape wrote 98 KB–393 KB for ~10 KB stored, or was refused outright (`red-r2.log`); `TestNeutralAttributes_MergeDriversUnchanged`; `TestNeutralAttributes_EnsureKeepsOperatorLines`; `TestNeutralAttributes_MeasureFailsClosedWithoutTheLine`; line present after a budgeted clone, a push, a reused pool clone. Mutations: writer no-op → 12 tests fail; fail-closed check removed → `…MeasureFailsClosedWithoutTheLine` fails. |
+| 2 delete the scanner | `treebudget_attrs.go` deleted (356 lines); the listing sink's attribute fields, `TreeStats.Expansion/ExpansionReason/AttributeFiles`, `TreeTooLargeError.Expansion/Stored/Reason`, `bytesOver`, the `+Inf` host-filter refusal, `filterDrivers` and `measureEnv` removed; the measure is stored bytes, factor 1. The scanner's own tests were deleted (`AttributeParsing`, `…ScanCannotReadAreWorstCase`, `RefusalNamesTheFactor`, `FilterDriverIsUnbounded`, `MacrosAreExpandedOnceAndFully`, `UnscannedAttributes…`) or folded into the neutral shape table (`AttributeExpansionIsCounted`, `ReviewReproductionsAreAdmitted`, the codex A1–A3 shapes). | — |
+| 3 P1-C | `checkMergeTarget` (target tip; the target's tree when the switch is a checkout) runs before `switchTo`; `checkMergeResult` (merge-tree) runs AFTER it, in the working tree `git merge` sees, and the tip is re-checked after the switch and again after the measure. merge-tree and the measured `git merge` run under `GIT_ALLOC_LIMIT` = max(`MaxTotalBytes`, the read allocation limit) — 2 GiB by default — and an allocation refusal is a budget refusal (`MergeAllocRefusedMessage`). **Deviation 12:** the ruling said to reuse the existing tree-object limit (16 MiB); measured on git 2.54, `git merge` of a packed 20 MB file fails under it ("attempting to allocate 20000001 over limit 16777216 … packed object … is corrupt"), and `spine serve` has no setting to raise it, so the merge limit is the budget's own byte limit, floored at the read limit: no allocation a merge within the budget needs is larger than the bytes the budget admits. | `TestMerge_ConvergenceMarkersAreBoundedByTheNeutralLine` (HEAD main, run branch with `* conflict-marker-size=100000`, conflicting sides, 64 KiB budget: markers are 7 characters and the conflicted files stay within the budget — **red at `1a2a8898`**: 100,000-character markers); `TestMerge_ResultIsComputedInTheTargetsWorkingTree` (target-only `merge=union`: the measured tree is the committed tree, both paths — **red at `1a2a8898`**, and the "result before the switch" mutation fails it); `TestMerge_RunsUnderTheMergeAllocLimit` (a PATH wrapper records `GIT_ALLOC_LIMIT` for merge-tree and merge; none without a budget); `TestMerge_AllocRefusalIsABudgetRefusal` (a ~1.3 MB file changed on both sides under a 1 MiB limit). Mutation: dropping the limit fails both alloc tests. `TestMerge_TargetMovedAfterTheMeasureIsRefused` now moves the tip during the result measure and is caught by the second check. |
+| 4 docs | KNOWN-LIMITATIONS "Checkout Budget" rewritten ("Checkouts write stored bytes", "A merge is measured by its result" with the order and the allocation limit, the attribute bullet deleted, "Not atomic" names an out-of-process `info/attributes` edit); CHANGELOG "Changed (operators)": stored-byte checkouts (LFS pointers stay pointers), commit-side normalisation off, 7-character markers, dirty-once on upgrade, operator `merge.<name>.driver` and `pull.twohead` not neutralised; embedder API list updated; integration guide §7 and env table, git-push guide, architecture doc; code comments (`treebudget.go`, `treebudget_merge.go`, `neutral_attributes.go`). | — |
+
+**Handoffs (re-recorded after the deletion; these replace the round-1 handoffs):**
+- **TASK-004:** collides in `cli.go` `runSink` (the mutate-deadline block, the merge
+  `GIT_ALLOC_LIMIT` env and its refusal mapping; read env moved to `commandEnv`), the `opClasses`
+  map (`measure_tree` added; gofmt realigned it), the `limits.go` const block after `minSinkGrowth`
+  and its header. `treeListingSink` is now attribute-free (`budget`, `stop`, `stats`, `carry`,
+  `delivered`, `over`, `parseErr`): do not reuse it as is (it parses `ls-tree -l` and keeps no
+  paths); move its NUL-record core — the bounded carry, stop + cancel on the first refusal, the
+  unterminated-output check — into TASK-004's `listing.go` and build both on it (per-record caps
+  differ: 4096 vs the remaining path budget). Its kept-bytes / listing cap must be >= the path
+  budget + one byte per entry + a margin, or be derived from the budget (the 16 MiB path default
+  plus 200,000 NULs is ~16.2 MiB). The budget is opt-in for SMP, so "listings bounded by the
+  budget" does not hold there.
+- **TASK-005:** collides in `handler.go` `ServeHTTP` (hook install — which now also writes the
+  neutral attributes — before `prereceive`, the CGI `Env` append), `NewHandler` (`newBudgetHook`)
+  and the `Handler` struct (`budgetHook`, `hooksWarned`); `ensureReceivePackConfig` is untouched.
+  The hook is a fresh process with a from-scratch CGI environment and only budget flags (no DB,
+  actor or run): N-9 needs a callback channel, and per-push data must go through `cgiHandler.Env`,
+  because the per-repo script is shared and rewritten on every push. Moving the semaphore slot
+  after the command read would put the hook install outside the slot.
+- **TASK-018 (SMP bump/adoption):** SMP INIT-027 EPIC-005 TASK-011 writes an equivalent line into
+  SMP's pool clones with its own writer, which replaces the file whenever it differs (and its line
+  lacks `!conflict-marker-size`, SMP P2-1). TASK-018 must make Spine's exported
+  `git.NeutralCheckoutAttributes` the single source of the line, and make sure the two writers
+  never manage the same file (SMP's replace-on-difference writer and Spine's append-and-keep
+  writer would otherwise flip-flop). Until then a Spine budgeted measure on an SMP clone whose file
+  ends in SMP's line refuses (`ErrNeutralAttributesMissing`) — SMP does not call it today.
+
+**Codex budget.** This is a new design, so it gets a fresh codex budget of at most 2 rounds
+(deliberate, per the coordinator's ruling); rounds A1–A3 above reviewed the scanner, which no
+longer exists.
+
+**Commits (review round 2):** `87bc4680` (rulings 1–5) and this notes commit. Net for the round
+(`1a2a8898..87bc4680`): production Go +453 / −567 (−114; the 356-line scanner deleted, the
+~200-line neutral-attributes writer added), tests +613 / −363, docs the rest (+1,186 / −976 in all).
+
+**Codex (fresh budget for the new design, at most 2 rounds; `gpt-6.1-sol` confirmed):**
+
+| Round | Review session | Findings | Disposition |
+|---|---|---|---|
+| B1 | `01a17cdf-ef4c-7cf2-afef-6c57f85cbb74` | none ("No actionable regressions were identified"; it ran the adapters/git, gitpool, githttp, workspace and cmd/spine tests) | clean at `87bc4680`; no B2 needed |
+
+**Gates after review round 2** (all at `87bc4680`; heavy legs under the shared heavy-suite lock):
+
+| Gate | Result |
+|---|---|
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | rc=0 |
+| `go test -p 4 ./...` | rc=0, no failures |
+| `scenario-git-http` (`TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*`), own DB | rc=0 (87 / 26 / 130 passes, 0 skips) |
+| integration (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `core/artifact`, `core/workflow`) | rc=0 |
+| `-race` (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `workspace`) | rc=0 |
+| `git-floor` (golang:1.26-bookworm, git 2.39.5, `--pull=never`): both CI steps, the budget/hook tests, a verbose run of `TestMerge_*`, `TestCheckBudgetGitVersion` and `TestNeutralAttributes_*` (every shape: written == stored on 2.39.5) | STEP1 / STEP2 / EXTRA / EXTRA2 rc=0 |
+| golangci-lint v2.11.4 vs the scaffold | 0 new (3 new test-file issues fixed before the commit); `--enable-only=gosec`: 0 issues |
+| `gofmt -l` on changed files | clean |
+| mutations (`go test -overlay`, worktree untouched): writer no-op; fail-closed check removed; result measured before the switch; merge `GIT_ALLOC_LIMIT` removed | each caught (12 tests; `…MeasureFailsClosedWithoutTheLine`; `…ResultIsComputedInTheTargetsWorkingTree`; both alloc tests) |
+| red at `1a2a8898` (`git archive` + a compile-only shim, `red-r2.log`) | `TestNeutralAttributes_EveryShapeWritesStoredBytes` (17/17 subtests: 98–393 KB written for ~10 KB stored, or refused), `TestMerge_ConvergenceMarkersAreBoundedByTheNeutralLine` (100,000-character markers), `TestMerge_ResultIsComputedInTheTargetsWorkingTree` (both paths) |
+| SMP compatibility gate (`../spine` at `87bc4680`, clean) | build and vet x4 rc=0; `-race` §5 packages: only the two by-design `gitread` contract tests; testgate runtime PASS (2,143) and githttp PASS (588); no `ws_*` / `s24003_*` databases left. No SMP change. |
+
+**Not run (review round 2):** a second codex round (B1 was clean); the system gitattributes file
+and system git config (the hostile-config test uses the global ones; the line's precedence is the
+same over both); `pull.twohead` (Spine never pulls); GitHub CI (nothing is pushed); the full `make
+test-scenario` with a registry DB.
+
+### Review round 3 (2026-10-27; confirming review of `37103f52`: redesign holds, 0 P1/P2)
+
+| Ruling | What was done | Tests (red at `37103f52` / mutation) |
+|---|---|---|
+| 1 P3 upgrade | `CLIClient.EnsureNeutralWorkTree`: the writer, and — only when it adds the line to a repository with a work tree, an existing HEAD and tracked differences — HEAD's tree measured against the client's budget, an untracked-obstruction check, the tracked state quarantined (`git stash create`, an unreferenced commit, logged at Warn — what the shared tree's restore already does), then `reset --hard`. It takes the tree's hold only when it changes the file. Used for every pre-existing work tree: `spine serve` start (single mode), `buildServiceSet`, the gitpool's reuse of a clone, the git HTTP endpoint per push; a fresh budgeted clone keeps the plain writer (nothing is checked out yet). State a reset could lose: code-repository clones carry no uncommitted work between Spine's operations (a conflicted code-repo merge is aborted at once, `multi_repo_merge.go`), and anything tracked is quarantined, not discarded. Checked: the shared tree's restore does cover the home-branch case on its own (`TestNeutralAttributes_SharedTreeRestoreRenormalises`, green at `37103f52` too); code-repository clones have no home branch, so no restore — that was the defect. The CHANGELOG upgrade bullet now says exactly which trees are brought to stored bytes, when. | `TestClient_ReusedConvertedCloneIsRenormalised` (gitpool; `* text eol=crlf`, and the clone's own `core.autocrlf`; first merge after the upgrade succeeds) — **red at `37103f52`**: "Your local changes … would be overwritten by merge" (both); `TestNeutralAttributes_EnsureNeutralWorkTreeRenormalises` — **red**: "M a.txt" (both). Mutation (no reset): both fail. |
+| 2 P4 blank rules | `isNeutralLine` trims only git's blanks (space, tab, CR); `endsNeutral` treats a line as blank or a comment only after those blanks. | `TestNeutralAttributes_BlankRulesAreGits` (VT-/NBSP-led line after the line, VT-/NBSP-prefixed line, FF-suffixed line, VT-led "comment": each refused by the measure and repaired by Ensure; git-blank variants accepted) — **red at `37103f52`** for the four shapes `bytes.TrimSpace` accepted. Mutation (TrimSpace back): fails. |
+| 3 P4 nits | `limits.go` comment rewritten (stored bytes; the merge allocation limit); CHANGELOG commit side adds `-filter` (no clean filter on add; an LFS path written through Spine on a git-lfs host is stored as its full content) and `!working-tree-encoding` (no re-encoding on add); serve-start Ensure only in single mode (shared mode: `buildServiceSet` per workspace); the writer refuses a directory that is not the top of its repository (`requireRepositoryTop`: `--show-toplevel`, or `--absolute-git-dir` for a bare repository), so it never writes into a repository that merely contains the cwd; the measured `git merge` runs with `LC_ALL=C` beside its `GIT_ALLOC_LIMIT`. | `TestNeutralAttributes_EnsureWritesOnlyAtTheTop` — **red at `37103f52`** (the parent repository's file was written). Mutation (top check off): fails. |
+| 4 P4 merge memory | KNOWN-LIMITATIONS: `GIT_ALLOC_LIMIT` caps single allocations, not the git child's RSS (~10x a large file changed on both sides; pre-existing); operator controls: the server's memory limit, a byte budget whose ~10x fits it, keeping very large files out of merged branches. | — |
+
+**Codex after review round 3** (`codex review --base init/INIT-024-scaffold`, plain; the last
+round of the fresh budget; model `gpt-6.1-sol` confirmed in the review sub-session):
+
+| Round | Review session | Findings | Disposition |
+|---|---|---|---|
+| B2 | `01a17dde-73be-7e30-a87d-23ac02375186` (on `69aa1988`) | P2 "Retry unfinished worktree renormalization": a renormalisation that failed after the line was written (HEAD over the budget, a cancelled request) was never retried — every later call found the file ending in the line and returned success, leaving the tree converted | Real, fixed `5636c02d`: the work tree is marked (`spine-renormalise-pending` in its own git directory, created `O_EXCL` before the line is written; never in a bare repository) and the mark is cleared only once the tree is at its stored bytes, found clean, or has an unborn HEAD; a marked tree is renormalised by the next call under the tree's hold, rechecking the mark after the wait. Follow-on `e57a6741`: the retry would have made the git HTTP endpoint refuse every push to a served tree whose renormalisation cannot finish yet (the push that would repair it included), though the hook's measure needs only the line; errors after the line is in place now match `git.ErrRenormalisePending` (the cause still matches) and the hook install warns and goes on for them; the gitpool's reuse and the workspace build keep reporting them. Caller log messages and CHANGELOG / KNOWN-LIMITATIONS / package comment updated. |
+
+Tests: `TestNeutralAttributes_FailedRenormalisationIsRetried` (adapters/git: first call refused on
+an over-budget HEAD as `ErrRenormalisePending`, refused again while still over, then a client whose
+budget admits HEAD renormalises and the merge succeeds; afterwards a call with the tight budget is a
+no-op and leaves a fresh edit alone) — **red at `69aa1988`** ("a retry while HEAD is still over the
+budget: want the refusal again, got <nil>"; run before the sentinel existed, without its
+`errors.Is` check); `TestBudgetHook_PendingRenormalisationDoesNotStopThePush`
+(githttp: a served work tree with an untracked file where a tracked directory was — pushes land and
+warn while pending; once the file is gone the next push restores the tree and stops warning) —
+**red at `5636c02d`** ("push 0 with the renormalisation pending was refused"). Mutations (`go test
+-overlay`, worktree untouched): marker never written — both tests and
+`…EnsureNeutralWorkTreeRenormalises` fail; marker cleared before renormalising — both fail; the
+`ErrRenormalisePending` wrap removed — both fail. No further codex round (B2 was the last of the
+budget); the two fixes are covered by the red runs and mutations above.
+
+**Gates after review round 3** (all at `e57a6741`; heavy legs under the shared heavy-suite lock):
+
+| Gate | Result |
+|---|---|
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | rc=0 |
+| `go test -p 4 ./...` | rc=0, no failures |
+| `scenario-git-http` (`TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*`), own DB | rc=0 (87 / 26 / 130 passes, 0 skips) |
+| integration (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `core/artifact`, `core/workflow`) | rc=0 |
+| `-race` (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `workspace`, `core/worktreefs`) | rc=0 (also run before each commit) |
+| `git-floor` (golang:1.26-bookworm, git 2.39.5, `--pull=never`): both CI steps, the budget/hook tests (incl. `TestBudgetHook_PendingRenormalisationDoesNotStopThePush`), a verbose run of `TestMerge_*`, `TestCheckBudgetGitVersion`, `TestNeutralAttributes_*` (9 tests, incl. `…FailedRenormalisationIsRetried`) | STEP1 / STEP2 / EXTRA / EXTRA2 rc=0 |
+| golangci-lint v2.11.4 on the touched packages | the same findings as at round 2 (0 new vs the scaffold); `--enable-only=gosec`: 0 issues |
+| `gofmt -l` on changed files | clean |
+| `TestNoUnconfinedWorktreeIO` | passes (allowlist: the marker's three helpers — a fixed name in git's own directory) |
+| SMP compatibility gate (`../spine` at `e57a6741`; its one uncommitted file was this artifact) | build and vet x4 rc=0; `-race` §5 packages: only the two by-design `gitread` contract tests (as at round 2); testgate runtime PASS (2,143) and githttp PASS (588); no `ws_*` / `s24003_*` databases left. No SMP change. |
+
+**Not run (review round 3):** a codex round on `5636c02d` / `e57a6741` (the budget ended at B2);
+a crash between the marker and the line on a real host (the order — marker first — is what a
+crash relies on; the retry itself is tested); a pre-existing linked worktree of a converted clone
+(Spine's worktrees are its own, made after the line with `--no-checkout` + reset); GitHub CI
+(nothing is pushed); the full `make test-scenario` with a registry DB.

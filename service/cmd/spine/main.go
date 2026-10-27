@@ -82,6 +82,7 @@ func main() {
 	root.AddCommand(discussionCmd())
 	root.AddCommand(workspaceCmd())
 	root.AddCommand(repositoryCmd())
+	root.AddCommand(gitHookCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

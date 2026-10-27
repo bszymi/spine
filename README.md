@@ -58,6 +58,8 @@ spine validate --all
 | `SPINE_TRUSTED_PROXY_CIDRS` | CIDRs of reverse proxies whose `X-Forwarded-For` Spine should trust for rate-limiting. A request from one of them never gets token-less git access. |
 | `SPINE_DEV_MODE` | Development only (refused in production): lets unauthenticated requests through the `/api/v1` auth gate. Does not affect `/git`. |
 | `SPINE_GIT_HTTP_DEV_NO_AUTH` | Development only: `/git` clones and fetches need no token. Refused at startup unless `SPINE_ENV=development`; pushes always need a token. |
+| `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`, `SPINE_GIT_TREE_MAX_PATH_BYTES` | Checkout budget (defaults 200000 entries, 2147483648 bytes, 16777216 path bytes): a tree over it is never checked out, merged, cloned or accepted in a push. Positive integers only (no off switch); an invalid value refuses to start. Needs git >= 2.38. See `KNOWN-LIMITATIONS.md` "Checkout Budget". |
+| `SPINE_GIT_MUTATE_TIMEOUT` | Deadline of every local mutating git command (default `2m`; a positive Go duration). |
 
 ### Integrations
 

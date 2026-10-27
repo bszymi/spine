@@ -96,7 +96,17 @@ type runOpts struct {
 // and the read-only commands here parse the commit being merged, which the
 // merge itself then reads without an allocation limit (KNOWN-LIMITATIONS,
 // "Git read bounds").
+//
+// Every command it runs is local, and several materialise the working
+// tree (`read-tree -m -u`, `read-tree --reset -u`, `reset --hard`,
+// `switch`, `merge --abort`), so all of them run under the client's
+// mutate deadline (INIT-024 TASK-003, WithMutateTimeout); none when the
+// client has none.
 func (c *CLIClient) runWith(ctx context.Context, op string, o runOpts, args ...string) (string, string, error) {
+	parent := ctx
+	deadline := c.CheckoutLimits().MutateTimeout
+	ctx, cancelDeadline := withMutateDeadline(ctx, deadline)
+	defer cancelDeadline()
 	cmd := newGitCmd(ctx, args...)
 	cmd.Dir = c.repoPath
 	env := append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
@@ -112,6 +122,9 @@ func (c *CLIClient) runWith(ctx context.Context, op string, o runOpts, args ...s
 	cmd.Stderr = stderr
 	err := cmd.Run()
 	errText := stderr.String()
+	if err != nil && mutateDeadlineHit(parent, ctx, deadline) {
+		return stdout.String(), errText, mutateTimeout(op, deadline, err)
+	}
 	if stdout.overflow {
 		return "", errText, &GitError{Kind: ErrKindPermanent, Op: op, Message: "output exceeds read limit",
 			Err: &OutputTooLargeError{Op: op, Limit: limit}}
@@ -489,6 +502,13 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 	if err := c.verifyCommitOID(ctx, "merge", "source sha", opts.SourceSHA); err != nil {
 		return MergeResult{}, err
 	}
+	// The checkout budget (INIT-024 TASK-003): the target's tree when the
+	// switch is a checkout, before it; the merge's result after it, below.
+	// No budget: no process.
+	ours, err := c.checkMergeTarget(ctx, opts.Target, target)
+	if err != nil {
+		return MergeResult{}, err
+	}
 	var base string
 	if target != "" {
 		if err := c.switchTo(ctx, target); err != nil {
@@ -505,6 +525,17 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 			return MergeResult{}, err
 		}
 		base = strings.TrimSpace(head)
+	}
+	// The merge must run on the tip measured before the switch, and its
+	// result is measured in the working tree `git merge` now sees.
+	if ours != "" && base != ours {
+		return MergeResult{}, errMergeTargetMoved()
+	}
+	if err := c.checkMergeResult(ctx, ours, opts.SourceSHA); err != nil {
+		return MergeResult{}, err
+	}
+	if err := c.sameMergeBase(ctx, ours); err != nil {
+		return MergeResult{}, err
 	}
 	res, err := c.runMerge(ctx, opts, opts.SourceSHA)
 	if err != nil {
@@ -612,6 +643,15 @@ func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string
 	attached, err := c.headIsBranch(ctx, op, full)
 	if err != nil {
 		return err
+	}
+	// The checkout budget (INIT-024 TASK-003): when the tree will follow
+	// the ref, `to`'s tree is measured before the ref moves, so a refusal
+	// leaves the branch, index and tree as they are (and the take-back
+	// pending). No budget: no process.
+	if attached && to != expected {
+		if err := c.checkTrees(ctx, op, to); err != nil {
+			return err
+		}
 	}
 	if _, _, err := c.runWith(ctx, op, runOpts{},
 		"update-ref", "-m", "spine: take back a refused bound merge", "--end-of-options", full, to, expected); err != nil {

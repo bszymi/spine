@@ -6,6 +6,113 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-002 TASK-003: checkout and merge amplification budget)
+
+Closes review finding N-1 (P2): a push of a few KB could check out or merge into terabytes on the
+disk every workspace shares, because git stores a repeated object once and a checkout writes every
+occurrence (a 4,470-byte pack made `EnterBranch` write ~200 MB at `a560c210`). No runtime schema
+change.
+
+### Security
+
+- **Checkout budget in standalone.** `spine serve` now measures every tree its git client is about
+  to write — `EnterBranch` (before the worktree directory exists), `Checkout`, `Merge` and
+  `MergeBound` (by the merge's RESULT tree, computed with `git merge-tree --write-tree` on the
+  target tip, plus the target when the switch to it is a checkout), `ResetBranch`'s
+  `read-tree -m -u` and its `--reset -u` fallback, the shared tree's restore (`reset --hard` of
+  HEAD and the switch home), and `Clone` (now `--no-checkout`, measured, then `reset --hard`) —
+  and refuses one over 200,000 entries, 2 GiB of blob bytes or 16 MiB of summed path bytes,
+  before anything is written or any ref moves. Every budgeted repository carries
+  `git.NeutralCheckoutAttributes` last in `info/attributes`, so what a checkout writes is exactly
+  the stored bytes the measure sums (no attribute file or host setting can expand it); a merge is
+  measured by its result after the switch, under `GIT_ALLOC_LIMIT` = max(`MaxTotalBytes`, the read
+  allocation limit). The measure streams `git ls-tree -r -t -l -z`
+  (object headers only) and stops at the first crossing. `spine serve` now needs git >= 2.38 and
+  logs a Warn at start for a workspace tree already over the budget. New variables:
+  `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`, `SPINE_GIT_TREE_MAX_PATH_BYTES` (a
+  positive integer each; there is no off switch, and an invalid value refuses to start).
+- **Pre-receive tree limits.** With `SPINE_GIT_RECEIVE_PACK_ENABLED` on, the git HTTP endpoint
+  installs a real pre-receive hook in each served repository (`hooks/pre-receive`, running the
+  hidden `spine git-hook pre-receive`) and pins `core.hooksPath` for the receive-pack it runs. Every
+  pushed tip is measured after git unpacks the push into quarantine and before refs move; a tip over
+  the budget, or one it cannot measure, refuses the whole push with a `remote:` line naming the
+  limit and its variable.
+- **Mutate deadline.** Every local mutating git command `spine serve` runs (checkout, merge,
+  commit, the worktree checkout, the merge binding's and the restore's plumbing) has a wall-clock
+  deadline, `SPINE_GIT_MUTATE_TIMEOUT` (default `2m`); on expiry git is SIGTERMed and the operation
+  fails permanently. Push and a clone's fetch are not deadlined by it.
+
+### Changed (operators)
+
+- A governed merge of an over-budget run branch is a permanent merge failure; a branch-scoped
+  write to one fails with `git_error`; a push of one is refused at pre-receive.
+- The budget covers code-repository clients too (clone, checkout and merge): a code repository
+  larger than the defaults — a monorepo over 200,000 entries or 2 GiB — needs the limits raised.
+- A `pre-receive` hook Spine did not write in a served repository is never replaced: pushes are
+  refused (`500 push gate unavailable`) until it is moved aside. Hooks under a custom
+  `core.hooksPath` do not run for pushes served by Spine (one Warn per repository names them).
+  Blob and tree tips (a tag of a key) are admitted unmeasured.
+- A code-repository clone the budget refuses is a permanent (413-class) error, remembered per
+  remote and budget for 10 minutes instead of being fetched again on every access.
+- **Checkouts write stored bytes.** `spine serve` appends `* -text -ident -filter !eol
+  !working-tree-encoding !conflict-marker-size` as the last line of each served repository's
+  `info/attributes` (operator lines kept): no end-of-line conversion, `ident` expansion, smudge
+  filter or re-encoding on checkout — an LFS pointer stays a pointer.
+- **Commit-side normalisation is off** in those repositories: `git add` keeps CRLF content, does
+  not collapse `$Id: … $`, runs no clean filter (`-filter`: on a host with git-lfs, a file Spine
+  writes at an LFS path is stored as its full content, not a pointer) and does not re-encode
+  (`!working-tree-encoding`).
+- **Conflict markers are always 7 characters** in a conflicted merge, whatever
+  `conflict-marker-size` a tree sets.
+- **Upgrade: trees checked out with conversions are brought to their stored bytes once.** When
+  the line is first added to a repository with a work tree that was checked out with conversions
+  (a `text`/`eol`/`ident` attribute, or the host's `core.autocrlf`), its files would look modified:
+  the workspace tree (at `spine serve` start, or when a shared-mode workspace's services are
+  built), a code-repository clone the pool reuses, and a served repository on its first push each
+  have HEAD's tree measured, their tracked state quarantined into an unreferenced commit (logged at
+  Warn, as the shared tree's restore does) and `reset --hard` to the stored bytes. The shared
+  tree's restore would also repair the workspace tree on its first sequence. The tree is marked
+  (a file in its git directory) before the line is written and the mark is cleared only once the
+  tree is at its stored bytes or clean, so a renormalisation that fails or is interrupted (HEAD
+  over the budget, a tracked file in an untracked one's way, a cancelled request, a crash) is
+  retried by the next call — the next start, workspace build, reuse or push — and returns its
+  error meanwhile (matching `git.ErrRenormalisePending`). A push is not refused for it (its
+  measure needs only the line); it logs a Warn and the next push retries. A tree whose file
+  already ends in the line, with no mark, is not touched again.
+- Not neutralised (operator configuration): a host `merge.<name>.driver` and `pull.twohead`.
+- With the deadline on, `EnterBranch` adds its worktree `--no-checkout` and fills it with
+  `reset --hard`, so a worktree's `post-checkout` hook no longer runs.
+
+### Changed (embedders)
+
+- **Opt-in; nothing changes until you opt in** (INIT-024 rule 2). A `git.CLIClient` built without
+  the new options, in a process that never calls `git.SetDefaultCheckoutLimits`, measures nothing,
+  starts no extra git process and keeps every argv and context exactly as before; `git.EnterBranch`
+  likewise.
+- New API (adapters/git): `TreeBudget{MaxEntries, MaxTotalBytes, MaxPathBytesTotal}` (a field
+  <= 0 means its default; `DefaultTreeBudget()`, `Effective()`), `TreeBudget.Measure` /
+  `TreeBudget.Check(ctx, *CLIClient, treeish)`, `MeasureTree(ctx, *CLIClient, treeish)`,
+  `TreeStats`, `NeutralCheckoutAttributes`, `EnsureNeutralCheckoutAttributes` /
+  `HasNeutralCheckoutAttributes(ctx, repoDir)`, `CLIClient.EnsureNeutralWorkTree(ctx)` (the writer
+  plus the reset, retried until it succeeds, of a tree checked out with conversions;
+  `ErrRenormalisePending` while it has not), `ErrNeutralAttributesMissing` (a budgeted measure
+  on a repository without the line), `MergeAllocRefusedMessage`, `ErrTreeTooLarge` with the typed
+  cause `*TreeTooLargeError{Limit, Max, Seen}` inside `*GitError{Kind: ErrKindPermanent, Message: TreeTooLargeMessage}` (distinct
+  from `ErrBlobTooLarge` and `ErrOutputTooLarge`), `WithTreeBudget`, `WithMutateTimeout`,
+  `*MutateTimeoutError` (matches `context.DeadlineExceeded`) inside
+  `*GitError{Kind: ErrKindPermanent, Message: MutateTimeoutMessage}`, `CheckoutLimits`,
+  `CLIClient.CheckoutLimits()`, `SetDefaultCheckoutLimits` / `DefaultCheckoutLimits`,
+  `EnterBranchWithLimits`, `CheckBudgetGitVersion` / `MinBudgetGitVersion` (a budgeted merge needs
+  git >= 2.38), `TreeObjectTooLargeMessage`, and the constants `DefaultTreeMaxEntries`,
+  `DefaultTreeMaxTotalBytes`, `DefaultTreeMaxPathBytesTotal`, `DefaultMutateTimeout`. No
+  interface gains a method.
+- An embedder that runs its own checkouts and merges (SMP: `gitread.CheckTreeDiff`,
+  `boundRunBranchCheckout`, `RealGitOperator.MergeBound`, the `/git/{workspace}` gateway) can hold
+  them to the same budget with `git.TreeBudget{…}.Check(ctx, client, sha)` before the command, or
+  turn the client's own budget on with `git.WithTreeBudget`.
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-003 TASK-008: the multi-workspace scheduler in shared-mode `spine serve`)
 
 Closes the open half of audit P3-27 (re-confirmed PARTIAL by the 2026-10-22 review). A functional

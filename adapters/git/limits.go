@@ -47,7 +47,10 @@ package git
 //     effect before it prints, so a failing ceiling would report a merge
 //     that had already moved main as failed. Their stdout is drained —
 //     the head is kept, the rest discarded — and they get no alloc limit
-//     (checkout and merge legitimately materialise large files). `diff`
+//     (checkout and merge legitimately materialise large files). What
+//     they WRITE is bounded instead by the checkout budget and the
+//     mutate deadline when the client carries them (INIT-024 TASK-003,
+//     treebudget.go). `diff`
 //     gets the failing ceiling but no alloc limit: rename detection loads
 //     both blobs of a candidate pair, and a legitimate large rename on
 //     main must not wedge projection sync (KNOWN-LIMITATIONS.md, "Git
@@ -62,6 +65,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bszymi/spine/core/worktreefs"
 )
@@ -119,6 +123,46 @@ const (
 	// limit), so what a command's output costs is a function of its size
 	// alone, not of how the pipe happened to chunk it.
 	minSinkGrowth = 512
+)
+
+// Checkout budget defaults (INIT-024 TASK-003, review finding N-1; owner
+// question 1, defaults pending the owner). The read bounds above limit
+// what a git command PRINTS; these limit what a checkout or merge WRITES
+// (treebudget.go). They apply only to a client that carries a budget
+// (WithTreeBudget, or SetDefaultCheckoutLimits, which `spine serve`
+// calls): an unset field of an enabled TreeBudget means its default.
+// Measured with the budget's own count (`ls-tree -r -t`, directories
+// included): Spine's HEAD at this task is 1,961 entries / 21,420,845
+// bytes, SMP 3addd44b 4,393 entries / 33 MB (`git ls-tree -r -l` alone,
+// files only, gives Spine 1,624 at a560c210 and SMP 3,708), so the
+// defaults are ~45x the entries and ~60x the bytes of the largest real
+// tree.
+const (
+	// DefaultTreeMaxEntries caps the entries of a tree — files,
+	// symbolic links, gitlinks and directories — each of which costs an
+	// inode (or a directory) when written.
+	DefaultTreeMaxEntries int64 = 200_000
+	// DefaultTreeMaxTotalBytes caps the summed sizes of a tree's blobs as
+	// git stores them — what a checkout writes in a repository with the
+	// neutral checkout attributes (neutral_attributes.go). It is also the
+	// GIT_ALLOC_LIMIT of a budgeted merge (never below the read limit).
+	DefaultTreeMaxTotalBytes int64 = 2 << 30
+	// DefaultTreeMaxPathBytesTotal caps the summed full-path bytes of a
+	// tree's entries. It also bounds the depth of a tree (a path of
+	// depth d costs O(d^2) summed). It does NOT keep an admitted tree's
+	// listing within DefaultMaxOutputBytes (review round 1): a
+	// `ls-tree -r --name-only -z` adds one NUL per entry to the path
+	// bytes, so a tree near both defaults (16 MiB of paths, 200,000
+	// entries) lists to ~16.2 MiB and ListFiles refuses it (N-6, INIT-024
+	// TASK-004, whose listing cap must be at least this path budget plus
+	// one byte per entry and a margin, or be derived from the budget).
+	// The default stays 16 MiB pending owner question 1.
+	DefaultTreeMaxPathBytesTotal int64 = 16 << 20
+	// DefaultMutateTimeout is the wall-clock deadline `spine serve`
+	// gives every local mutating git command (owner question 2: 2 min).
+	// A client with no deadline (the library default) runs them under
+	// the caller's context alone, as before.
+	DefaultMutateTimeout = 2 * time.Minute
 )
 
 // WithMaxBlobBytes sets the per-blob ReadFile limit. n <= 0 keeps the

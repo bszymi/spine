@@ -1156,6 +1156,18 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// code-repository clients and cloner below, which keep their own
 	// default branches and never get a home branch.
 	gitClient := git.NewCLIClient(repoPath, PrimaryClientOptions(gitOpts)...)
+	// Once per build of the workspace's services, not per request: warn
+	// when its tree is already over the checkout budget (INIT-024 TASK-003).
+	// The budget's premise (INIT-024 TASK-003): checkouts of the
+	// workspace tree write stored bytes. A failure is logged; every
+	// budgeted measure then refuses (fail closed).
+	if gitClient.CheckoutLimits().Budget != nil {
+		if err := gitClient.EnsureNeutralWorkTree(ctx); err != nil {
+			observe.Logger(ctx).Error("neutral checkout attributes not set, or the workspace tree not yet brought to its stored bytes (retried at the next build); its checkouts and merges may be refused",
+				"workspace_id", cfg.ID, "error", err)
+		}
+	}
+	go WarnIfOverCheckoutBudget(context.WithoutCancel(ctx), gitClient, cfg.ID, observe.Logger(ctx))
 
 	// Configure credential helper in repo-local git config if set.
 	if err := gitClient.ConfigureCredentialHelper(initCtx); err != nil {

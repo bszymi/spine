@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
@@ -91,6 +92,14 @@ type Handler struct {
 	// http.receivepack config has been aligned with receivePackEnabled.
 	mu           sync.Mutex
 	ensuredRepos map[string]bool
+
+	// budgetHook is the checkout-budget pre-receive hook every
+	// receive-pack POST installs and pins (INIT-024 TASK-003,
+	// budget_hook.go). Set only when receive-pack is enabled. hooksWarned
+	// (under mu) records the repositories whose overridden core.hooksPath
+	// was already logged.
+	budgetHook  budgetHook
+	hooksWarned map[string]bool
 }
 
 // Config configures the git HTTP handler.
@@ -150,6 +159,13 @@ type Config struct {
 	// is used, never this one. With no lookup, run, plan and divergence
 	// refs are operator-only.
 	StepDefs refadmit.StepDefLookup
+
+	// TreeBudget is the checkout budget the pre-receive hook holds every
+	// pushed tip to whenever ReceivePackEnabled is on (INIT-024 TASK-003;
+	// owner question 3: on with receive-pack, no off switch). Unset
+	// fields mean the defaults (git.DefaultTreeBudget). The hook's
+	// deadline is OpTimeout.
+	TreeBudget git.TreeBudget
 }
 
 // NewHandler creates a new git HTTP handler.
@@ -183,7 +199,17 @@ func NewHandler(cfg Config) (*Handler, error) {
 		}
 	}
 
+	// The checkout-budget hook is built up front: a receive-pack
+	// endpoint that cannot install it must not start (fail closed).
+	var hook budgetHook
+	if cfg.ReceivePackEnabled {
+		if hook, err = newBudgetHook(cfg.TreeBudget, opTimeout); err != nil {
+			return nil, err
+		}
+	}
+
 	return &Handler{
+		budgetHook:          hook,
 		resolveRepoPath:     cfg.ResolveRepoPath,
 		gitBackendPath:      backendPath,
 		sem:                 make(chan struct{}, maxConcurrent),
@@ -321,6 +347,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The checkout-budget pre-receive hook (INIT-024 TASK-003) is put
+	// in place before the push reaches git, and git is pointed at it
+	// below. A push that cannot have it is refused (fail closed).
+	var hooksDir string
+	if push && r.Method == http.MethodPost {
+		dir, err := h.installBudgetHook(r.Context(), repoPath)
+		if err != nil {
+			log.Error("checkout-budget pre-receive hook not installed; push refused", "error", err, "repo_path", repoPath)
+			http.Error(w, "push gate unavailable", http.StatusInternalServerError)
+			return
+		}
+		hooksDir = dir
+	}
+
 	// Pre-receive branch-protection check. Runs only on the POST
 	// /git-receive-pack request (the one that carries ref updates);
 	// GET info/refs?service=git-receive-pack is just the capability
@@ -348,6 +388,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"GIT_PROJECT_ROOT=" + repoPath,
 			"GIT_HTTP_EXPORT_ALL=1",
 		},
+	}
+	if hooksDir != "" {
+		cgiHandler.Env = append(cgiHandler.Env, hooksPathEnv(hooksDir))
 	}
 
 	cgiHandler.ServeHTTP(w, r)

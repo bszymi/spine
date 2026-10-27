@@ -510,6 +510,9 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs map[string]
 		Policy:                  policy,
 		RunRefs:                 runs,
 		StepDefs:                stepDefs,
+		// The pre-receive hook holds pushes to the client's checkout
+		// budget (INIT-024 TASK-003; installCheckoutLimits set it).
+		TreeBudget: processTreeBudget(),
 	})
 	if err != nil {
 		log.Warn("git HTTP endpoint disabled", "reason", err.Error())
@@ -547,6 +550,15 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs map[string]
 		}
 	}
 	return h
+}
+
+// processTreeBudget is the checkout budget installCheckoutLimits made
+// the process default, or the zero budget (the defaults) when none was.
+func processTreeBudget() git.TreeBudget {
+	if l := git.DefaultCheckoutLimits(); l.Budget != nil {
+		return *l.Budget
+	}
+	return git.TreeBudget{}
 }
 
 // startEventDelivery bootstraps the event delivery subscriber and

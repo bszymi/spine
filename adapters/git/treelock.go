@@ -676,6 +676,14 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 				"nothing was reset — move it out of the working tree", p)}
 	}
 	resetHard := func() error {
+		// The checkout budget (INIT-024 TASK-003, codex round 3): `reset
+		// --hard` writes HEAD's whole tree wherever the index or the tree
+		// differs from it, and HEAD's ref can have moved under the tree
+		// (an update-ref, a push to the checked-out branch) without any
+		// measured checkout. Refused, the restore fails with nothing reset.
+		if err := c.checkTrees(ctx, op, "HEAD"); err != nil {
+			return err
+		}
 		if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
 			return err
 		} else if p != "" {
@@ -781,6 +789,11 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 	}
 
 	if rep.PreviousRef != full {
+		// The checkout budget (INIT-024 TASK-003): the home branch's tree,
+		// before the switch writes it. No budget: no process.
+		if err := c.checkBranchTree(ctx, op, "home branch", home, short); err != nil {
+			return fail(err)
+		}
 		args := []string{"switch", "--no-guess", "--no-overwrite-ignore", "--end-of-options", short}
 		if len(residual) > 0 {
 			// Phantoms make the plain switch refuse. A forced switch
@@ -1163,6 +1176,12 @@ func (c *CLIClient) settlePendingTakeBacks(ctx context.Context, op string) (took
 // commit, logged at Warn); then `read-tree --reset -u <to>`. A failure is
 // returned with switchErr, and ResetBranch moves the branch forward again.
 func (c *CLIClient) resetTreeOverRefusedSwitch(ctx context.Context, op, branch, to string, switchErr error) error {
+	// The checkout budget (INIT-024 TASK-003) of the `read-tree --reset -u`
+	// below, before anything is quarantined. ResetBranch measured `to`
+	// already; this keeps the reset bounded for any other caller.
+	if err := c.checkTrees(ctx, op, to); err != nil {
+		return fmt.Errorf("%w (and the reset is refused: %w)", switchErr, err)
+	}
 	if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
 		return fmt.Errorf("%w (and the obstruction check failed: %v)", switchErr, err)
 	} else if p != "" {
