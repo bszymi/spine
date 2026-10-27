@@ -571,3 +571,45 @@ test-scenario` with a registry DB.
 | 2 P4 blank rules | `isNeutralLine` trims only git's blanks (space, tab, CR); `endsNeutral` treats a line as blank or a comment only after those blanks. | `TestNeutralAttributes_BlankRulesAreGits` (VT-/NBSP-led line after the line, VT-/NBSP-prefixed line, FF-suffixed line, VT-led "comment": each refused by the measure and repaired by Ensure; git-blank variants accepted) — **red at `37103f52`** for the four shapes `bytes.TrimSpace` accepted. Mutation (TrimSpace back): fails. |
 | 3 P4 nits | `limits.go` comment rewritten (stored bytes; the merge allocation limit); CHANGELOG commit side adds `-filter` (no clean filter on add; an LFS path written through Spine on a git-lfs host is stored as its full content) and `!working-tree-encoding` (no re-encoding on add); serve-start Ensure only in single mode (shared mode: `buildServiceSet` per workspace); the writer refuses a directory that is not the top of its repository (`requireRepositoryTop`: `--show-toplevel`, or `--absolute-git-dir` for a bare repository), so it never writes into a repository that merely contains the cwd; the measured `git merge` runs with `LC_ALL=C` beside its `GIT_ALLOC_LIMIT`. | `TestNeutralAttributes_EnsureWritesOnlyAtTheTop` — **red at `37103f52`** (the parent repository's file was written). Mutation (top check off): fails. |
 | 4 P4 merge memory | KNOWN-LIMITATIONS: `GIT_ALLOC_LIMIT` caps single allocations, not the git child's RSS (~10x a large file changed on both sides; pre-existing); operator controls: the server's memory limit, a byte budget whose ~10x fits it, keeping very large files out of merged branches. | — |
+
+**Codex after review round 3** (`codex review --base init/INIT-024-scaffold`, plain; the last
+round of the fresh budget; model `gpt-6.1-sol` confirmed in the review sub-session):
+
+| Round | Review session | Findings | Disposition |
+|---|---|---|---|
+| B2 | `01a17dde-73be-7e30-a87d-23ac02375186` (on `69aa1988`) | P2 "Retry unfinished worktree renormalization": a renormalisation that failed after the line was written (HEAD over the budget, a cancelled request) was never retried — every later call found the file ending in the line and returned success, leaving the tree converted | Real, fixed `5636c02d`: the work tree is marked (`spine-renormalise-pending` in its own git directory, created `O_EXCL` before the line is written; never in a bare repository) and the mark is cleared only once the tree is at its stored bytes, found clean, or has an unborn HEAD; a marked tree is renormalised by the next call under the tree's hold, rechecking the mark after the wait. Follow-on `e57a6741`: the retry would have made the git HTTP endpoint refuse every push to a served tree whose renormalisation cannot finish yet (the push that would repair it included), though the hook's measure needs only the line; errors after the line is in place now match `git.ErrRenormalisePending` (the cause still matches) and the hook install warns and goes on for them; the gitpool's reuse and the workspace build keep reporting them. Caller log messages and CHANGELOG / KNOWN-LIMITATIONS / package comment updated. |
+
+Tests: `TestNeutralAttributes_FailedRenormalisationIsRetried` (adapters/git: first call refused on
+an over-budget HEAD as `ErrRenormalisePending`, refused again while still over, then a client whose
+budget admits HEAD renormalises and the merge succeeds; afterwards a call with the tight budget is a
+no-op and leaves a fresh edit alone) — **red at `69aa1988`** ("a retry while HEAD is still over the
+budget: want the refusal again, got <nil>"; run before the sentinel existed, without its
+`errors.Is` check); `TestBudgetHook_PendingRenormalisationDoesNotStopThePush`
+(githttp: a served work tree with an untracked file where a tracked directory was — pushes land and
+warn while pending; once the file is gone the next push restores the tree and stops warning) —
+**red at `5636c02d`** ("push 0 with the renormalisation pending was refused"). Mutations (`go test
+-overlay`, worktree untouched): marker never written — both tests and
+`…EnsureNeutralWorkTreeRenormalises` fail; marker cleared before renormalising — both fail; the
+`ErrRenormalisePending` wrap removed — both fail. No further codex round (B2 was the last of the
+budget); the two fixes are covered by the red runs and mutations above.
+
+**Gates after review round 3** (all at `e57a6741`; heavy legs under the shared heavy-suite lock):
+
+| Gate | Result |
+|---|---|
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | rc=0 |
+| `go test -p 4 ./...` | rc=0, no failures |
+| `scenario-git-http` (`TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*`), own DB | rc=0 (87 / 26 / 130 passes, 0 skips) |
+| integration (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `core/artifact`, `core/workflow`) | rc=0 |
+| `-race` (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `workspace`, `core/worktreefs`) | rc=0 (also run before each commit) |
+| `git-floor` (golang:1.26-bookworm, git 2.39.5, `--pull=never`): both CI steps, the budget/hook tests (incl. `TestBudgetHook_PendingRenormalisationDoesNotStopThePush`), a verbose run of `TestMerge_*`, `TestCheckBudgetGitVersion`, `TestNeutralAttributes_*` (9 tests, incl. `…FailedRenormalisationIsRetried`) | STEP1 / STEP2 / EXTRA / EXTRA2 rc=0 |
+| golangci-lint v2.11.4 on the touched packages | the same findings as at round 2 (0 new vs the scaffold); `--enable-only=gosec`: 0 issues |
+| `gofmt -l` on changed files | clean |
+| `TestNoUnconfinedWorktreeIO` | passes (allowlist: the marker's three helpers — a fixed name in git's own directory) |
+| SMP compatibility gate (`../spine` at `e57a6741`; its one uncommitted file was this artifact) | build and vet x4 rc=0; `-race` §5 packages: only the two by-design `gitread` contract tests (as at round 2); testgate runtime PASS (2,143) and githttp PASS (588); no `ws_*` / `s24003_*` databases left. No SMP change. |
+
+**Not run (review round 3):** a codex round on `5636c02d` / `e57a6741` (the budget ended at B2);
+a crash between the marker and the line on a real host (the order — marker first — is what a
+crash relies on; the retry itself is tested); a pre-existing linked worktree of a converted clone
+(Spine's worktrees are its own, made after the line with `--no-checkout` + reset); GitHub CI
+(nothing is pushed); the full `make test-scenario` with a registry DB.
