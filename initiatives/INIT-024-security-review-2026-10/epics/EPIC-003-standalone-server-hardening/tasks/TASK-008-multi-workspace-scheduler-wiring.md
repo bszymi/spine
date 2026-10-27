@@ -388,6 +388,50 @@ allowed skips) and githttp leg PASS (588 passed, 1 allowed skip); no `ws_*` data
 SMP's import graph (`go list -deps`) holds `adapters/scheduler` and no `service/...` package:
 **inert**.
 
+### Review round 2 (confirming review of `250924d4`: 1 P2, 3 P3, 2 P4, all in the pool)
+
+Commit `7916649b` (code), then this notes commit. Red runs: `git archive` of `250924d4` with only the
+regression tests added (`red-2509-r2.log` in the scratch dir).
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| **P2** a Get already waiting on an entry evicted during its build waited on `gone` only, which an abandoned build never closes: it outlived InitTimeout (up to its own context, or for good with the projection sync's) | Fixed as ruled: the evicting branch of `Get` also selects on `entry.ready` while `!readyClosed`, then loops, so the abandoned check fails the caller | `TestServicePool_EvictedWaiterFailsAtInitTimeout` — **red at `250924d4`**: "context deadline exceeded after 10.00s, want ErrWorkspaceUnavailable at about InitTimeout"; green. The reviewer's probe now reports "does not reproduce" (70 ms) |
+| P3 livelock: a healthy build always slower than InitTimeout was closed on every late finish and rebuilt; never served | Fixed: `finishAbandoned` installs a late success unless the workspace was evicted meanwhile (Evict of an abandoned entry now marks it evicting instead of doing nothing), the pool closed or the entry was replaced; otherwise closes it, then removes the entry. New `SPINE_WS_POOL_INIT_TIMEOUT` (default 2m; empty/blank means unset; ≤0 or unparseable refuses to start, in every mode), parsed in `serve_resolver.go` (`poolInitTimeoutFromEnv`, validated in `buildWorkspaceResolver`, read by `sharedModePoolConfig`); documented (integration guide, item 9, CHANGELOG) | `TestServicePool_SlowHealthyBuildIsEventuallyServed` (build at 1.5× InitTimeout) — **red at `250924d4`**: "never served (54 builds)"; green with 1 build. `TestServicePool_LateBuildOfAnEvictedWorkspaceIsClosed`, `TestPoolInitTimeoutFromEnv` (9 rows; invalid values refuse `buildWorkspaceResolver`). Reviewer probe: 342 successful Gets, 1 build |
+| P3 a recovered build panic leaked what the build had started | Fixed: a deferred recover in `buildServiceSet` closes the set (appended closers, then the build's own) or, before the set exists, the registered closers — the database pool's closer is now registered right after it opens — then re-panics with the original value and stack (`buildPanic`), which the pool's recovery logs and classifies as before | `TestServicePool_PanickingBuildsCloseWhatTheyStarted` — **red at `250924d4`**: "closers run = 0 after 31 panicked builds"; green (one closer per build, goroutines flat). Reviewer probe: delta 0, closers 30 |
+| P3 a build that never returns wedged the workspace (the ping ran on the lifetime context, no connect timeout) | Fixed (not left as a residual): the build's one-shot calls run under an init deadline of the InitTimeout length (`workspace.InitContext`; the build's context still lives as long as the set): `NewWorkspaceDBPool`'s startup (ping and pgx's first minimum connections — pgx's health check tops those up later on its own context; with the lifetime context there, closing the pool after a failed ping also waited for connections that never finish), the subscription-secret sweep, `ConfigureCredentialHelper`, `ProbeAuthoritativeRef`, and in the builder hook the first bootstrap-admin attempt and the internal-subscription upsert (the bootstrap retry loop and delivery keep the lifetime context). Operator guidance in item 9 (check the database; raise `SPINE_WS_POOL_INIT_TIMEOUT`; `connect_timeout=` in the database URL; what remains unbounded) | `TestServicePool_SilentDatabaseFailsTheBuildAtItsDeadline` (a TCP database that never answers) — **red at `250924d4`**: "the build never returned"; green (0.2 s). `TestInitContext` |
+| P4 "its git children are stopped" | Reworded (multi.go type doc and `ScanDeadline`, item 9): the scan returns at its deadline; the git commands it runs on its context are stopped; a code repository's first clone (run detached by the git pool for every waiter) is not, it is only no longer waited for | — |
+| P4 CHANGELOG named the request's error text | Neutral ("callers get an error"). Integrator note below | — |
+
+The reviewer's stress probe (Get/Release/Evict/EvictIdle against builds that randomly time out,
+fail or panic; overlay, `-race -count=3`): ≤1 concurrent build, no holder saw its set closed (183,
+201, 191 builds).
+
+**Gates on `7916649b`.**
+- `go vet` plain, `-tags integration` and `-tags scenario` are clean, as is `gofmt -l` on the changed files.
+- `go test -race -count=5 -p 4` passes on `adapters/scheduler`, `service/cmd/spine` and `service/internal/workspace`.
+- golangci-lint `--new-from-rev=init/INIT-024-scaffold` on the three packages, plain and integration, reports 0 issues; `--enable-only=gosec` reports 0.
+- These ran under the shared heavy-suite lock:
+  - the scenario-git-http job locally: every step rc 0, 0 failures, 0 skips, including `TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces`, and no `ws_*` left behind;
+  - `go test -race -tags integration` on `service/internal/workspace` and `service/cmd/spine`: ok;
+  - full `go test -race -p 4 ./...`: 40 packages ok, rc 0;
+  - the SMP compatibility gate (`../spine` = `7916649b`).
+- SMP gate results:
+  - `go build ./...` ok; `go vet` plain, `-tags integration`, `-tags scenario ./scenariotest/...` and `-tags faultinject` clean.
+  - Race on the §5 packages: 11 ok, with `gitread` failing only on the same two by-design contract tests.
+  - `dev/testgate` Spine-runtime: PASS (2143 passed, 3 allowed skips). githttp: PASS (588 passed, 1 allowed skip).
+  - No `ws_*` databases or roles left.
+  - SMP's import graph holds `adapters/scheduler` and no `service/...` package, so the gate is **inert**.
+
+**Codex.** One confirming round on `7916649b`, past the 3-round cap on purpose (orchestrator
+ruling): session `01a17ab3-f28f-7623-90da-f6de6eb2de1d`, `gpt-6.1-sol`, `findings: []`, "patch
+is correct". Nothing to dispose.
+
+**Integrator notes.** (1) After TASK-007 merges, a failed or abandoned workspace build is answered
+as TASK-007's uniform 401 to callers its N-15 change leaves unauthenticated; this task's docs say
+only "callers get an error" on purpose. (2) `CHANGELOG.md` conflicts textually with TASK-006 and
+TASK-007 (each adds its own section at the top); resolve at integration. (3) `pool.go`'s Get/build
+path is touched by TASK-007 too (see the shared-files list).
+
 ### Files shared with other INIT-024 tasks (for integration)
 
 - `service/cmd/spine/serve_wiring.go` (TASK-006): this task adds the `MultiScheduler` field to
