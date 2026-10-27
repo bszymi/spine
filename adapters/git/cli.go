@@ -70,7 +70,7 @@ import (
 //	Merge (abort)       merge --abort                     (Strategy "abort" or Source "--abort", nothing else)
 //	CreateBranch        branch [eoo] <n> <HEAD | oid>^{commit}   (git branch re-DWIMs a bare start point)
 //	DeleteBranch        branch -D [eoo] <n>
-//	Diff                diff --name-status -z [eoo] <from'> <to'> --
+//	Diff                diff --name-status -z --ignore-submodules=none [eoo] <from'> <to'> --
 //	CountChangedPaths   diff --name-only -z --no-renames --ignore-submodules=none [eoo] <from'> <to'> --
 //	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
 //	ReadFile            --literal-pathspecs ls-tree -l -z --full-tree [eoo] <ref'> <path>, then cat-file -t <oid>, cat-file blob <oid>
@@ -1032,6 +1032,13 @@ func (c *CLIClient) DeleteBranch(ctx context.Context, name string) error {
 // `git diff`). The parser is strict (nameStatusCollector): a malformed or
 // truncated stream is an error, never a partial list.
 //
+// --ignore-submodules=none (INIT-024 TASK-004): in a non-bare tree `git
+// diff <a> <b>` honours submodule.<name>.ignore from the checked-out
+// .gitmodules and diff.ignoreSubmodules from any config, so `ignore =
+// all` made a gitlink change invisible to every caller — the governance
+// guard, the projection, the status cascade. Every gitlink change is now
+// reported ("modified"), whatever the repository says.
+//
 // The output is parsed as git writes it (INIT-024 TASK-004, review
 // finding N-6; listing.go): what Diff holds is the paths it returns, held
 // to the listing limit (listingLimit) and each to MaxListingPathBytes;
@@ -1054,7 +1061,7 @@ func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, erro
 	}
 	s := newNameStatusCollector("diff", c.listingLimit())
 	if err := c.runListing(ctx, "diff", s, unterminatedDiff,
-		"diff", "--name-status", "-z", "--end-of-options", fromRev, toRev, "--"); err != nil {
+		"diff", "--name-status", "-z", "--ignore-submodules=none", "--end-of-options", fromRev, toRev, "--"); err != nil {
 		return nil, err
 	}
 	if err := s.finish(); err != nil {

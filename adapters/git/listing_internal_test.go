@@ -264,7 +264,7 @@ func TestDiff_StreamedEqualsBuffered(t *testing.T) {
 
 	c := NewCLIClient(dir)
 	for _, args := range [][]string{
-		{"diff", "--name-status", "-z", "--end-of-options", from, to, "--"},
+		{"diff", "--name-status", "-z", "--ignore-submodules=none", "--end-of-options", from, to, "--"},
 		{"-c", "diff.renames=copies", "diff", "--name-status", "-z", "-C", "-C", "--end-of-options", from, to, "--"},
 	} {
 		raw := listingGit(t, dir, nil, args...)
@@ -282,7 +282,7 @@ func TestDiff_StreamedEqualsBuffered(t *testing.T) {
 			}
 		}
 	}
-	raw := listingGit(t, dir, nil, "diff", "--name-status", "-z", "--end-of-options", from, to, "--")
+	raw := listingGit(t, dir, nil, "diff", "--name-status", "-z", "--ignore-submodules=none", "--end-of-options", from, to, "--")
 	want, _ := bufferedNameStatusZ(raw)
 	got, err := c.Diff(context.Background(), from, to)
 	if err != nil || !reflect.DeepEqual(got, want) {

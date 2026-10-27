@@ -127,3 +127,12 @@ func TestCountChangedPaths_StreamContract(t *testing.T) {
 	}
 }
 
+// CountChangedPaths ignores the submodule ignore settings as Diff does.
+func TestCountChangedPaths_SubmoduleIgnoreSettingsHideNoGitlinkChange(t *testing.T) {
+	for _, tc := range gitlinkIgnoreCases {
+		dir, c1, c2 := gitlinkIgnoreRepo(t, tc.gitmodules, tc.config...)
+		if n, err := git.NewCLIClient(dir).CountChangedPaths(context.Background(), c1, c2); err != nil || n != 1 {
+			t.Errorf("%s: CountChangedPaths = %d, %v; want the one gitlink", tc.name, n, err)
+		}
+	}
+}
