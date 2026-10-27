@@ -531,3 +531,34 @@ change `binary` and `merge=union` results (`TestNeutralAttributes_MergeDriversUn
 **Codex budget.** This is a new design, so it gets a fresh codex budget of at most 2 rounds
 (deliberate, per the coordinator's ruling); rounds A1–A3 above reviewed the scanner, which no
 longer exists.
+
+**Commits (review round 2):** `87bc4680` (rulings 1–5) and this notes commit. Net for the round
+(`1a2a8898..87bc4680`): production Go +453 / −567 (−114; the 356-line scanner deleted, the
+~200-line neutral-attributes writer added), tests +613 / −363, docs the rest (+1,186 / −976 in all).
+
+**Codex (fresh budget for the new design, at most 2 rounds; `gpt-6.1-sol` confirmed):**
+
+| Round | Review session | Findings | Disposition |
+|---|---|---|---|
+| B1 | `01a17cdf-ef4c-7cf2-afef-6c57f85cbb74` | none ("No actionable regressions were identified"; it ran the adapters/git, gitpool, githttp, workspace and cmd/spine tests) | clean at `87bc4680`; no B2 needed |
+
+**Gates after review round 2** (all at `87bc4680`; heavy legs under the shared heavy-suite lock):
+
+| Gate | Result |
+|---|---|
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | rc=0 |
+| `go test -p 4 ./...` | rc=0, no failures |
+| `scenario-git-http` (`TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*`), own DB | rc=0 (87 / 26 / 130 passes, 0 skips) |
+| integration (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `core/artifact`, `core/workflow`) | rc=0 |
+| `-race` (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `workspace`) | rc=0 |
+| `git-floor` (golang:1.26-bookworm, git 2.39.5, `--pull=never`): both CI steps, the budget/hook tests, a verbose run of `TestMerge_*`, `TestCheckBudgetGitVersion` and `TestNeutralAttributes_*` (every shape: written == stored on 2.39.5) | STEP1 / STEP2 / EXTRA / EXTRA2 rc=0 |
+| golangci-lint v2.11.4 vs the scaffold | 0 new (3 new test-file issues fixed before the commit); `--enable-only=gosec`: 0 issues |
+| `gofmt -l` on changed files | clean |
+| mutations (`go test -overlay`, worktree untouched): writer no-op; fail-closed check removed; result measured before the switch; merge `GIT_ALLOC_LIMIT` removed | each caught (12 tests; `…MeasureFailsClosedWithoutTheLine`; `…ResultIsComputedInTheTargetsWorkingTree`; both alloc tests) |
+| red at `1a2a8898` (`git archive` + a compile-only shim, `red-r2.log`) | `TestNeutralAttributes_EveryShapeWritesStoredBytes` (17/17 subtests: 98–393 KB written for ~10 KB stored, or refused), `TestMerge_ConvergenceMarkersAreBoundedByTheNeutralLine` (100,000-character markers), `TestMerge_ResultIsComputedInTheTargetsWorkingTree` (both paths) |
+| SMP compatibility gate (`../spine` at `87bc4680`, clean) | build and vet x4 rc=0; `-race` §5 packages: only the two by-design `gitread` contract tests; testgate runtime PASS (2,143) and githttp PASS (588); no `ws_*` / `s24003_*` databases left. No SMP change. |
+
+**Not run (review round 2):** a second codex round (B1 was clean); the system gitattributes file
+and system git config (the hostile-config test uses the global ones; the line's precedence is the
+same over both); `pull.twohead` (Spine never pulls); GitHub CI (nothing is pushed); the full `make
+test-scenario` with a registry DB.
