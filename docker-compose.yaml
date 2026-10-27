@@ -52,7 +52,7 @@ services:
       retries: 3
 
   spine-db:
-    image: postgres:18-bookworm
+    image: postgres:18-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc # PostgreSQL 18.6 (index of 2026-10-21; INIT-024 TASK-009 digest pin)
     deploy:
       resources:
         limits:
@@ -98,7 +98,7 @@ services:
     profiles: ["setup"]
 
   spine-registry-db:
-    image: postgres:18-bookworm
+    image: postgres:18-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc # PostgreSQL 18.6 (index of 2026-10-21; INIT-024 TASK-009 digest pin)
     deploy:
       resources:
         limits:

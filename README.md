@@ -320,6 +320,37 @@ make docker-vet
 make lint-security
 ```
 
+### Supply-Chain Checks
+
+CI pins every action to a full commit SHA (with a `# vX.Y.Z` comment), every image to a digest
+next to its tag, and every job to a versioned runner (`ubuntu-24.04`). Two jobs keep it that way:
+
+- **`toolchain-parity`** runs `go run ./dev/pincheck -resolve`. It refuses:
+  - an unpinned action or image, wherever it appears: Dockerfiles at any depth, workflows,
+    composite actions, compose files, and `docker run|pull|create` in `run:` scripts and the
+    Makefile;
+  - a golang image (the Dockerfile builder, the CI git-floor container, the Makefile's
+    `DOCKER_GO`) or a setup-go `go-version` that differs from go.mod's `toolchain` line;
+  - a CI image that differs from the compose stack's image of the same repository;
+  - a `*-latest` runner label.
+
+  With `-resolve` it also checks the golang digest's `GOLANG_VERSION` in the registry, and that
+  each action's `# vX.Y.Z` tag is exactly the pinned commit. The golang image sets
+  `GOTOOLCHAIN=local`, so its own Go is the compiler that ships; bumping go.mod alone would
+  silently keep the old one.
+- **`vuln`** runs `govulncheck ./...` and fails on any reachable advisory.
+
+To move the Go toolchain:
+
+1. Change go.mod's `toolchain` line.
+2. Point all three golang references at the new `golang:<version>-bookworm` tag and its index
+   digest (`docker buildx imagetools inspect golang:<version>-bookworm`).
+3. Set every setup-go `go-version` to the new version.
+4. Run `make toolchain-parity` and `make vuln`.
+
+Dependabot (`.github/dependabot.yml`) proposes module, action and image updates weekly. It does
+not move the toolchain line or the setup-go version.
+
 ---
 
 ## Repository Structure

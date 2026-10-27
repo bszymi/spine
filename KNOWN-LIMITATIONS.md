@@ -810,6 +810,36 @@ The governed merge judges artifact-status changes against the declared lifecycle
 - **Runs in flight at the upgrade** whose branch carries status edits on artifacts they do not own
   are refused at the merge; a publish-step workflow routes them back to `execute`.
 
+### Supply Chain: What INIT-024 TASK-009 Leaves Open
+
+CI pins every action and image, scans for reachable advisories and enforces toolchain parity
+(`dev/pincheck`, CI jobs `vuln` and `toolchain-parity`). What it does not cover:
+
+- **Repository settings are owner actions** (INIT-024 §7d): a `main` ruleset (PR and CI required,
+  no force push), approval for all outside contributors, and "allowed actions: selected" with SHA
+  pinning required. Until the ruleset exists, nothing makes these CI jobs required.
+- **Dependabot does not move the toolchain.** It proposes a new golang image for the Dockerfile but
+  never edits go.mod's `toolchain` line, the `ci.yml` git-floor container, the Makefile's
+  `DOCKER_GO` or the setup-go `go-version`s. `toolchain-parity` fails that PR until all of them
+  agree, and that failure is intended. The same goes for a compose postgres bump: the `ci.yml`
+  postgres service must be moved to the same ref by hand. The govulncheck version (`ci.yml`,
+  Makefile) is also moved by hand.
+- **The scan of shell commands is best-effort.** In workflow `run:` scripts and Makefiles,
+  `dev/pincheck` reads `docker run|create|pull` (and `docker container run|create`, `docker image
+  pull`) and takes the first non-flag word as the image. An unknown boolean flag makes it read the
+  next word as the image, which is a refusal, not a pass. It does not see:
+  - images in other scripts (`dev/*.sh`, scripts a step runs from a file);
+  - commands assembled at run time (`eval`, `sh -c "$CMD"`);
+  - images pulled by other tools (`crane`, `skopeo`, `ctr`, `podman`).
+
+  An image passed through a variable defined elsewhere is refused as computed, not resolved.
+- **govulncheck scans the default build only.** Code behind the `integration` and `scenario` tags
+  and `_test.go` files is not analysed. A new upstream advisory fails every PR until it is fixed
+  or the job is changed. This is the default fail-closed policy (TASK-009 owner question 2).
+- **The runtime image's packages are not pinned.** The debian digest fixes the base, but `apt-get
+  install git ca-certificates` resolves at build time. There is no image vulnerability scan, SBOM
+  or signing: Spine has no image publishing pipeline.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:

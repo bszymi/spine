@@ -48,7 +48,8 @@ SMP_MODULE="github.com/bszymi/spine-management-platform"
 # as core/ doing it. cmd/, testutil/, and scenariotest/ are leaf
 # consumers that may cross internal tiers; cmd/embed-smoketest is
 # separately exercised by the standalone-build CI step, which would
-# fail to link if SMP appeared in its dep graph.
+# fail to link if SMP appeared in its dep graph. dev/ holds repository
+# tooling (dev/pincheck, INIT-024 TASK-009) and is a leaf consumer too.
 tier_rules=(
     "core:smp,no-service,no-adapter"
     "adapters:smp,no-service"
@@ -56,6 +57,7 @@ tier_rules=(
     "cmd:smp"
     "testutil:smp"
     "workflows:smp"
+    "dev:smp"
 )
 
 # Build tags used by the repo's test suites that we want included in
