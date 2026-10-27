@@ -31,6 +31,11 @@ func pgrSetStorageProbe(h *Handler, p func(ctx context.Context, repoPath string)
 	h.storageProbe = p
 }
 
+// pgrRealStorageProbe is the built-in case-sensitivity probe.
+func pgrRealStorageProbe() func(ctx context.Context, repoPath string) (bool, error) {
+	return probeRefStorage
+}
+
 // pgrSlotsHeld is the number of git slots h has handed out.
 func pgrSlotsHeld(h *Handler) int {
 	h.slots.mu.Lock()

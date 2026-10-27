@@ -602,6 +602,9 @@ func TestGitHTTP_SlowCommandSectionDoesNotHoldSlot(t *testing.T) {
 	t.Run("stalled push-options section", func(t *testing.T) {
 		// Through a ResponseWriter that cannot move the read deadline
 		// (the recorder): the body is closed instead.
+		for wait := time.Now().Add(5 * time.Second); pgrSlotsHeld(h) != 0 && time.Now().Before(wait); {
+			time.Sleep(10 * time.Millisecond) // the first subtest's request ending
+		}
 		pr, pw := io.Pipe()
 		defer func() { _ = pw.Close() }()
 		done := make(chan string, 1)
@@ -611,9 +614,7 @@ func TestGitHTTP_SlowCommandSectionDoesNotHoldSlot(t *testing.T) {
 			done <- w.Body.String()
 		}()
 		cmd := pktLine(base + " " + evil + " refs/heads/feature\x00report-status push-options\n")
-		if _, err := pw.Write(append(cmd, flushPkt...)); err != nil {
-			t.Fatal(err)
-		}
+		go func() { _, _ = pw.Write(append(cmd, flushPkt...)) }()
 		select {
 		case resp := <-done:
 			if !strings.Contains(resp, "the command section was not received within") {
@@ -675,47 +676,49 @@ func TestReceivePack_RefusedOnCaseFoldingStorage(t *testing.T) {
 	}, 0, 0, 0, 0)
 	probe := &pgrFoldingProbe{folds: true}
 	pgrSetStorageProbe(h, probe.probe)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h.ServeHTTP(w, r.WithContext(pgrCtx(r.Context(), repo, "ws-1", pgrAlice)))
-	}))
-	defer srv.Close()
+	t.Run("probe reports folding storage", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h.ServeHTTP(w, r.WithContext(pgrCtx(r.Context(), repo, "ws-1", pgrAlice)))
+		}))
+		defer srv.Close()
 
-	adv := pgrServe(h, http.MethodGet, "/info/refs?service=git-receive-pack", "", http.NoBody, repo, "ws-1", pgrAlice, "")
-	if adv.Code != http.StatusForbidden || !strings.Contains(adv.Body.String(), "case- or normalization-insensitive filesystem") {
-		t.Fatalf("push advertisement on folding storage: %d %q, want 403 naming the storage requirement", adv.Code, adv.Body.String())
-	}
-	for _, ref := range []string{"refs/heads/MAIN", "refs/heads/Main"} {
-		w := pgrServe(h, http.MethodPost, "/git-receive-pack", "application/x-git-receive-pack-request",
-			bytes.NewReader(append(pgrCommand(base, evil, ref), pack...)), repo, "ws-1", pgrAlice, "")
-		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "KNOWN-LIMITATIONS") {
-			t.Errorf("push of %s on folding storage: %d %q, want 403 naming the requirement", ref, w.Code, w.Body.String())
+		adv := pgrServe(h, http.MethodGet, "/info/refs?service=git-receive-pack", "", http.NoBody, repo, "ws-1", pgrAlice, "")
+		if adv.Code != http.StatusForbidden || !strings.Contains(adv.Body.String(), "case- or normalization-insensitive filesystem") {
+			t.Errorf("push advertisement on folding storage: %d %q, want 403 naming the storage requirement", adv.Code, adv.Body.String())
 		}
-		if nulRefExists(t, repo, ref) {
-			t.Errorf("%s was created", ref)
+		for _, ref := range []string{"refs/heads/MAIN", "refs/heads/Main"} {
+			w := pgrServe(h, http.MethodPost, "/git-receive-pack", "application/x-git-receive-pack-request",
+				bytes.NewReader(append(pgrCommand(base, evil, ref), pack...)), repo, "ws-1", pgrAlice, "")
+			if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "KNOWN-LIMITATIONS") {
+				t.Errorf("push of %s on folding storage: %d %q, want 403 naming the requirement", ref, w.Code, w.Body.String())
+			}
+			if nulRefExists(t, repo, ref) {
+				t.Errorf("%s was created", ref)
+			}
 		}
-	}
-	if got := nulGit(t, repo, nil, "rev-parse", "refs/heads/main"); got != base {
-		t.Fatalf("main moved to %s", got)
-	}
-	if objectExists(t, repo, evil) {
-		t.Fatal("the refused push's objects reached the repository")
-	}
-	if got := nulGit(t, repo, nil, "config", "--local", "http.receivepack"); got != "false" {
-		t.Errorf("http.receivepack = %q on folding storage, want false", got)
-	}
-	// Reads are served: the fetch advertisement and a real clone.
-	if code := pgrTry(h, repo, "ws-1", pgrAlice, ""); code != http.StatusOK {
-		t.Fatalf("fetch advertisement on folding storage: %d, want 200", code)
-	}
-	work := t.TempDir()
-	clone := exec.Command("git", "clone", "-q", srv.URL+"/", work)
-	clone.Env = nulGitEnv(t)
-	if out, err := clone.CombinedOutput(); err != nil {
-		t.Fatalf("clone from folding storage: %v %s", err, out)
-	}
-	if n := probe.n(); n != 1 {
-		t.Errorf("the probe ran %d times for one repository, want once", n)
-	}
+		if got := nulGit(t, repo, nil, "rev-parse", "refs/heads/main"); got != base {
+			t.Fatalf("main moved to %s", got)
+		}
+		if objectExists(t, repo, evil) {
+			t.Fatal("the refused push's objects reached the repository")
+		}
+		if got := nulGit(t, repo, nil, "config", "--local", "http.receivepack"); got != "false" {
+			t.Errorf("http.receivepack = %q on folding storage, want false", got)
+		}
+		// Reads are served: the fetch advertisement and a real clone.
+		if code := pgrTry(h, repo, "ws-1", pgrAlice, ""); code != http.StatusOK {
+			t.Fatalf("fetch advertisement on folding storage: %d, want 200", code)
+		}
+		work := t.TempDir()
+		clone := exec.Command("git", "clone", "-q", srv.URL+"/", work)
+		clone.Env = nulGitEnv(t)
+		if out, err := clone.CombinedOutput(); err != nil {
+			t.Fatalf("clone from folding storage: %v %s", err, out)
+		}
+		if n := probe.n(); n != 1 {
+			t.Errorf("the probe ran %d times for one repository, want once", n)
+		}
+	})
 
 	t.Run("the review's case-fold push against the real probe", func(t *testing.T) {
 		// TestRV_F1_CaseFoldRef: refs/heads/MAIN (and Main) carrying
@@ -736,8 +739,9 @@ func TestReceivePack_RefusedOnCaseFoldingStorage(t *testing.T) {
 					ReceivePackEnabled: true,
 					Policy:             branchprotect.New(branchprotect.StaticRules(nil)),
 				}, 0, 0, 0, 0)
-				pgrSetStorageProbe(hr, probeRefStorage)
-				folds, err := probeRefStorage(context.Background(), r)
+				realProbe := pgrRealStorageProbe()
+				pgrSetStorageProbe(hr, realProbe)
+				folds, err := realProbe(context.Background(), r)
 				if err != nil {
 					t.Fatal(err)
 				}

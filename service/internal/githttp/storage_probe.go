@@ -48,8 +48,8 @@ import (
 // first of each pair is created first.
 var storageProbePairs = [][2]string{
 	{"spine-probe-case", "SPINE-PROBE-CASE"},
-	{"spine-probe-é", "spine-probe-é"}, // NFC é, NFD e + combining acute
-	{"spine-probe-k", "spine-probe-K"},  // 'k', KELVIN SIGN
+	{"spine-probe-\u00e9", "spine-probe-e\u0301"}, // NFC e-acute, NFD e + combining acute (escaped: an editor must not normalise them)
+	{"spine-probe-k", "spine-probe-\u212a"},       // 'k', KELVIN SIGN
 }
 
 // storageProbe reports whether the storage of a repository's refs folds
