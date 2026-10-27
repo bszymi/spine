@@ -627,3 +627,64 @@ the review sub-session JSONL): review-cycle round 1 at `9bf1e072`, session
 `01a16ae1-2908-7251-8f7d-9789eac64102`, no findings ("patch is correct").
 
 **Not run:** SMP's full Platform-DB testgate suites; GitHub CI (nothing pushed).
+
+### Integration A (2026-10-27)
+
+Branch `init/INIT-024-integration-a`, cut from Spine local main `83d82409` (= `a560c210` + the
+INIT-024 scaffold + TASK-001), in the TASK-008 group's worktree. Merge order (each `--no-ff`,
+"Merge <branch> into the INIT-024 integration A branch"): TASK-009 `b8dc7bb3` → `899cd774`;
+TASK-002 `07d6ca8a` → `c6bad6c0`; TASK-006 `96dcea55` → `000c5461`; TASK-007 `55a67a45` →
+`e6ab7e81`; TASK-008 `c6541bd5` → `8a0a1b29`; TASK-003 `02334613` → `4f502b7e`. Coordination
+commits (prefix "INIT-024 integration A — "): `7d0e8522` (TASK-006 × TASK-007), `69c15fb4`
+(TASK-007 × TASK-008), `55789b28` (TASK-003 × TASK-007/TASK-008), `377c3343` (TASK-007 ×
+TASK-008 logging). Nothing is pushed; the status stays In Progress until GitHub CI has run after a
+push.
+
+`CHANGELOG.md` conflicted at every merge (each task adds its own section at the top): every
+section is kept once, newest merge on top, each followed by a `---` line.
+
+**This task.** Merged fourth (`e6ab7e81`). Conflicts: `CHANGELOG.md`, and
+`service/internal/gateway/handlers_git.go`, where TASK-006's `logTrustedPeerResolveFailure` and
+`isUnauthorizedError` and this task's `validatePooledGitAuth` are all kept. The reconciliation
+items above were applied in coordination `7d0e8522`: the TASK-006 fixture diff (the three
+TASK-006 tests failed on the merge before it, as predicted, and pass after it); the "made uniform
+by TASK-006" qualifier was dropped from `CHANGELOG.md` and `architecture/security-model.md` at
+`7d0e8522` (the `/git` uniformity is stated without it); TASK-006's 503 residual is narrowed to
+single mode. Later coordination involving this task:
+- `69c15fb4` (with TASK-008): `TestPreauth_BoundedPoolBuildFailuresAnswerUniform401` — on `/api/v1`
+  and `/git`, a build hung past InitTimeout (first call, abandoned, valid token), a caller waiting
+  on an evicted build, a panicking and a failing build (valid token), and an unknown token on a
+  built workspace all answer the missing workspace's `401` byte for byte; the hung calls return at
+  about InitTimeout. Red at TASK-008's tip without this task: 16 calls answer `500`, `503` or a
+  distinct `401` message. Docs: TASK-008's CHANGELOG entry, item 9 and the
+  `SPINE_WS_POOL_INIT_TIMEOUT` row now say a request sees those failures as this task's `401`.
+- `55789b28` (with TASK-003): `TestPreauth_PendingRenormalisationIsInvisibleBeforeAuthentication`
+  — a workspace whose build left TASK-003's renormalisation pending answers the missing
+  workspace's `401` on `/api/v1` and `/git` (reads, push advertisements, pushes; no header or a
+  junk bearer); a valid token is served; no unauthenticated push installs the budget hook. Red at
+  TASK-003's tip (without this task): six distinct `401` messages.
+- `377c3343` (with TASK-008): `authenticatePooled`'s lines repeated the `workspace_id` the request
+  context's logger already carries; they now log it once (`TestPreauthLog_NamesTheWorkspaceOnce`,
+  red without the change: every line carried two).
+
+Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+the shared heavy-suite lock):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`, `make build`, embed-smoketest | OK / rc 0 / "library surface is sound" |
+| `go vet` plain / `-tags integration` / `-tags scenario` | rc 0 ×3 |
+| `go test -p 4 -count=1 ./...` | rc 0 |
+| `go test -race -p 4 -count=1 ./...` | rc 0 |
+| ci.yml `scenario-git-http`, every run step, own database | every step rc 0, 0 skips: `TestGitHTTP_*` 90 passes, `TestBootstrapInternalAdmin_*` 26, `TestWorkflowLifecycle_*` 154, step CAS 12, step evidence 24, status lifecycle 37 + 1, governance 19 + 1, the shared-mode scheduler test; every required `--- PASS` present |
+| `go test -tags integration -p 1 ./...` (migrated registry database) | 39 packages ok; only the two known pre-existing failures (`TestAWSClient_Contract_LocalStack`, `TestRunModeDatabaseDefault`) |
+| ci.yml `git-floor` (local `golang:1.26-bookworm`, git 2.39.5, go1.26.8 with `GOTOOLCHAIN=local`, `--pull=never`; the pinned 1.26.10 image is not present locally) | both CI steps rc 0, plus TASK-003's budget/hook tests and the integration coordination tests rc 0 |
+| golangci-lint v2.11.4 `--new-from-rev main ./...` plain / integration / scenario; `--enable-only=gosec` | 0 issues ×4 |
+| `gofmt -l` on the files changed since main | clean, except `service/scenariotest/scenarios/planning_run_test.go`, already unformatted on main (left as is) |
+| `go run ./dev/pincheck`; `go mod tidy -diff`; `go mod verify` | OK; no diff; all modules verified |
+| SMP compatibility (SMP `82899ace` detached, `../spine` = the integration head, `GOFLAGS=-mod=readonly`, 0 dirty files before and after) | `go build ./...` and `go vet` plain / integration / scenario / faultinject rc 0; `go test -race -p 4 ./...` 151 packages ok, 0 failures; testgate Spine-runtime leg PASS (2447 passed, 3 allowed skips); testgate githttp leg (`-tags integration`, -race) PASS (590 passed, 1 allowed skip); no `ws_*` database or role left |
+
+Codex (`codex review --base main`, plain, from the integration worktree): round 1 at `377c3343`,
+review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
+actionable regressions were identified"). It covered every merged task and coordination commit,
+including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.

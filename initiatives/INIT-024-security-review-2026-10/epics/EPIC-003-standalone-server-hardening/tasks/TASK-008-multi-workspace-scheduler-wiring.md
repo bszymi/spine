@@ -447,3 +447,63 @@ path is touched by TASK-007 too (see the shared-files list).
   `finishAbandoned`, the `abandoned` entry state in `Get`/`Evict`/`EvictIdle`) — TASK-007's N-15
   (no pre-auth ServiceSet build; a build failure answered as 401) touches the same Get/build path
   from the gateway side; reconcile there. `platform_binding_provider.go`: `ListIDs` added.
+
+### Integration A (2026-10-27)
+
+Branch `init/INIT-024-integration-a`, cut from Spine local main `83d82409` (= `a560c210` + the
+INIT-024 scaffold + TASK-001), in the TASK-008 group's worktree. Merge order (each `--no-ff`,
+"Merge <branch> into the INIT-024 integration A branch"): TASK-009 `b8dc7bb3` → `899cd774`;
+TASK-002 `07d6ca8a` → `c6bad6c0`; TASK-006 `96dcea55` → `000c5461`; TASK-007 `55a67a45` →
+`e6ab7e81`; TASK-008 `c6541bd5` → `8a0a1b29`; TASK-003 `02334613` → `4f502b7e`. Coordination
+commits (prefix "INIT-024 integration A — "): `7d0e8522` (TASK-006 × TASK-007), `69c15fb4`
+(TASK-007 × TASK-008), `55789b28` (TASK-003 × TASK-007/TASK-008), `377c3343` (TASK-007 ×
+TASK-008 logging). Nothing is pushed; the status stays In Progress until GitHub CI has run after a
+push.
+
+`CHANGELOG.md` conflicted at every merge (each task adds its own section at the top): every
+section is kept once, newest merge on top, each followed by a `---` line.
+
+**This task.** Merged fifth (`8a0a1b29`). Conflicts: `CHANGELOG.md`, and the
+`docs/integration-guide.md` env table (this task's `SPINE_ORPHAN_THRESHOLD` row and three new
+rows, with TASK-001's and TASK-002's edits of the two rows after them). `serve_wiring.go` (with
+TASK-006), `dbpool.go` (with TASK-007's credential masking) and `ci.yml` (with TASK-009's pins)
+auto-merged. Integrator notes (1)–(3) above:
+- (1)/(3) `69c15fb4`: `TestPreauth_BoundedPoolBuildFailuresAnswerUniform401` proves every bounded
+  build failure (InitTimeout, the abandoned entry, the evicted waiter, the recovered panic, a failed
+  build) answers TASK-007's uniform `401` on `/api/v1` and `/git`, even to a valid token, and the
+  hung and evicted calls return at about InitTimeout; red at this task's tip without TASK-007 (16
+  calls). The CHANGELOG entry, KNOWN-LIMITATIONS item 9 and the `SPINE_WS_POOL_INIT_TIMEOUT` row
+  now say so where they said only that callers get an error.
+- `55789b28` (with TASK-003): `buildServiceSet` ran TASK-003's `EnsureNeutralWorkTree` on the pool's
+  lifetime context; its renormalisation waits for the work tree's hold, so a tree another
+  operation held kept the build past InitTimeout until the hold was released. It is one of the
+  build's one-shot calls and now runs under the init deadline (`InitContext`); past it the
+  renormalisation stays pending for the next build and the workspace is served.
+  `TestServicePool_PendingRenormalisationStopsAtTheInitDeadline`: red on the lifetime context
+  ("never served while its tree was held"), green.
+- `377c3343`: the pool's build lines logged on the Get caller's context (initialized, build
+  panicked, initialization timed out) repeated the request's `workspace_id`; `buildLogger` logs it
+  once and still logs it for callers whose context lacks it (scheduler scans, projection sync).
+  `TestPreauthLog_NamesTheWorkspaceOnce`.
+
+Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+the shared heavy-suite lock):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`, `make build`, embed-smoketest | OK / rc 0 / "library surface is sound" |
+| `go vet` plain / `-tags integration` / `-tags scenario` | rc 0 ×3 |
+| `go test -p 4 -count=1 ./...` | rc 0 |
+| `go test -race -p 4 -count=1 ./...` | rc 0 |
+| ci.yml `scenario-git-http`, every run step, own database | every step rc 0, 0 skips: `TestGitHTTP_*` 90 passes, `TestBootstrapInternalAdmin_*` 26, `TestWorkflowLifecycle_*` 154, step CAS 12, step evidence 24, status lifecycle 37 + 1, governance 19 + 1, the shared-mode scheduler test; every required `--- PASS` present |
+| `go test -tags integration -p 1 ./...` (migrated registry database) | 39 packages ok; only the two known pre-existing failures (`TestAWSClient_Contract_LocalStack`, `TestRunModeDatabaseDefault`) |
+| ci.yml `git-floor` (local `golang:1.26-bookworm`, git 2.39.5, go1.26.8 with `GOTOOLCHAIN=local`, `--pull=never`; the pinned 1.26.10 image is not present locally) | both CI steps rc 0, plus TASK-003's budget/hook tests and the integration coordination tests rc 0 |
+| golangci-lint v2.11.4 `--new-from-rev main ./...` plain / integration / scenario; `--enable-only=gosec` | 0 issues ×4 |
+| `gofmt -l` on the files changed since main | clean, except `service/scenariotest/scenarios/planning_run_test.go`, already unformatted on main (left as is) |
+| `go run ./dev/pincheck`; `go mod tidy -diff`; `go mod verify` | OK; no diff; all modules verified |
+| SMP compatibility (SMP `82899ace` detached, `../spine` = the integration head, `GOFLAGS=-mod=readonly`, 0 dirty files before and after) | `go build ./...` and `go vet` plain / integration / scenario / faultinject rc 0; `go test -race -p 4 ./...` 151 packages ok, 0 failures; testgate Spine-runtime leg PASS (2447 passed, 3 allowed skips); testgate githttp leg (`-tags integration`, -race) PASS (590 passed, 1 allowed skip); no `ws_*` database or role left |
+
+Codex (`codex review --base main`, plain, from the integration worktree): round 1 at `377c3343`,
+review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
+actionable regressions were identified"). It covered every merged task and coordination commit,
+including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.
