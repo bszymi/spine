@@ -48,8 +48,14 @@ type Handler struct {
 	// gitBackendPath is the absolute path to the git-http-backend binary.
 	gitBackendPath string
 
-	// sem limits concurrent git pack operations.
-	sem chan struct{}
+	// slots limits concurrent git operations per (workspace, actor or
+	// peer), per workspace and process-wide (INIT-024 TASK-005, review
+	// finding N-13; push_slots.go).
+	slots *gitSlots
+
+	// commandReadTimeout bounds the read of a push's command section,
+	// which happens before the push takes a slot (prereceive).
+	commandReadTimeout time.Duration
 
 	// opTimeout is the per-request timeout for git operations.
 	opTimeout time.Duration
@@ -89,9 +95,23 @@ type Handler struct {
 	maxPushCommandBytes int
 
 	// mu protects ensuredRepos which tracks repos whose local
-	// http.receivepack config has been aligned with receivePackEnabled.
+	// http.receivepack config has been aligned with receivePackEnabled,
+	// and storageFolds, the case-sensitivity probe's verdict per repo
+	// (INIT-024 TASK-005, review finding N-8; storage_probe.go): true
+	// refuses receive-pack, false admits it, absent (the probe has not
+	// answered) refuses it too.
 	mu           sync.Mutex
 	ensuredRepos map[string]bool
+	storageFolds map[string]bool
+
+	// ensureMu serialises the first alignment of each repository, which
+	// runs before a request takes a slot: concurrent first requests would
+	// otherwise race on the repository's config lock and probe directory.
+	ensureMu sync.Mutex
+
+	// storageProbe answers whether a repository's refs live on storage
+	// that folds names (probeRefStorage, or a test's).
+	storageProbe storageProbe
 
 	// budgetHook is the checkout-budget pre-receive hook every
 	// receive-pack POST installs and pins (INIT-024 TASK-003,
@@ -107,9 +127,29 @@ type Config struct {
 	// ResolveRepoPath returns the filesystem path for a workspace ID.
 	ResolveRepoPath func(ctx context.Context, workspaceID string) (string, error)
 
-	// MaxConcurrent is the maximum number of concurrent git pack operations.
-	// Defaults to 5.
+	// MaxConcurrent is the process-wide ceiling on concurrent git
+	// operations, a backstop behind the two fair caps below (INIT-024
+	// TASK-005, review finding N-13). Defaults to DefaultMaxConcurrent
+	// (8; it was a single cap of 5 for every tenant).
 	MaxConcurrent int
+
+	// MaxConcurrentPerWorkspace caps one workspace's concurrent git
+	// operations, so one tenant cannot take every slot. Defaults to
+	// DefaultMaxConcurrentPerWorkspace (4).
+	MaxConcurrentPerWorkspace int
+
+	// MaxConcurrentPerActor caps one principal's concurrent git
+	// operations within a workspace: an authenticated actor, or — for a
+	// token-less read — the peer address. Defaults to
+	// DefaultMaxConcurrentPerActor (2).
+	MaxConcurrentPerActor int
+
+	// CommandReadTimeout bounds the read of a push's command section
+	// (and its push-options section). A push takes its slot only after
+	// that read, so a client that stalls in it holds no slot and is cut
+	// here, well before the server's whole-request ReadTimeout. Defaults
+	// to DefaultCommandReadTimeout (10s).
+	CommandReadTimeout time.Duration
 
 	// OpTimeout is the per-request timeout for git operations.
 	// Defaults to 30s.
@@ -177,7 +217,19 @@ func NewHandler(cfg Config) (*Handler, error) {
 
 	maxConcurrent := cfg.MaxConcurrent
 	if maxConcurrent <= 0 {
-		maxConcurrent = 5
+		maxConcurrent = DefaultMaxConcurrent
+	}
+	perWorkspace := cfg.MaxConcurrentPerWorkspace
+	if perWorkspace <= 0 {
+		perWorkspace = DefaultMaxConcurrentPerWorkspace
+	}
+	perActor := cfg.MaxConcurrentPerActor
+	if perActor <= 0 {
+		perActor = DefaultMaxConcurrentPerActor
+	}
+	commandReadTimeout := cfg.CommandReadTimeout
+	if commandReadTimeout <= 0 {
+		commandReadTimeout = DefaultCommandReadTimeout
 	}
 
 	opTimeout := cfg.OpTimeout
@@ -212,7 +264,8 @@ func NewHandler(cfg Config) (*Handler, error) {
 		budgetHook:          hook,
 		resolveRepoPath:     cfg.ResolveRepoPath,
 		gitBackendPath:      backendPath,
-		sem:                 make(chan struct{}, maxConcurrent),
+		slots:               newGitSlots(perActor, perWorkspace, maxConcurrent),
+		commandReadTimeout:  commandReadTimeout,
 		opTimeout:           opTimeout,
 		trustedByWorkspace:  trustedByWorkspace,
 		receivePackEnabled:  cfg.ReceivePackEnabled,
@@ -221,6 +274,8 @@ func NewHandler(cfg Config) (*Handler, error) {
 		stepDefs:            cfg.StepDefs,
 		maxPushCommandBytes: defaultMaxPushCommandBytes,
 		ensuredRepos:        make(map[string]bool),
+		storageFolds:        make(map[string]bool),
+		storageProbe:        defaultStorageProbe(),
 	}, nil
 }
 
@@ -324,53 +379,103 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Acquire concurrency semaphore.
-	select {
-	case h.sem <- struct{}{}:
-		defer func() { <-h.sem }()
-	default:
-		log.Warn("git request rejected — concurrency limit reached",
-			"remote_addr", r.RemoteAddr,
-		)
-		w.Header().Set("Retry-After", "5")
-		http.Error(w, "too many concurrent git operations", http.StatusServiceUnavailable)
-		return
-	}
-
 	// Align the repo's local http.receivepack with the flag. Without
 	// this, git-http-backend refuses push even when our gate above
 	// allows it, because the repo config still carries an explicit
-	// `http.receivepack=false` from a previous handler lifetime.
+	// `http.receivepack=false` from a previous handler lifetime. With
+	// receive-pack on, the first alignment also probes the repository's
+	// storage (INIT-024 TASK-005, N-8). It runs once per repository and
+	// handler lifetime, serialised, before any slot is taken.
 	if err := h.ensureReceivePackConfig(r.Context(), repoPath); err != nil {
 		log.Error("failed to align receivepack config", "error", err, "repo_path", repoPath)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	// The checkout-budget pre-receive hook (INIT-024 TASK-003) is put
-	// in place before the push reaches git, and git is pointed at it
-	// below. A push that cannot have it is refused (fail closed).
-	var hooksDir string
+	// A repository on storage that folds ref names never takes a push
+	// (owner question 2: receive-pack refused per repository; clones and
+	// fetches go on below). Refused at the advertisement and at the
+	// POST, before any of the body is read.
+	if push {
+		switch folds, probed := h.storageVerdict(repoPath); {
+		case !probed:
+			log.Error("git push refused: the repository's storage could not be probed for case sensitivity (fail closed)",
+				"repo_path", repoPath)
+			http.Error(w, "push gate unavailable", http.StatusInternalServerError)
+			return
+		case folds:
+			log.Warn("git push refused: the repository is on case- or normalization-insensitive storage",
+				"remote_addr", r.RemoteAddr, "repo_path", repoPath)
+			http.Error(w, caseFoldingStorageMessage, http.StatusForbidden)
+			return
+		}
+	}
+
+	// Pre-receive gate. Runs only on the POST /git-receive-pack request
+	// (the one that carries ref updates); GET
+	// info/refs?service=git-receive-pack is just the capability
+	// advertisement and carries no ref updates to evaluate. It reads the
+	// command section under the command-read deadline and admits every
+	// update BEFORE the push takes a slot (INIT-024 TASK-005, N-13): a
+	// client that stalls there, or whose push is refused, never holds
+	// one.
+	var admitted *admittedPush
 	if push && r.Method == http.MethodPost {
+		var ok bool
+		if admitted, ok = h.prereceive(w, r, log); !ok {
+			return
+		}
+		r.Body = admitted.body
+	}
+
+	// A slot of the principal's, the workspace's and the process's caps
+	// (push_slots.go). Held until the CGI has answered.
+	principal := slotPrincipalOf(r)
+	release, full := h.slots.acquire(principal)
+	if release == nil {
+		log.Warn("git request rejected — concurrency limit reached",
+			"remote_addr", r.RemoteAddr,
+			"cap", string(full),
+		)
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "too many concurrent git operations", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+
+	var cgiEnv []string
+	if admitted != nil {
+		// The checkout-budget pre-receive hook (INIT-024 TASK-003) is put
+		// in place before the push reaches git, and git is pointed at it
+		// below. A push that cannot have it is refused (fail closed). A
+		// work tree whose renormalisation is still pending does not stop
+		// the push (installBudgetHook warns and goes on), and the
+		// admission re-check below is armed all the same.
 		dir, err := h.installBudgetHook(r.Context(), repoPath)
 		if err != nil {
 			log.Error("checkout-budget pre-receive hook not installed; push refused", "error", err, "repo_path", repoPath)
 			http.Error(w, "push gate unavailable", http.StatusInternalServerError)
 			return
 		}
-		hooksDir = dir
-	}
-
-	// Pre-receive branch-protection check. Runs only on the POST
-	// /git-receive-pack request (the one that carries ref updates);
-	// GET info/refs?service=git-receive-pack is just the capability
-	// advertisement and carries no ref updates to evaluate.
-	if push && r.Method == http.MethodPost {
-		newBody, ok := h.prereceive(w, r, log)
-		if !ok {
+		// The same hook re-decides the admission of every update once the
+		// pack is in and before any ref moves (INIT-024 TASK-005, N-9;
+		// admission_recheck.go). It reaches this request over a per-push
+		// socket whose path and one-time token travel in the CGI
+		// environment — per request, never in the shared hook script.
+		rc, err := startRecheck(r.Context(), h.opTimeout, func(ctx context.Context, lines []RefUpdate) []string {
+			return h.recheckAdmission(ctx, log, admitted, lines)
+		})
+		if err != nil {
+			log.Error("push-admission re-check unavailable; push refused", "error", err)
+			http.Error(w, "push gate unavailable", http.StatusInternalServerError)
 			return
 		}
-		r.Body = newBody
+		defer rc.close()
+		cgiEnv = append(cgiEnv, hooksPathEnv(dir))
+		cgiEnv = append(cgiEnv, rc.env()...)
+		// Every gate has passed: write the override audit events now
+		// (ADR-009 §4), as the push is handed to git.
+		admitted.emitOverrides()
 	}
 
 	start := time.Now()
@@ -384,13 +489,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cgiHandler := &cgi.Handler{
 		Path: h.gitBackendPath,
 		Dir:  repoPath,
-		Env: []string{
+		Env: append([]string{
 			"GIT_PROJECT_ROOT=" + repoPath,
 			"GIT_HTTP_EXPORT_ALL=1",
-		},
-	}
-	if hooksDir != "" {
-		cgiHandler.Env = append(cgiHandler.Env, hooksPathEnv(hooksDir))
+		}, cgiEnv...),
 	}
 
 	cgiHandler.ServeHTTP(w, r)
@@ -425,62 +527,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // matches how the API-path policy guards behave, while tags, notes,
 // the reserved spine/** namespace and run branches stay gated with no
 // policy at all.
-func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.Logger) (io.ReadCloser, bool) {
-	// Buffer up to maxPushCommandBytes looking for the flush that
-	// terminates the command section. Anything after the flush is
-	// PACK data (or a push-options section, see below) and must
-	// reach CGI unchanged on allow.
-	cmdBuf, pendingBody, err := readPushCommands(r.Body, h.maxPushCommandBytes)
+func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.Logger) (*admittedPush, bool) {
+	// The command section — and the push-options section after it — is
+	// read under the command-read deadline (INIT-024 TASK-005, N-13):
+	// the push holds no slot yet, and a client that stalls here is cut
+	// at commandReadTimeout rather than at the server's ReadTimeout.
+	sec, err := h.readCommandSections(w, r)
 	if err != nil {
-		log.Warn("pre-receive parse failed",
-			"remote_addr", r.RemoteAddr, "error", err)
-		h.writeReceivePackDenial(w,
-			[]string{fmt.Sprintf("branch-protection: malformed push: %s", err)},
-			nil)
-		return nil, false
-	}
-
-	updates, caps, err := parseRefUpdates(bytes.NewReader(cmdBuf))
-	if err != nil {
-		log.Warn("pre-receive parse failed",
-			"remote_addr", r.RemoteAddr, "error", err)
-		h.writeReceivePackDenial(w,
-			[]string{fmt.Sprintf("branch-protection: malformed push: %s", err)},
-			nil)
-		return nil, false
-	}
-
-	// Push-options section — only present when the client advertised
-	// the `push-options` capability on the first ref-update frame
-	// AND the server repo has `receive.advertisePushOptions=true`
-	// (ensureReceivePackConfig sets that when receive-pack is on).
-	// Options sit between the command flush and the PACK data; we
-	// append the options block to cmdBuf so CGI still sees the
-	// original stream on allow.
-	pushOptions := map[string]string{}
-	if _, ok := caps["push-options"]; ok {
-		optsBuf, afterOpts, err := readPushCommands(pendingBody, h.maxPushCommandBytes)
-		if err != nil {
+		var se *commandSectionError
+		switch {
+		case errors.Is(err, errCommandReadTimeout):
+			log.Warn("pre-receive command section not received in time",
+				"remote_addr", r.RemoteAddr, "timeout", h.commandReadTimeout.String())
+			h.writeReceivePackDenial(w,
+				[]string{fmt.Sprintf("push refused: the command section was not received within %s (%s)", h.commandReadTimeout, EnvCommandReadTimeout)},
+				nil)
+		case errors.As(err, &se) && se.options:
 			log.Warn("pre-receive push-options parse failed",
+				"remote_addr", r.RemoteAddr, "error", se.err)
+			h.writeReceivePackDenial(w,
+				[]string{fmt.Sprintf("branch-protection: malformed push options: %s", se.err)},
+				nil)
+		default:
+			if errors.As(err, &se) {
+				err = se.err
+			}
+			log.Warn("pre-receive parse failed",
 				"remote_addr", r.RemoteAddr, "error", err)
 			h.writeReceivePackDenial(w,
-				[]string{fmt.Sprintf("branch-protection: malformed push options: %s", err)},
+				[]string{fmt.Sprintf("branch-protection: malformed push: %s", err)},
 				nil)
-			return nil, false
 		}
-		opts, err := parsePushOptions(bytes.NewReader(optsBuf))
-		if err != nil {
-			log.Warn("pre-receive push-options parse failed",
-				"remote_addr", r.RemoteAddr, "error", err)
-			h.writeReceivePackDenial(w,
-				[]string{fmt.Sprintf("branch-protection: malformed push options: %s", err)},
-				nil)
-			return nil, false
-		}
-		pushOptions = opts
-		cmdBuf = append(cmdBuf, optsBuf...)
-		pendingBody = afterOpts
+		return nil, false
 	}
+	cmdBuf, pendingBody, updates, pushOptions := sec.buf, sec.rest, sec.updates, sec.options
 
 	// Resolve the policy for this push. The context value wins — the
 	// gateway sets it per-request so a shared-mode deployment
@@ -624,12 +704,15 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 		return nil, false
 	}
 
-	// Allow path: emit one governance event per overridden ref
-	// update BEFORE handing off to CGI. This mirrors the API-path
-	// wiring — the event is the authoritative audit record and must
-	// be written whether or not CGI ultimately persists the ref
-	// (CGI failure after this point still represents an override
-	// attempt an operator consented to).
+	// Allow path: one governance event per overridden ref update is
+	// emitted BEFORE handing off to CGI — by ServeHTTP, through
+	// emitOverrides, once the push also holds its slot, its hook and its
+	// re-check (a push refused before CGI is no override attempt, as when
+	// the slot was taken first). This mirrors the API-path wiring — the
+	// event is the authoritative audit record and must be written whether
+	// or not CGI ultimately persists the ref (CGI failure after this
+	// point still represents an override attempt an operator consented
+	// to).
 	//
 	// Re-attach the push trace ID to the context the emitter sees:
 	// traceIDForPush falls back to a freshly generated ID when the
@@ -637,8 +720,12 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 	// future direct-embed deployments). Without this re-attach
 	// the audit event emits with an empty trace_id, breaking the
 	// correlation guarantee ADR-009 §4 expects.
-	if emitter := eventsFromContext(r.Context()); emitter != nil && len(honoredOverrides) > 0 {
-		emitCtx := r.Context()
+	emitCtx := r.Context()
+	emitOverrides := func() {
+		emitter := eventsFromContext(emitCtx)
+		if emitter == nil || len(honoredOverrides) == 0 {
+			return
+		}
 		if observe.TraceID(emitCtx) == "" && traceID != "" {
 			emitCtx = observe.WithTraceID(emitCtx, traceID)
 		}
@@ -650,7 +737,32 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 	// All updates allowed. Stitch the buffered command bytes back in
 	// front of the remaining body so CGI sees the original stream.
 	combined := io.MultiReader(bytes.NewReader(cmdBuf), pendingBody)
-	return &combinedBody{r: combined, closer: pendingBody}, true
+	return &admittedPush{
+		body:          &combinedBody{r: combined, closer: pendingBody},
+		updates:       updates,
+		actor:         admActor,
+		repositoryID:  repositoryID,
+		runs:          runs,
+		defs:          defs,
+		emitOverrides: emitOverrides,
+	}, true
+}
+
+// admittedPush is a push the pre-receive gate let through: the body to
+// hand to CGI, and what the apply-time re-check (recheckAdmission) and
+// the override audit need.
+type admittedPush struct {
+	body io.ReadCloser
+	// updates are the command section's ref updates, as parsed.
+	updates []RefUpdate
+	// actor, repositoryID and the runs/defs pair are the admission's
+	// inputs, exactly as the pre-pack decision used them.
+	actor        *domain.Actor
+	repositoryID string
+	runs         refadmit.RunReader
+	defs         refadmit.StepDefLookup
+	// emitOverrides writes the honoured-override events (ADR-009 §4).
+	emitOverrides func()
 }
 
 // overrideHonouredKinds extracts the rule kinds from reasons marked
@@ -741,6 +853,113 @@ func (c *combinedBody) Close() error {
 		return nil
 	}
 	return c.closer.Close()
+}
+
+// EnvCommandReadTimeout is the `spine serve` variable of the command-read
+// deadline (Config.CommandReadTimeout), named in its refusal.
+const EnvCommandReadTimeout = "SPINE_GIT_COMMAND_READ_TIMEOUT"
+
+// commandSections is the pre-pack part of a receive-pack body.
+type commandSections struct {
+	// buf is the command section, and the push-options section when
+	// there is one, verbatim: CGI is handed buf followed by rest.
+	buf []byte
+	// rest is the body positioned at the pack.
+	rest    io.ReadCloser
+	updates []RefUpdate
+	options map[string]string
+}
+
+// commandSectionError is a malformed command section (options=false) or
+// push-options section (options=true).
+type commandSectionError struct {
+	options bool
+	err     error
+}
+
+func (e *commandSectionError) Error() string { return e.err.Error() }
+func (e *commandSectionError) Unwrap() error { return e.err }
+
+// errCommandReadTimeout: the command section (or the push-options
+// section) did not arrive within the command-read deadline, or the
+// request ended first.
+var errCommandReadTimeout = errors.New("command section not received within the command-read deadline")
+
+// readCommandSections reads and parses the command section of r's body
+// (parseCommandSections) within h.commandReadTimeout (INIT-024
+// TASK-005, review finding N-13).
+//
+// The server's ReadTimeout is a deadline on the whole request, so the
+// connection's read deadline is never moved forward: the read runs in a
+// goroutine, and when the command-read deadline passes first the read is
+// cut — the connection's read deadline is set to now
+// (http.ResponseController), which makes the blocked Read return; with a
+// ResponseWriter that cannot set it, the body is closed instead — and
+// the goroutine is waited for, so nothing reads the body once
+// ServeHTTP returns. The request is refused either way, so the deadline
+// is never restored. On success the connection's deadline is untouched:
+// the pack is read under the server's ReadTimeout, as before.
+func (h *Handler) readCommandSections(w http.ResponseWriter, r *http.Request) (*commandSections, error) {
+	type result struct {
+		sec *commandSections
+		err error
+	}
+	body := r.Body
+	done := make(chan result, 1)
+	go func() {
+		sec, err := parseCommandSections(body, h.maxPushCommandBytes)
+		done <- result{sec, err}
+	}()
+	timer := time.NewTimer(h.commandReadTimeout)
+	defer timer.Stop()
+	select {
+	case res := <-done:
+		return res.sec, res.err
+	case <-timer.C:
+	case <-r.Context().Done():
+	}
+	if err := http.NewResponseController(w).SetReadDeadline(time.Now()); err != nil {
+		_ = body.Close()
+	}
+	<-done
+	return nil, errCommandReadTimeout
+}
+
+// parseCommandSections reads the command section of a receive-pack body
+// (readPushCommands), parses its ref updates and, when the client asked
+// for them, reads and parses the push-options section.
+//
+// Push-options section — only present when the client advertised the
+// `push-options` capability on the first ref-update frame AND the server
+// repo has `receive.advertisePushOptions=true` (ensureReceivePackConfig
+// sets that when receive-pack is on). Options sit between the command
+// flush and the PACK data; the options block is appended to the command
+// bytes so CGI still sees the original stream on allow.
+func parseCommandSections(body io.ReadCloser, maxBytes int) (*commandSections, error) {
+	// Buffer up to maxBytes looking for the flush that terminates the
+	// command section. Anything after the flush is PACK data (or a
+	// push-options section) and must reach CGI unchanged on allow.
+	cmdBuf, rest, err := readPushCommands(body, maxBytes)
+	if err != nil {
+		return nil, &commandSectionError{err: err}
+	}
+	updates, caps, err := parseRefUpdates(bytes.NewReader(cmdBuf))
+	if err != nil {
+		return nil, &commandSectionError{err: err}
+	}
+	options := map[string]string{}
+	if _, ok := caps["push-options"]; ok {
+		optsBuf, afterOpts, err := readPushCommands(rest, maxBytes)
+		if err != nil {
+			return nil, &commandSectionError{options: true, err: err}
+		}
+		if options, err = parsePushOptions(bytes.NewReader(optsBuf)); err != nil {
+			return nil, &commandSectionError{options: true, err: err}
+		}
+		cmdBuf = append(cmdBuf, optsBuf...)
+		rest = afterOpts
+	}
+	return &commandSections{buf: cmdBuf, rest: rest, updates: updates, options: options}, nil
 }
 
 // readPushCommands reads pkt-lines from body, appending them to a
@@ -844,17 +1063,54 @@ func trimRefsHeads(ref string) string {
 //     the `push-options` capability. Without this, `git push -o ...`
 //     on the client silently drops options and our pre-receive gate
 //     never sees them — EPIC-004 TASK-003 depends on this being set.
+//
+// With receive-pack enabled it first probes the repository's storage
+// (INIT-024 TASK-005, review finding N-8; storage_probe.go) and records
+// the verdict for storageVerdict. A repository whose storage folds ref
+// names gets both keys false — git-http-backend itself then refuses
+// receive-pack — and its pushes are refused by ServeHTTP; reads are
+// served as before (owner question 2). A probe that cannot answer is not
+// cached: the keys are written false, pushes are refused (fail closed)
+// and the next request probes again.
+//
+// It runs before the request takes a slot, so the first alignment of
+// each repository is serialised (ensureMu); afterwards it is a map
+// lookup.
 func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) error {
-	h.mu.Lock()
-	if h.ensuredRepos[repoPath] {
-		h.mu.Unlock()
+	if h.repoEnsured(repoPath) {
 		return nil
 	}
-	h.mu.Unlock()
+	h.ensureMu.Lock()
+	defer h.ensureMu.Unlock()
+	if h.repoEnsured(repoPath) {
+		return nil
+	}
 
 	value := "false"
+	cache := true
 	if h.receivePackEnabled {
-		value = "true"
+		folds, err := h.storageProbe(ctx, repoPath)
+		h.mu.Lock()
+		switch {
+		case err != nil:
+			cache = false
+			delete(h.storageFolds, repoPath)
+		case folds:
+			h.storageFolds[repoPath] = true
+		default:
+			h.storageFolds[repoPath] = false
+			value = "true"
+		}
+		h.mu.Unlock()
+		switch {
+		case err != nil:
+			observe.Logger(ctx).Error("case-sensitivity probe of a served repository failed; its pushes are refused until a probe succeeds",
+				"repo_path", repoPath, "error", err)
+		case folds:
+			observe.Logger(ctx).Error("served repository is on case- or normalization-insensitive storage; receive-pack is refused for it (clones and fetches are served). "+
+				"See KNOWN-LIMITATIONS: Served Repositories Need Case- and Normalization-Sensitive Storage",
+				"repo_path", repoPath)
+		}
 	}
 
 	for _, kv := range [][2]string{
@@ -871,10 +1127,27 @@ func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) 
 		}
 	}
 
-	h.mu.Lock()
-	h.ensuredRepos[repoPath] = true
-	h.mu.Unlock()
+	if cache {
+		h.mu.Lock()
+		h.ensuredRepos[repoPath] = true
+		h.mu.Unlock()
+	}
 	return nil
+}
+
+func (h *Handler) repoEnsured(repoPath string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ensuredRepos[repoPath]
+}
+
+// storageVerdict reports the probe's verdict on repoPath: probed is
+// false when no probe has answered (pushes are refused, fail closed).
+func (h *Handler) storageVerdict(repoPath string) (folds, probed bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	folds, probed = h.storageFolds[repoPath]
+	return folds, probed
 }
 
 // isReadOnly returns true if the request is a read-only git operation.

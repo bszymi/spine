@@ -217,6 +217,10 @@ type serveDeps struct {
 	SSEMaxConn            int
 	OrphanThreshold       time.Duration
 
+	// GitHTTPLimits are the git endpoint's slot caps and command-read
+	// deadline (INIT-024 TASK-005; zero fields: the defaults).
+	GitHTTPLimits gitHTTPLimits
+
 	// NotifyBridgeEnabled gates the runtime.event_log NOTIFY listener
 	// that forwards out-of-process event_log writes into the in-process
 	// EventBroadcaster (INIT-011/EPIC-003/TASK-006 sub-PR 10a). Sourced
@@ -523,7 +527,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	if orch != nil {
 		gitStepDefs = orch
 	}
-	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, gitHTTPPolicy, runReaderOrNil(deps.Store), gitStepDefs, deps.WSServicePool != nil, log)
+	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, gitHTTPPolicy, runReaderOrNil(deps.Store), gitStepDefs, deps.WSServicePool != nil, deps.GitHTTPLimits, log)
 	gitPushResolver := buildGitPushResolver(deps.WSServicePool, deps.Store, deps.Events, gitStepDefs)
 
 	cfg := gateway.ServerConfig{

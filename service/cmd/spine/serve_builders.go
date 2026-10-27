@@ -493,7 +493,10 @@ func commitRetryFor(eng schedulerEngine) func(ctx context.Context, runID string)
 // operator-only at push time, with a Warn log per refused ref. In single
 // mode the resolver attaches exactly this pair, so the warning below
 // describes what pushes will actually get.
-func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs map[string][]string, receivePackEnabled bool, policy branchprotect.Policy, runs refadmit.RunReader, stepDefs refadmit.StepDefLookup, perWorkspace bool, log *slog.Logger) *githttp.Handler {
+//
+// limits are the slot caps and the command-read deadline (INIT-024
+// TASK-005; zero fields: githttp's defaults).
+func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs map[string][]string, receivePackEnabled bool, policy branchprotect.Policy, runs refadmit.RunReader, stepDefs refadmit.StepDefLookup, perWorkspace bool, limits gitHTTPLimits, log *slog.Logger) *githttp.Handler {
 	if wsResolver == nil {
 		return nil
 	}
@@ -513,11 +516,17 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs map[string]
 		// The pre-receive hook holds pushes to the client's checkout
 		// budget (INIT-024 TASK-003; installCheckoutLimits set it).
 		TreeBudget: processTreeBudget(),
+		// Fair slots and the command-read deadline (INIT-024 TASK-005).
+		MaxConcurrent:             limits.MaxConcurrent,
+		MaxConcurrentPerWorkspace: limits.MaxConcurrentPerWorkspace,
+		MaxConcurrentPerActor:     limits.MaxConcurrentPerActor,
+		CommandReadTimeout:        limits.CommandReadTimeout,
 	})
 	if err != nil {
 		log.Warn("git HTTP endpoint disabled", "reason", err.Error())
 		return nil
 	}
+	logGitHTTPLimits(log, limits)
 	if len(trustedCIDRs) == 0 {
 		// Recommend the runners' own addresses, never a subnet: a
 		// range that contains a Docker bridge gateway or a reverse
