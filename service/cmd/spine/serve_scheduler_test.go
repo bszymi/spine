@@ -836,7 +836,8 @@ func TestServe_PlatformBindingModeBuildsMultiScheduler(t *testing.T) {
 // workspace, claimed for good: the pool gives up after its InitTimeout and
 // the scan ends without a reference; while the abandoned build runs, later
 // ticks fail fast for the workspace (no second build beside it); once it
-// returns, the next tick builds and scans the workspace.
+// returns successfully its set is installed (review round 2) and the next
+// tick scans the workspace with it.
 func TestMultiScheduler_HungWorkspaceBuildDoesNotWedgeTheScan(t *testing.T) {
 	clearSchedulerEnv(t)
 	release := make(chan struct{})
@@ -884,15 +885,24 @@ func TestMultiScheduler_HungWorkspaceBuildDoesNotWedgeTheScan(t *testing.T) {
 	mu.Unlock()
 	releaseOnce.Do(func() { close(release) })
 	deadline := time.Now().Add(5 * time.Second)
-	for pool.ActiveCount() != 0 {
+	for {
+		if _, err := pool.Get(context.Background(), "ws-a"); err == nil {
+			pool.Release("ws-a")
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("the abandoned build was not drained")
+			t.Fatal("the late successful build was not installed")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	mu.Lock()
+	if builds != 1 {
+		t.Fatalf("builds = %d, want the late build installed, not a second one", builds)
+	}
+	mu.Unlock()
 	ms.ScanTimeouts(context.Background())
 	if got := st.runStatusForTest(); got != domain.RunStatusCancelled {
-		t.Fatalf("the tick after the abandoned build drained did not build and scan ws-a: run %s, want cancelled", got)
+		t.Fatalf("the tick after the late build was installed did not scan ws-a: run %s, want cancelled", got)
 	}
 	if n := pool.RefCount("ws-a"); n != 0 {
 		t.Fatalf("ws-a refcount %d after the scan, want 0", n)
@@ -900,3 +910,57 @@ func TestMultiScheduler_HungWorkspaceBuildDoesNotWedgeTheScan(t *testing.T) {
 }
 
 func (s *timeoutStore) runStatusForTest() domain.RunStatus { return s.run.Status }
+
+// Review round 2: SPINE_WS_POOL_INIT_TIMEOUT sets the pool's InitTimeout.
+// Unset, empty or blank keeps the default; anything but a positive Go
+// duration refuses to start, in every mode.
+func TestPoolInitTimeoutFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		value   *string
+		want    time.Duration
+		wantErr bool
+	}{
+		{value: nil},
+		{value: ptr("")},
+		{value: ptr("  ")},
+		{value: ptr("5m"), want: 5 * time.Minute},
+		{value: ptr(" 90s "), want: 90 * time.Second},
+		{value: ptr("0"), wantErr: true},
+		{value: ptr("-1m"), wantErr: true},
+		{value: ptr("10"), wantErr: true},
+		{value: ptr("soon"), wantErr: true},
+	} {
+		name := "unset"
+		if tc.value != nil {
+			name = "value=" + *tc.value
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(poolInitTimeoutEnv, "")
+			if tc.value == nil {
+				if err := os.Unsetenv(poolInitTimeoutEnv); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv(poolInitTimeoutEnv, *tc.value)
+			}
+			got, err := poolInitTimeoutFromEnv()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), poolInitTimeoutEnv) {
+					t.Fatalf("error = %v, want a refusal naming %s", err, poolInitTimeoutEnv)
+				}
+				if _, berr := buildWorkspaceResolver(context.Background(), nil, "", slog.New(slog.DiscardHandler),
+					workspaceDeliveryConfig{}, "", engine.StrictStepEntryPolicy()); berr == nil {
+					t.Fatal("buildWorkspaceResolver started with an invalid init timeout")
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("= %s, %v; want %s", got, err, tc.want)
+			}
+			cfg := sharedModePoolConfig(workspaceDeliveryConfig{}, slog.New(slog.DiscardHandler), nil, "", nil, "", engine.StrictStepEntryPolicy())
+			if cfg.InitTimeout != tc.want {
+				t.Fatalf("shared-mode pool InitTimeout = %s, want %s", cfg.InitTimeout, tc.want)
+			}
+		})
+	}
+}

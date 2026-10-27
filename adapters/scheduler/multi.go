@@ -50,9 +50,12 @@ import (
 //     tenant's scans run on, for good.
 //   - Every workspace scan runs under a hard deadline, ScanDeadline (10
 //     minutes by default), far beyond its soft budget: an abandoned scan
-//     has its context cancelled then — its git children are stopped with
-//     SIGTERM, whose handlers remove git's lock files — and gives back its
-//     pool reference, which an evicted workspace's next request waits for.
+//     has its context cancelled then and returns, giving back its pool
+//     reference, which an evicted workspace's next request waits for. The
+//     git commands it runs on that context are stopped with SIGTERM, whose
+//     handlers remove git's lock files; work it waits on but does not own
+//     is not (a code repository's first clone, which the git pool runs
+//     detached for every caller waiting on it), only no longer waited for.
 //   - A panic in one workspace's scan is recovered and logged with its
 //     stack (runWorkspace); it ends that workspace's share of the tick,
 //     not the process every tenant shares.
@@ -140,15 +143,17 @@ type MultiSchedulerConfig struct {
 	// interval covers one item that started just before the budget ran out.
 	TickWait time.Duration
 	// ScanDeadline is the hard deadline of one workspace's scan (INIT-024
-	// TASK-008): its context is cancelled once it has run that long. It is
-	// the backstop for a scan no tick waits for any more — one that never
-	// ends would keep its pool reference, and an evicted workspace's next
-	// request waits for the last one. Cancellation stops its git children
+	// TASK-008): its context is cancelled once it has run that long, and
+	// the scan returns. It is the backstop for a scan no tick waits for any
+	// more — one that never ends would keep its pool reference, and an
+	// evicted workspace's next request waits for the last one.
+	// Cancellation stops the git commands the scan runs on that context
 	// with SIGTERM (adapters/git), whose handlers remove git's lock files;
 	// a sequence on a shared working tree runs detached from the caller's
-	// cancellation and ends within its own bound (5 minutes). 0 means
-	// DefaultScanDeadline, twice that bound, so the deadline never cuts
-	// an item the sequence bound allows.
+	// cancellation and ends within its own bound (5 minutes), and a code
+	// repository's first clone (run detached by the git pool) is only no
+	// longer waited for. 0 means DefaultScanDeadline, twice the sequence
+	// bound, so the deadline never cuts an item that bound allows.
 	ScanDeadline time.Duration
 }
 

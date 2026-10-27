@@ -1418,25 +1418,40 @@ What that implies, and what it leaves open:
      keeps its workspace's tree lock, one git process, one goroutine and its pool reference, and is not
      counted against later ticks' `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES`. Every scan runs under a
      hard 10-minute deadline (`MultiSchedulerConfig.ScanDeadline`; no variable): past it the scan's
-     context is cancelled — its git children are stopped with SIGTERM (git's handlers remove its lock
-     files; a remote helper exits with it) — and it gives back its pool reference, with an Error. Until
-     then a request for an evicted workspace (a deactivation, a binding invalidation, a credential
-     rotation) waits for that reference: up to the deadline, or less if the request's own deadline
-     comes first. A sequence on a shared working tree (the primary repository's merge and push) runs
-     detached from the cancellation and ends within its own 5-minute bound. Building a cold
-     workspace's services is not bounded by the scan either (the build runs on the pool's lifetime
-     context, which the services it starts need): the pool gives up on a build after 2 minutes
-     (`PoolConfig.InitTimeout`) for every caller waiting on it — the scan, requests, the projection
-     sync — with `ErrWorkspaceUnavailable`. Until the abandoned build returns, every request and scan
-     of that workspace fails at once the same way: no second build starts beside it (a late build
-     registers its database pool over the replacement's). When it returns, what it built is closed
-     and the next caller builds afresh. A build that never returns (a connection the operating system
-     never times out) keeps the workspace unavailable until the process restarts — no longer hung,
-     but not served. An attempt cut by the
-     deadline records nothing — its outcome write uses the expired context — so, like a lock wait cut
-     short (item 8), it does not count against the merge retry budget: a code repository whose remote
-     never answers keeps its run in `committing`, retried on later ticks, each attempt held up to the
-     deadline (only that workspace waits). On shutdown a stalled scan is waited for only until the 10 s
+     context is cancelled and the scan returns, giving back its pool reference, with an Error. The git
+     commands it runs on that context are stopped with SIGTERM (git's handlers remove its lock files;
+     a remote helper exits with it). A code repository's first clone is not: the git pool runs it
+     detached, shared by every caller waiting for it, so it goes on after the scan has stopped waiting
+     for it. Until the deadline a request for an evicted workspace (a deactivation, a binding
+     invalidation, a credential rotation) waits for that reference: up to the deadline, or less if the
+     request's own deadline comes first. A sequence on a shared working tree (the primary
+     repository's merge and push) runs detached from the cancellation and ends within its own 5-minute
+     bound.
+   - **Building a cold workspace's services is bounded by the pool, not by the scan** (the build runs
+     on the pool's lifetime context, which the services it starts need). The pool waits for a build
+     at most its init timeout (`SPINE_WS_POOL_INIT_TIMEOUT`, default 2 minutes); every caller waiting
+     on the build — the scan, requests, the projection sync, a request already waiting on an evicted
+     entry — then gets an error (`ErrWorkspaceUnavailable`), and so does every caller until the
+     abandoned build returns: no second build starts beside it (a late build registers its database
+     pool over the replacement's). The build's one-shot calls — the database ping and the first
+     connections, the subscription-secret sweep, its git commands, the first bootstrap-admin write
+     and the internal subscription upsert — run under a deadline of the same length, so a database
+     that accepts the connection and never answers fails the build at the timeout instead of holding
+     it. When the abandoned build returns, a successful result is installed and served (a slow but
+     healthy workspace is not rebuilt for ever), unless the workspace was evicted meanwhile or the
+     pool closed; otherwise what it built is closed and the next caller builds afresh. A panic in a
+     build is recovered: what the build had started is closed, and callers get the error.
+     **An operator with a workspace that keeps failing this way:** check that its database answers
+     (connection and authentication); if its healthy build is simply slower than the timeout (a large
+     subscription sweep, a slow database), raise `SPINE_WS_POOL_INIT_TIMEOUT`; to bound connection
+     setup independently of Spine, add `connect_timeout=<seconds>` to the workspace's database URL. A
+     build stuck in a call nothing bounds (a builder step that does not use the init context) keeps
+     the workspace unavailable — every request fails at once, nothing hangs — until it returns or the
+     process restarts.
+   - **An attempt cut by the scan deadline records nothing** — its outcome write uses the expired
+     context — so, like a lock wait cut short (item 8), it does not count against the merge retry
+     budget: a code repository whose remote never answers keeps its run in `committing`, retried on
+     later ticks, each attempt held up to the deadline (only that workspace waits). On shutdown a stalled scan is waited for only until the 10 s
      shutdown deadline. As many tenants stalling in one tick as there are slots delay the others by one
      wait: the workspaces that tick left undispatched come first in the next tick of the same kind.
    - **Each tick lists every candidate row.** The scans read, per workspace and per tick, every

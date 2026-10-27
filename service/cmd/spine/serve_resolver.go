@@ -288,7 +288,12 @@ func bootstrapInternalAdmin(ctx context.Context, ss *workspace.ServiceSet, cfg w
 	// place, each revocation and its audit line) must say which
 	// workspace they concern, because the operator acts per workspace.
 	ctx = observe.WithWorkspaceID(ctx, ss.Config.ID)
-	err := runInternalAdminBootstrap(ctx, ss.Store, cfg)
+	// The first attempt is one of the build's one-shot calls, bounded by
+	// its init deadline (workspace.InitContext); the background retry
+	// below keeps the set's lifetime context.
+	initCtx, cancelInit := workspace.InitContext(ctx)
+	err := runInternalAdminBootstrap(initCtx, ss.Store, cfg)
+	cancelInit()
 	if err == nil {
 		return nil
 	}
@@ -398,13 +403,17 @@ func wireWorkspaceDelivery(ctx context.Context, ss *workspace.ServiceSet, cfg wo
 	deliveryCtx, cancel := context.WithCancel(ctx)
 
 	if cfg.SMPEventURL != "" {
-		if err := delivery.BootstrapInternalSubscription(deliveryCtx, ss.Store, delivery.BootstrapConfig{
+		// A one-shot call of the build: under its init deadline
+		// (workspace.InitContext). The dispatcher below keeps deliveryCtx.
+		initCtx, cancelInit := workspace.InitContext(deliveryCtx)
+		if err := delivery.BootstrapInternalSubscription(initCtx, ss.Store, delivery.BootstrapConfig{
 			EventURL:    cfg.SMPEventURL,
 			WorkspaceID: ss.Config.SMPWorkspaceID,
 			Token:       cfg.SMPInternalToken,
 		}); err != nil {
 			log.Error("workspace bootstrap internal subscription failed", "workspace", ss.Config.ID, "error", err)
 		}
+		cancelInit()
 	}
 
 	subLister := delivery.NewStoreSubscriptionLister(ss.Store)
@@ -472,8 +481,11 @@ func sharedModePoolConfig(
 	codeRepoBase string,
 	stepEntryPolicy engine.StepEntryPolicy,
 ) workspace.PoolConfig {
+	// buildWorkspaceResolver has refused an invalid value already.
+	initTimeout, _ := poolInitTimeoutFromEnv()
 	return workspace.PoolConfig{
 		Builder:            newPooledWorkspaceBuilder(deliveryCfg, stepEntryPolicy, log),
+		InitTimeout:        initTimeout,
 		SecretCipher:       secretCipher,
 		SecretEnvelopeMode: secretEnvelopeMode,
 		SecretClient:       secretClient,
@@ -481,6 +493,30 @@ func sharedModePoolConfig(
 		IdleTimeout:        poolIdleTimeoutFromEnv(),
 		CodeRepoBase:       codeRepoBase,
 	}
+}
+
+// poolInitTimeoutEnv overrides workspace.PoolConfig.InitTimeout (default
+// workspace.DefaultInitTimeout, 2 minutes): how long a request or a scan
+// waits for a workspace's services to be built, and the deadline of the
+// build's one-shot calls (INIT-024 TASK-008). Raise it for a workspace
+// whose healthy build is slower than that.
+const poolInitTimeoutEnv = "SPINE_WS_POOL_INIT_TIMEOUT"
+
+// poolInitTimeoutFromEnv reads SPINE_WS_POOL_INIT_TIMEOUT. Unset, empty or
+// blank means the default (0); anything but a positive Go duration is an
+// error, which buildWorkspaceResolver turns into a refusal to start (as
+// for the SPINE_SCHEDULER_* bounds; no silent fallback to a value the
+// operator did not choose).
+func poolInitTimeoutFromEnv() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(poolInitTimeoutEnv))
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%s=%q: want a positive duration such as 2m", poolInitTimeoutEnv, raw)
+	}
+	return d, nil
 }
 
 // buildWorkspaceResolver initializes the workspace resolver based on
@@ -505,6 +541,11 @@ func buildWorkspaceResolver(
 ) (*resolverWiring, error) {
 	resolver := strings.ToLower(strings.TrimSpace(os.Getenv("WORKSPACE_RESOLVER")))
 	legacyMode := os.Getenv("SPINE_WORKSPACE_MODE")
+	// Validated in every mode, so a mistyped value never starts silently;
+	// only the shared modes' pool reads it (sharedModePoolConfig).
+	if _, err := poolInitTimeoutFromEnv(); err != nil {
+		return nil, err
+	}
 
 	if resolver == "" {
 		if legacyMode != "" {

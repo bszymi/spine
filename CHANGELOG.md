@@ -49,12 +49,19 @@ gap more than a security finding (INIT-024 owner question 5). Standalone only: S
 - Shared modes: building a workspace's services is bounded. The build runs on the pool's lifetime
   context (the services it starts live as long as the set), so a workspace database that accepts
   the connection and never answers held every request, scan and projection sync of that workspace
-  indefinitely. After 2 minutes (`PoolConfig.InitTimeout`) every caller waiting on the build gets
-  `ErrWorkspaceUnavailable` (a request answers the usual "failed to initialize workspace services"),
-  and so does every caller until the abandoned build returns (no
-  second build of the workspace starts beside it); then its result is closed and the next caller
-  builds afresh. The build now runs in its own goroutine; a panic in it (the builder hook included)
-  is recovered and returned as an initialization error, with its stack in the log.
+  indefinitely. Now:
+  - the pool waits for a build at most `SPINE_WS_POOL_INIT_TIMEOUT` (new; default `2m`; unset,
+    empty or blank means the default, anything but a positive Go duration refuses to start);
+    every caller waiting on the build — including one already waiting on an evicted entry — then
+    gets an error, and so does every caller until the abandoned build returns (no second build of
+    the workspace starts beside it);
+  - the build's one-shot calls (the database ping and first connections, the subscription-secret
+    sweep, its git commands, the first bootstrap-admin write, the internal subscription upsert) run
+    under a deadline of the same length, so a database that never answers fails the build;
+  - a build that finishes after the timeout is installed and served, unless the workspace was
+    evicted meanwhile or the pool closed; otherwise it is closed and the next caller builds afresh;
+  - the build runs in its own goroutine; a panic in it (the builder hook included) is recovered,
+    what it had started is closed, and callers get an initialization error (its stack is logged).
 - In `platform-binding` mode the scheduler lists workspaces from the provider's cache keys
   (`ListIDs`), reading no secret; each scan's resolve still reads the binding's secrets
   (`KNOWN-LIMITATIONS.md`, item 9).
