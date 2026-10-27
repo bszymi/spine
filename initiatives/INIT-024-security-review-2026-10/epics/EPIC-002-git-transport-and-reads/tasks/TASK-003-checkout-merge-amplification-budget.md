@@ -283,7 +283,7 @@ of the test drops the two lines that configure a hook the base does not have
 
 | # | Attempt | Result |
 |---|---|---|
-| 1 | **`.gitattributes` expansion** inside the byte budget: `ident` (4 → 47 bytes per `$Id$`, 71 with SHA-256), `text eol=crlf` (2x), `working-tree-encoding=UTF-32` (4x) | **Real, fixed.** Measured on git 2.54: 50,000 stored bytes under `* ident text eol=crlf` wrote 490,000; 16,008 under `* ident` wrote 188,148. The measure reads the tree's `.gitattributes` and applies the worst-case product of the expanding attributes they set. *(Superseded in review round 1: the first version's loose substring match and its jump to the worst case above 64 files refused legitimate trees; see "Review round 1", ruling 2.)* `TestTreeBudget_AttributeExpansionIsCounted` (ident, macro, UTF-32 refused; eol-only and `binary` admitted; the factor bounds what git really wrote) — **red:** "admitted a tree that wrote 188148 bytes" (ident), 188169 (macro), 64178 (UTF-32). `TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase`. |
+| 1 | *(Superseded by review round 2: the scanner described here was removed; attributes are now neutralised — see "Review round 2".)* **`.gitattributes` expansion** inside the byte budget: `ident` (4 → 47 bytes per `$Id$`, 71 with SHA-256), `text eol=crlf` (2x), `working-tree-encoding=UTF-32` (4x) | **Real, fixed.** Measured on git 2.54: 50,000 stored bytes under `* ident text eol=crlf` wrote 490,000; 16,008 under `* ident` wrote 188,148. The measure reads the tree's `.gitattributes` and applies the worst-case product of the expanding attributes they set. *(Superseded in review round 1: the first version's loose substring match and its jump to the worst case above 64 files refused legitimate trees; see "Review round 1", ruling 2.)* `TestTreeBudget_AttributeExpansionIsCounted` (ident, macro, UTF-32 refused; eol-only and `binary` admitted; the factor bounds what git really wrote) — **red:** "admitted a tree that wrote 188148 bytes" (ident), 188169 (macro), 64178 (UTF-32). `TestTreeBudget_AttributeFilesTheScanCannotReadAreWorstCase`. |
 | 2 | **`worktree add` vs the deadline**: worktree add writes the tree in a child `git reset --hard` the SIGTERM never reaches | **Real, fixed** (the AC 7 worktree subtest took 5.1 s against a 300 ms deadline): with a deadline the worktree is added `--no-checkout` and filled by our own deadlined `reset --hard`. |
 | 3 | **`Clone`** writes the remote's default branch unmeasured (a code repository registered by a workspace admin) | **Real, fixed:** `--no-checkout`, measure HEAD, `reset --hard`; a refusal removes the clone. `TestClone_RefusesOverBudgetTree` — **red:** fails at the base. Codex rounds 1–2 hardened this path. |
 | 4 | **Hook recursion**: the hook execs `os.Executable()`, which in any test binary is the test binary — handed `git-hook pre-receive` it ran its whole suite inside git, recursively (found by the first full githttp run: 660 s, nested `remote: --- FAIL` lines) | **Fixed** by the package-`init` entry (`HookProcessEnv`, Deviation 4): every binary that can serve a push runs the hook before `main`/`TestMain`. The full githttp suite (every existing push test now passes through the real hook) runs in ~10 s. |
@@ -390,10 +390,13 @@ against `a560c210` (RULES; identical in the TASK-001 gate); `dev/testgate` Spine
   with a `gitread.NewClient(clonePath)` client (its embedded `*git.CLIClient`), or
   `git.MeasureTree` / `TreeBudget.Measure` for the `TreeStats`. A refusal is
   `errors.Is(err, git.ErrTreeTooLarge)`; `errors.As(err, &*git.TreeTooLargeError)` gives `Limit`,
-  `Max`, `Seen`, `Expansion` for the message (it never contains the sha). Measure a commit or tree id
+  `Max`, `Seen` for the message (it never contains the sha). The measure requires the repository to
+  carry `git.NeutralCheckoutAttributes` last in `info/attributes` (`git.ErrNeutralAttributesMissing`
+  otherwise); SMP's own writer must write exactly that constant (TASK-018). Measure a commit or tree id
   SMP already resolved, so the measured object is the one it then checks out. For a merge, check
-  its RESULT: compute it with `git merge-tree --write-tree <target-tip> <source>` (git >= 2.38)
-  and `TreeBudget.Check` that tree — the client path does exactly this (review round 1).
+  its RESULT: after switching to the target, compute it with `git merge-tree --write-tree
+  <target-tip> <source>` (git >= 2.38) under `GIT_ALLOC_LIMIT` and `TreeBudget.Check` that tree —
+  the client path does exactly this (review rounds 1-2).
   The measure inherits the process environment, so it also works inside a pre-receive hook (git's
   quarantine variables).
 - **Optional:** `gitread.WithCLIOptions(git.WithTreeBudget(b), git.WithMutateTimeout(d))` turns the
@@ -455,11 +458,10 @@ confirmed in each review sub-session; 3 rounds, the maximum):
 | A2 | `01a1787a-6980-7dc3-a929-8c5fcbe21b72` | P1 `* ident\0hidden` sets ident in git (C-string line) but parsed as an unknown attribute: 480,000 bytes written under a 100,000-byte budget | Real, fixed `3a3d15b3`: a NUL ends the line and the scan reads on (superset of git's blob reader, which stops the file, and its worktree reader, which stops the line). Parsing cases + an end-to-end `nul-terminated` case in `TestTreeBudget_AttributeExpansionIsCounted` — **red at `1480414c`** ("admitted a tree that wrote 188155 bytes") |
 | A3 | `01a1788a-c263-7111-9407-715dde9221af` | P1 a macro named like a built-in attribute (`[attr]text ident` + `* text`) is expanded by git but was only classified | Real, fixed `366fc202`: every set name with a definition is expanded, whatever it also means. With it, checked against git 2.54: CR is a blank between pattern and attributes (`*\rident` sets ident — git wrote 48 bytes for `$Id$\n`), and an unclosed quoted pattern is split at the first blank (git drops the line; counting it only over-estimates). Cases in `TestTreeBudget_AttributeParsing` and `built-in-named macro` end to end — **red at `3a3d15b3`** ("wrote 188164 bytes"; "factor 2, want 23.5"; `*\rident` 1; filter behind the macro not found). No fourth codex round (the limit); these last changes were not codex-reviewed. |
 
-**Adversarial note (attribute parser vs git).** The scan is a superset of what git applies: it
-ignores which paths a pattern matches, reads lines git ignores (negative patterns, `[attr]` outside
-the top-level file, over-long lines, a quote that does not close, everything after a NUL in a blob)
-and splits attributes on any Unicode space (git's blanks are a subset). Where it must not be looser
-— a NUL, CR, macros of any name and depth — it now matches git, each with a test.
+**Adversarial note (attribute parser vs git) — withdrawn in review round 2.** It claimed the scan
+was a superset of what git applies. It was not: a bare `[attr]` line (a glob pattern to git) and a
+quoted pattern git fails to unquote were still read differently, and a merge was measured under the
+current working tree's attributes. The scanner was removed (Review round 2).
 
 **Gates after review round 1** (all at `04cde224`; heavy legs under the shared heavy-suite lock):
 
@@ -477,3 +479,55 @@ and splits attributes on any Unicode space (git's blanks are a subset). Where it
 
 **Not run (review round 1):** a fourth codex round (the limit is three); GitHub CI (nothing is
 pushed); the full `make test-scenario` with a registry DB (command as above).
+
+### Review round 2 (2026-10-27; delta review of `1a2a8898`: 3 P1) — design change
+
+**Deviation 11 (design change, ruled by the coordinator on the reviewer's recommendation): the
+attribute scanner is removed and checkouts are made attribute-neutral instead.** The scanner tried
+to predict how git would expand a tree's content from its `.gitattributes`. Each round found inputs
+it read differently from git — codex rounds A1–A3 five, and this review two more (P1-A: a bare
+`[attr]` line is a glob pattern to git; P1-B: a quoted pattern git fails to unquote splits
+elsewhere) — and it could never see the operator's attribute files or config. So enforcement no
+longer predicts git: `git.NeutralCheckoutAttributes` (`* -text -ident -filter !eol
+!working-tree-encoding !conflict-marker-size`), the last line of `$GIT_COMMON_DIR/info/attributes`
+(highest precedence), turns every content conversion off for every checkout, merge and linked
+worktree, and the measure is plain stored bytes. `!merge` is deliberately not in the line: it would
+change `binary` and `merge=union` results (`TestNeutralAttributes_MergeDriversUnchanged`).
+
+| Ruling | What was done | Tests (red at `1a2a8898` / mutation) |
+|---|---|---|
+| 1 neutral attributes | `adapters/git/neutral_attributes.go`: `NeutralCheckoutAttributes`; `EnsureNeutralCheckoutAttributes` (locates the common dir, keeps operator lines in order, moves an earlier copy of the line to the end, idempotent — no rewrite when already last — atomic temp+rename, refuses a non-regular file / link); `HasNeutralCheckoutAttributes`; the measure's `requireNeutralCheckoutAttributes` (fail closed, permanent `ErrNeutralAttributesMissing`; the LAST attribute line must be the neutral one — comments and blanks after it are fine). Called by `spine serve` at start (single mode), in `buildServiceSet`, on every receive-pack POST (`installBudgetHook`, so the hook's measure and the served repo agree), in a budgeted `Clone` between `--no-checkout` and `reset --hard`, and by the gitpool when it reuses a clone in a budgeted process. The library stays opt-in: nothing writes the file unless the host calls the writer (or turns a budget on, which makes the measure require it). | `TestNeutralAttributes_EveryShapeWritesStoredBytes` — 17 shapes (the reviewer's combo; `ident`; `[attr]` as a pattern, with space and tab; `[attr]` + UTF-32; both failed-unquote shapes; NUL; CR; macro named like a built-in; 12-macro chain; UTF-32; `text eol=crlf`; `crlf`; `filter=` with a required host driver; attributes past 1 MiB; host config only) under a hostile global config (`core.attributesFile` `* ident text eol=crlf`, `core.autocrlf`, `core.eol=crlf`, `filter.x.smudge` `required=true`, diff3): a budgeted linked worktree and a budgeted main checkout each write exactly the measured stored bytes, on git 2.54 and 2.39.5 — **red at `1a2a8898`**: every shape wrote 98 KB–393 KB for ~10 KB stored, or was refused outright (`red-r2.log`); `TestNeutralAttributes_MergeDriversUnchanged`; `TestNeutralAttributes_EnsureKeepsOperatorLines`; `TestNeutralAttributes_MeasureFailsClosedWithoutTheLine`; line present after a budgeted clone, a push, a reused pool clone. Mutations: writer no-op → 12 tests fail; fail-closed check removed → `…MeasureFailsClosedWithoutTheLine` fails. |
+| 2 delete the scanner | `treebudget_attrs.go` deleted (356 lines); the listing sink's attribute fields, `TreeStats.Expansion/ExpansionReason/AttributeFiles`, `TreeTooLargeError.Expansion/Stored/Reason`, `bytesOver`, the `+Inf` host-filter refusal, `filterDrivers` and `measureEnv` removed; the measure is stored bytes, factor 1. The scanner's own tests were deleted (`AttributeParsing`, `…ScanCannotReadAreWorstCase`, `RefusalNamesTheFactor`, `FilterDriverIsUnbounded`, `MacrosAreExpandedOnceAndFully`, `UnscannedAttributes…`) or folded into the neutral shape table (`AttributeExpansionIsCounted`, `ReviewReproductionsAreAdmitted`, the codex A1–A3 shapes). | — |
+| 3 P1-C | `checkMergeTarget` (target tip; the target's tree when the switch is a checkout) runs before `switchTo`; `checkMergeResult` (merge-tree) runs AFTER it, in the working tree `git merge` sees, and the tip is re-checked after the switch and again after the measure. merge-tree and the measured `git merge` run under `GIT_ALLOC_LIMIT` = max(`MaxTotalBytes`, the read allocation limit) — 2 GiB by default — and an allocation refusal is a budget refusal (`MergeAllocRefusedMessage`). **Deviation 12:** the ruling said to reuse the existing tree-object limit (16 MiB); measured on git 2.54, `git merge` of a packed 20 MB file fails under it ("attempting to allocate 20000001 over limit 16777216 … packed object … is corrupt"), and `spine serve` has no setting to raise it, so the merge limit is the budget's own byte limit, floored at the read limit: no allocation a merge within the budget needs is larger than the bytes the budget admits. | `TestMerge_ConvergenceMarkersAreBoundedByTheNeutralLine` (HEAD main, run branch with `* conflict-marker-size=100000`, conflicting sides, 64 KiB budget: markers are 7 characters and the conflicted files stay within the budget — **red at `1a2a8898`**: 100,000-character markers); `TestMerge_ResultIsComputedInTheTargetsWorkingTree` (target-only `merge=union`: the measured tree is the committed tree, both paths — **red at `1a2a8898`**, and the "result before the switch" mutation fails it); `TestMerge_RunsUnderTheMergeAllocLimit` (a PATH wrapper records `GIT_ALLOC_LIMIT` for merge-tree and merge; none without a budget); `TestMerge_AllocRefusalIsABudgetRefusal` (a ~1.3 MB file changed on both sides under a 1 MiB limit). Mutation: dropping the limit fails both alloc tests. `TestMerge_TargetMovedAfterTheMeasureIsRefused` now moves the tip during the result measure and is caught by the second check. |
+| 4 docs | KNOWN-LIMITATIONS "Checkout Budget" rewritten ("Checkouts write stored bytes", "A merge is measured by its result" with the order and the allocation limit, the attribute bullet deleted, "Not atomic" names an out-of-process `info/attributes` edit); CHANGELOG "Changed (operators)": stored-byte checkouts (LFS pointers stay pointers), commit-side normalisation off, 7-character markers, dirty-once on upgrade, operator `merge.<name>.driver` and `pull.twohead` not neutralised; embedder API list updated; integration guide §7 and env table, git-push guide, architecture doc; code comments (`treebudget.go`, `treebudget_merge.go`, `neutral_attributes.go`). | — |
+
+**Handoffs (re-recorded after the deletion; these replace the round-1 handoffs):**
+- **TASK-004:** collides in `cli.go` `runSink` (the mutate-deadline block, the merge
+  `GIT_ALLOC_LIMIT` env and its refusal mapping; read env moved to `commandEnv`), the `opClasses`
+  map (`measure_tree` added; gofmt realigned it), the `limits.go` const block after `minSinkGrowth`
+  and its header. `treeListingSink` is now attribute-free (`budget`, `stop`, `stats`, `carry`,
+  `delivered`, `over`, `parseErr`): do not reuse it as is (it parses `ls-tree -l` and keeps no
+  paths); move its NUL-record core — the bounded carry, stop + cancel on the first refusal, the
+  unterminated-output check — into TASK-004's `listing.go` and build both on it (per-record caps
+  differ: 4096 vs the remaining path budget). Its kept-bytes / listing cap must be >= the path
+  budget + one byte per entry + a margin, or be derived from the budget (the 16 MiB path default
+  plus 200,000 NULs is ~16.2 MiB). The budget is opt-in for SMP, so "listings bounded by the
+  budget" does not hold there.
+- **TASK-005:** collides in `handler.go` `ServeHTTP` (hook install — which now also writes the
+  neutral attributes — before `prereceive`, the CGI `Env` append), `NewHandler` (`newBudgetHook`)
+  and the `Handler` struct (`budgetHook`, `hooksWarned`); `ensureReceivePackConfig` is untouched.
+  The hook is a fresh process with a from-scratch CGI environment and only budget flags (no DB,
+  actor or run): N-9 needs a callback channel, and per-push data must go through `cgiHandler.Env`,
+  because the per-repo script is shared and rewritten on every push. Moving the semaphore slot
+  after the command read would put the hook install outside the slot.
+- **TASK-018 (SMP bump/adoption):** SMP INIT-027 EPIC-005 TASK-011 writes an equivalent line into
+  SMP's pool clones with its own writer, which replaces the file whenever it differs (and its line
+  lacks `!conflict-marker-size`, SMP P2-1). TASK-018 must make Spine's exported
+  `git.NeutralCheckoutAttributes` the single source of the line, and make sure the two writers
+  never manage the same file (SMP's replace-on-difference writer and Spine's append-and-keep
+  writer would otherwise flip-flop). Until then a Spine budgeted measure on an SMP clone whose file
+  ends in SMP's line refuses (`ErrNeutralAttributesMissing`) — SMP does not call it today.
+
+**Codex budget.** This is a new design, so it gets a fresh codex budget of at most 2 rounds
+(deliberate, per the coordinator's ruling); rounds A1–A3 above reviewed the scanner, which no
+longer exists.

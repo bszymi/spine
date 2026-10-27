@@ -154,13 +154,10 @@ type CLIClient struct {
 	// own WithTreeBudget (nil: the process default, if any) and
 	// WithMutateTimeout (0: likewise). Read through CheckoutLimits() at
 	// every call. measureHook is a test hook (SetMeasureHookForTest).
-	treeBudget    *TreeBudget
-	mutateTimeout time.Duration
-	measureHook   func(MeasureTrace)
-	// measureEnv, when set, is appended to the environment of the
-	// measure's git-config read (filterDrivers): a budgeted Clone's
-	// checkout client passes the clone's own environment.
-	measureEnv []string
+	treeBudget      *TreeBudget
+	mutateTimeout   time.Duration
+	measureHook     func(MeasureTrace)
+	mergeResultHook func(tree string) // test hook: the merge result tree measured
 }
 
 // CLIOption configures a CLIClient.
@@ -636,8 +633,7 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 // deadline.
 func (c *CLIClient) checkoutClone(ctx context.Context, path string, created bool, limits CheckoutLimits, cfgArgs, env []string) error {
 	cc := &CLIClient{repoPath: path, maxBlobBytes: c.maxBlobBytes, maxOutputBytes: c.maxOutputBytes,
-		maxGitAllocBytes: c.maxGitAllocBytes, treeBudget: limits.Budget, mutateTimeout: limits.MutateTimeout,
-		measureEnv: env}
+		maxGitAllocBytes: c.maxGitAllocBytes, treeBudget: limits.Budget, mutateTimeout: limits.MutateTimeout}
 	// A refused or failed clone is removed: all of it when Clone created
 	// the directory; otherwise everything in it — git clones only into an
 	// empty directory, so all of it is the clone's, including whatever a
@@ -655,6 +651,14 @@ func (c *CLIClient) checkoutClone(ctx context.Context, path string, created bool
 			}
 		}
 		return err
+	}
+	// A budgeted clone gets the neutral checkout attributes before its
+	// tree is measured and written (neutral_attributes.go): the reset
+	// below then writes exactly the bytes the measure sums.
+	if limits.Budget != nil {
+		if err := EnsureNeutralCheckoutAttributes(ctx, path); err != nil {
+			return discard(err)
+		}
 	}
 	out, _, err := cc.runWith(ctx, "clone", runOpts{}, "rev-parse", "-q", "--verify", "HEAD^{commit}")
 	if err != nil {
@@ -804,12 +808,12 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 //
 // The whole call (lookup, switch, merge) holds the working tree.
 //
-// With a checkout budget (INIT-024 TASK-003) the merge's RESULT tree is
-// computed (`git merge-tree --write-tree`) on the target tip and measured
-// after the lookup and before the switch, and the target's own tree when
-// the switch to it is a checkout (treebudget_merge.go); over the budget
-// it is refused (ErrTreeTooLarge) with nothing switched, merged or moved.
-// The abort path measures nothing: it restores the state the merge
+// With a checkout budget (INIT-024 TASK-003) the target's own tree is
+// measured before the switch when the switch is a checkout, and the
+// merge's RESULT tree (`git merge-tree --write-tree` on the target tip, in
+// the switched working tree) before `git merge` runs (treebudget_merge.go);
+// over the budget it is refused (ErrTreeTooLarge) and nothing is merged or
+// moved. The abort path measures nothing: it restores the state the merge
 // started from.
 func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, error) {
 	if opts.Strategy == "abort" || opts.Source == "--abort" {
@@ -861,11 +865,19 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 	if err != nil {
 		return MergeResult{}, err
 	}
-	ours, err := c.checkMergeBudget(ctx, opts.Target, target, source)
+	ours, err := c.checkMergeTarget(ctx, opts.Target, target)
 	if err != nil {
 		return MergeResult{}, err
 	}
 	if err := c.switchTo(ctx, target); err != nil {
+		return MergeResult{}, err
+	}
+	if err := c.sameMergeBase(ctx, ours); err != nil {
+		return MergeResult{}, err
+	}
+	// The result, in the working tree `git merge` now sees, and the tip
+	// once more right before the merge runs on it.
+	if err := c.checkMergeResult(ctx, ours, source); err != nil {
 		return MergeResult{}, err
 	}
 	if err := c.sameMergeBase(ctx, ours); err != nil {
@@ -1949,6 +1961,14 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 	if class == opRead || class == opDiff {
 		cmd.Env = c.commandEnv(class)
 	}
+	// A budgeted merge runs under the merge allocation limit
+	// (treebudget_merge.go). No budget: the inherited environment, as before.
+	mergeLimit := int64(0)
+	if op == "merge" {
+		if mergeLimit = c.mergeAllocLimit(); mergeLimit > 0 {
+			cmd.Env = append(os.Environ(), "GIT_ALLOC_LIMIT="+strconv.FormatInt(mergeLimit, 10))
+		}
+	}
 
 	stdout := newStdoutSink(limit, sizeHint, class != opMutate, text)
 	stderr := &stderrSink{}
@@ -1959,6 +1979,9 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 	errText := stderr.String()
 	if err != nil && mutateDeadlineHit(parent, ctx, deadline) {
 		return nil, mutateTimeout(op, deadline, err)
+	}
+	if refused := mergeAllocRefusal(op, errText, mergeLimit); refused != nil {
+		return nil, refused
 	}
 
 	// Size refusals first. The alloc refusal is honoured even when git

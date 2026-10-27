@@ -6,11 +6,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/bszymi/spine/adapters/git"
 )
 
 func ghGit(t *testing.T, dir string, stdin []byte, args ...string) string {
@@ -34,6 +37,11 @@ func ghRepo(t *testing.T) (dir, small, bomb, blob string) {
 	t.Helper()
 	dir = t.TempDir()
 	ghGit(t, dir, nil, "init", "-q", "--bare")
+	// The budget's measure needs the neutral checkout attributes, which the
+	// git HTTP endpoint writes into every repository it serves.
+	if err := git.EnsureNeutralCheckoutAttributes(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
 	blob = ghGit(t, dir, bytes.Repeat([]byte("x"), 4<<10), "hash-object", "-w", "--stdin")
 	smallTree := ghGit(t, dir, []byte("100644 blob "+blob+"\tone.md\n"), "mktree")
 	small = ghGit(t, dir, nil, "commit-tree", smallTree, "-m", "small")

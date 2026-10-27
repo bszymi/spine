@@ -38,6 +38,9 @@ func cbGit(t *testing.T, dir string, stdin []byte, args ...string) string {
 // budget, logs nothing.
 func TestWarnIfOverCheckoutBudget(t *testing.T) {
 	repo := testutil.NewTempRepo(t)
+	if err := git.EnsureNeutralCheckoutAttributes(context.Background(), repo); err != nil {
+		t.Fatal(err)
+	}
 	var mk strings.Builder
 	blob := cbGit(t, repo, []byte("x"), "hash-object", "-w", "--stdin")
 	for i := 0; i < 30; i++ {

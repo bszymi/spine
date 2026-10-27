@@ -502,11 +502,10 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 	if err := c.verifyCommitOID(ctx, "merge", "source sha", opts.SourceSHA); err != nil {
 		return MergeResult{}, err
 	}
-	// The checkout budget (INIT-024 TASK-003): the merge's result tree on
-	// the target tip (and the target's tree when the switch is a
-	// checkout), before the switch — over it, nothing is switched or
-	// merged and the target does not move. No budget: no process.
-	ours, err := c.checkMergeBudget(ctx, opts.Target, target, opts.SourceSHA)
+	// The checkout budget (INIT-024 TASK-003): the target's tree when the
+	// switch is a checkout, before it; the merge's result after it, below.
+	// No budget: no process.
+	ours, err := c.checkMergeTarget(ctx, opts.Target, target)
 	if err != nil {
 		return MergeResult{}, err
 	}
@@ -527,9 +526,16 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 		}
 		base = strings.TrimSpace(head)
 	}
-	// The merge must run on the tip whose result was measured.
+	// The merge must run on the tip measured before the switch, and its
+	// result is measured in the working tree `git merge` now sees.
 	if ours != "" && base != ours {
 		return MergeResult{}, errMergeTargetMoved()
+	}
+	if err := c.checkMergeResult(ctx, ours, opts.SourceSHA); err != nil {
+		return MergeResult{}, err
+	}
+	if err := c.sameMergeBase(ctx, ours); err != nil {
+		return MergeResult{}, err
 	}
 	res, err := c.runMerge(ctx, opts, opts.SourceSHA)
 	if err != nil {

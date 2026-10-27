@@ -3,6 +3,7 @@ package gitpool_test
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -62,5 +63,36 @@ func TestClient_CheckoutBudgetRefusalIsRememberedForATime(t *testing.T) {
 	}
 	if n := cloner.callCount(); n != 4 {
 		t.Fatalf("another remote: clone attempts = %d, want 4", n)
+	}
+}
+
+// TestClient_ReusedCloneGetsTheNeutralAttributes (INIT-024 TASK-003
+// review round 2): in a process with a checkout budget (`spine serve`
+// installs it before any pool is used) an existing clone is given the
+// neutral checkout attributes on first access — the budget's measure
+// refuses without them; without a budget it is left alone.
+func TestClient_ReusedCloneGetsTheNeutralAttributes(t *testing.T) {
+	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
+	access := func(t *testing.T) string {
+		base := t.TempDir()
+		local := filepath.Join(base, "code")
+		if out, err := exec.Command("git", "init", "-q", local).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v %s", err, out)
+		}
+		repo := &repository.Repository{ID: "code", Status: "active", LocalPath: local, CloneURL: "https://git.example/code.git"}
+		resolver := &stubResolver{lookups: map[string]lookupResult{"code": {repo: repo}}}
+		pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return &stubClient{} },
+			gitpool.WithCloner(&fakeCloner{}), gitpool.WithRepoBase(base))
+		if _, err := pool.Client(context.Background(), "code"); err != nil {
+			t.Fatal(err)
+		}
+		return local
+	}
+	if ok, _ := git.HasNeutralCheckoutAttributes(context.Background(), access(t)); ok {
+		t.Fatal("written without a budget")
+	}
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{}})
+	if ok, err := git.HasNeutralCheckoutAttributes(context.Background(), access(t)); !ok || err != nil {
+		t.Fatalf("a reused clone in a budgeted process lacks the line: %v %v", ok, err)
 	}
 }

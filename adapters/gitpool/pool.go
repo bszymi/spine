@@ -395,6 +395,15 @@ func (p *Pool) ensureClone(ctx context.Context, repo *repository.Repository, cre
 	if cloneExists(repo.LocalPath) {
 		p.logger.Debug("gitpool: reusing existing clone",
 			"repository_id", repo.ID, "local_path", repo.LocalPath)
+		// In a process with a checkout budget (`spine serve`) a clone made
+		// before it — or by an older binary — gets the neutral checkout
+		// attributes too; the budget's measure refuses without them.
+		if git.DefaultCheckoutLimits().Budget != nil {
+			if err := git.EnsureNeutralCheckoutAttributes(ctx, repo.LocalPath); err != nil {
+				return domain.NewErrorWithCause(domain.ErrUnavailable,
+					fmt.Sprintf("repository %q is unavailable: cannot set its neutral checkout attributes", repo.ID), err)
+			}
+		}
 		return nil
 	}
 	if strings.TrimSpace(repo.CloneURL) == "" {

@@ -50,7 +50,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -233,6 +232,12 @@ func (h *Handler) installBudgetHook(ctx context.Context, repoPath string) (strin
 		return "", fmt.Errorf("create %s: %w", dir, err)
 	}
 	h.warnOverriddenHooks(ctx, repoPath, dir)
+	// The hook's measure needs the served repository to carry the neutral
+	// checkout attributes (it refuses without them), and so does every
+	// checkout of what it admits.
+	if err := git.EnsureNeutralCheckoutAttributes(ctx, repoPath); err != nil {
+		return "", fmt.Errorf("neutral checkout attributes: %w", err)
+	}
 	path := filepath.Join(dir, "pre-receive")
 	switch fi, err := os.Lstat(path); {
 	case errors.Is(err, fs.ErrNotExist):
@@ -426,11 +431,8 @@ func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, std
 		var tl *git.TreeTooLargeError
 		switch {
 		case errors.As(err, &tl):
-			hint := fmt.Sprintf("raise %s above %d to admit it, or reduce the tree", EnvForTreeLimit(tl.Limit), tl.Seen)
-			if math.IsInf(tl.Expansion, 1) {
-				hint = "no limit admits it"
-			}
-			return refuse("%q: %s (%s); %s", t.ref, git.TreeTooLargeMessage, tl.Error(), hint)
+			return refuse("%q: %s (%s); raise %s above %d to admit it, or reduce the tree",
+				t.ref, git.TreeTooLargeMessage, tl.Error(), EnvForTreeLimit(tl.Limit), tl.Seen)
 		case err != nil:
 			var ge *git.GitError
 			if errors.As(err, &ge) && ge.Message == git.TreeObjectTooLargeMessage {

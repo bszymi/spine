@@ -141,27 +141,6 @@ func ResetDefaultCheckoutLimitsForTest() {
 	processCheckoutLimits.Store(nil)
 }
 
-// AttributeExpansionForTest is the worst-case checkout expansion factor
-// of a .gitattributes text, for object ids of hexLen hex digits.
-func AttributeExpansionForTest(text string, hexLen int) float64 {
-	set := newAttrSet()
-	set.add([]byte(text))
-	classes, _ := set.evaluate()
-	return classes.factor(hexLen)
-}
-
-// AttributeFiltersForTest returns the filter names a .gitattributes text
-// sets.
-func AttributeFiltersForTest(text string) []string {
-	set := newAttrSet()
-	set.add([]byte(text))
-	_, filters := set.evaluate()
-	return filters
-}
-
-// WorstAttributeExpansionForTest is the worst-case factor.
-func WorstAttributeExpansionForTest(hexLen int) float64 { return attrAll.factor(hexLen) }
-
 // ReadTreeForTest runs ResetBranch's two-tree switch (`read-tree -m -u
 // from to`) through runWith, under the client's mutate deadline.
 func (c *CLIClient) ReadTreeForTest(ctx context.Context, from, to string) error {
@@ -171,3 +150,9 @@ func (c *CLIClient) ReadTreeForTest(ctx context.Context, from, to string) error 
 
 // CheckBudgetGitVersionOutputForTest exposes the budget's git floor parser.
 func CheckBudgetGitVersionOutputForTest(line string) error { return checkBudgetGitVersionOutput(line) }
+
+// SetMergeResultHookForTest installs a hook called with every merge
+// result tree a budgeted merge measures.
+func (c *CLIClient) SetMergeResultHookForTest(hook func(tree string)) {
+	c.mergeResultHook = hook
+}

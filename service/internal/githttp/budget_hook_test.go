@@ -132,6 +132,10 @@ func TestPrereceive_RefusesOverBudgetTreePush(t *testing.T) {
 	if err != nil || !bytes.Contains(hook, []byte(budgetHookMarker)) {
 		t.Fatalf("installed hook: %v\n%s", err, hook)
 	}
+	// The served repository carries the neutral checkout attributes.
+	if ok, err := git.HasNeutralCheckoutAttributes(context.Background(), repo); !ok || err != nil {
+		t.Fatalf("served repository lacks the neutral checkout attributes: %v %v", ok, err)
+	}
 }
 
 // TestPrereceive_BudgetHookCannotBeRedirected: a core.hooksPath in the

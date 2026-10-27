@@ -67,7 +67,7 @@ func tbBomb(t *testing.T, repo, base string, fanout, blobSize int) string {
 // run branch holding the bomb (50 x 4 KiB = 200 KiB when written).
 func tbRepo(t *testing.T) (repo, base, bomb, run string) {
 	t.Helper()
-	repo = testutil.NewTempRepo(t)
+	repo = tbNeutralRepo(t)
 	testutil.WriteFile(t, repo, "README.md", "hello\n")
 	tbGit(t, repo, nil, "add", "README.md")
 	tbGit(t, repo, nil, "commit", "-q", "-m", "readme")
@@ -76,6 +76,18 @@ func tbRepo(t *testing.T) (repo, base, bomb, run string) {
 	run = "spine/run/task-x-1a2b3c4d"
 	tbGit(t, repo, nil, "update-ref", "refs/heads/"+run, bomb)
 	return repo, base, bomb, run
+}
+
+// tbNeutralRepo is a fresh repository carrying the neutral checkout
+// attributes, as every repository `spine serve` budgets does (the
+// measure refuses without them).
+func tbNeutralRepo(t *testing.T) string {
+	t.Helper()
+	repo := testutil.NewTempRepo(t)
+	if err := git.EnsureNeutralCheckoutAttributes(context.Background(), repo); err != nil {
+		t.Fatal(err)
+	}
+	return repo
 }
 
 // smallBudget refuses the bomb on bytes (200 KiB > 64 KiB) and admits
@@ -351,7 +363,7 @@ func assertUntouched(t *testing.T, repo, base string) {
 // and a tree id.
 func TestMeasureTree_CountsEntriesAndBytes(t *testing.T) {
 	ctx := context.Background()
-	repo := testutil.NewTempRepo(t)
+	repo := tbNeutralRepo(t)
 	testutil.WriteFile(t, repo, "a/b/c.md", "content of c\n")
 	testutil.WriteFile(t, repo, "a/d.md", strings.Repeat("d", 1000))
 	testutil.WriteFile(t, repo, "top.sh", "#!/bin/sh\n")
@@ -396,7 +408,7 @@ func TestMeasureTree_CountsEntriesAndBytes(t *testing.T) {
 			t.Fatalf("MeasureTree(%s): %v", rev, err)
 		}
 		if st.Entries != wantEntries || st.Blobs != wantBlobs || st.Gitlinks != wantGitlinks || st.Trees != wantTrees ||
-			st.TotalBytes != wantBytes || st.PathBytes != wantPathBytes || !st.Complete || st.Expansion != 1 {
+			st.TotalBytes != wantBytes || st.PathBytes != wantPathBytes || !st.Complete {
 			t.Fatalf("MeasureTree(%s) = %+v; want entries %d blobs %d gitlinks %d trees %d bytes %d path bytes %d",
 				rev, st, wantEntries, wantBlobs, wantGitlinks, wantTrees, wantBytes, wantPathBytes)
 		}
@@ -474,19 +486,27 @@ func TestTreeBudget_RealRepositoryPasses(t *testing.T) {
 	if err != nil {
 		t.Skip("not running inside a git work tree")
 	}
-	c := git.NewCLIClient(strings.TrimSpace(string(top)))
+	// Measured in a bare --shared clone given the neutral attributes: the
+	// measure needs them, and this repository's own info/attributes is
+	// never written by a test.
+	clone := filepath.Join(t.TempDir(), "self.git")
+	tbGit(t, t.TempDir(), nil, "clone", "-q", "--bare", "--shared", "--no-tags", strings.TrimSpace(string(top)), clone)
+	if err := git.EnsureNeutralCheckoutAttributes(context.Background(), clone); err != nil {
+		t.Fatal(err)
+	}
+	c := git.NewCLIClient(clone)
 	st, err := git.MeasureTree(context.Background(), c, "HEAD")
 	if err != nil {
 		t.Fatalf("MeasureTree(HEAD): %v", err)
 	}
 	b := git.DefaultTreeBudget()
-	if st.Entries*10 > b.MaxEntries || int64(float64(st.TotalBytes)*st.Expansion)*10 > b.MaxTotalBytes || st.PathBytes*10 > b.MaxPathBytesTotal {
+	if st.Entries*10 > b.MaxEntries || st.TotalBytes*10 > b.MaxTotalBytes || st.PathBytes*10 > b.MaxPathBytesTotal {
 		t.Fatalf("HEAD %+v has under 10x headroom against %+v", st, b)
 	}
 	if err := b.Check(context.Background(), c, "HEAD"); err != nil {
 		t.Fatalf("Check(HEAD): %v", err)
 	}
-	t.Logf("HEAD: %d entries, %d bytes, %d path bytes, expansion %.2f", st.Entries, st.TotalBytes, st.PathBytes, st.Expansion)
+	t.Logf("HEAD: %d entries, %d bytes, %d path bytes", st.Entries, st.TotalBytes, st.PathBytes)
 }
 
 // --- AC 7: the mutate deadline ---

@@ -55,6 +55,11 @@ var allowed = map[string]bool{
 	// made, or the entries of the empty directory it cloned into.
 	"adapters/git/cli.go:CLIClient.Clone":         true,
 	"adapters/git/cli.go:CLIClient.checkoutClone": true,
+	// INIT-024 TASK-003 review round 2: $GIT_COMMON_DIR/info/attributes, a
+	// git-administrative file located by `git rev-parse --git-common-dir`,
+	// never a working-tree path; Lstat first, a link is never followed.
+	"adapters/git/neutral_attributes.go:readInfoAttributes":              true,
+	"adapters/git/neutral_attributes.go:EnsureNeutralCheckoutAttributes": true,
 	// MkdirTemp/RemoveAll of the private GIT_INDEX_FILE directory in
 	// os.TempDir (INIT-023 TASK-005): plumbing only, no working tree.
 	"adapters/git/commitbinder.go:CLIClient.CommitFilesOnto": true,

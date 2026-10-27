@@ -41,28 +41,21 @@ package git
 // command (GIT_ALLOC_LIMIT, the pinned delta-base cache, the C locale).
 //
 // What a checkout writes is not only the blob sizes git stores:
-// attributes in the tree's own .gitattributes rewrite content on the way
-// out (adversarial review of this task). `ident` turns every 4-byte
-// "$Id$" into "$Id: <object id> $" (47 bytes with SHA-1, 71 with
-// SHA-256), `text`/`eol=crlf` doubles a file of newlines, and
-// `working-tree-encoding` re-encodes UTF-8 (UTF-32 is 4x, UTF-7 up to 5x
-// per character). Measured on git 2.54: a 50,000-byte blob of "$Id$\n"
-// under `* ident text eol=crlf` checked out to 490,000 bytes. The measure
-// therefore reads every .gitattributes file of the tree in one
-// `git cat-file --batch` (up to maxAttributeScanBytes of attribute text;
-// past that, or for a symbolic link named .gitattributes, the worst case
-// is assumed and the refusal says so), parses them — comments, quoted
-// patterns, unset and unspecified attributes, [attr] macros and the
-// built-in `binary` — and multiplies the byte total by the worst-case
-// factor of the expanding attributes some line actually sets
-// (treebudget_attrs.go) before the total-bytes limit is applied; a
-// filter=<name> whose smudge driver the host's git config defines (such
-// as git-lfs) writes content nothing can measure, and is refused.
-// Repositories without such attributes — Spine and SMP have none — are
-// measured at face value.
+// attributes rewrite content on the way out — `ident`, `text`/`eol=crlf`,
+// `working-tree-encoding`, a `filter=` smudge driver, and for a merge
+// `conflict-marker-size` — whether they come from the tree's own
+// .gitattributes (macros included), the host's core.attributesFile or its
+// core.autocrlf / core.eol. A budgeted repository therefore carries
+// NeutralCheckoutAttributes as the last line of
+// $GIT_COMMON_DIR/info/attributes, the highest-precedence attribute
+// source, which turns every one of them off for every checkout, merge and
+// worktree of the repository (neutral_attributes.go): what a checkout
+// writes is then exactly the blob bytes the listing sums. The measure
+// refuses (fail closed) on a repository whose attributes file does not end
+// in that line. (Review round 2 replaced an attribute scanner that tried
+// to predict git's expansion and kept missing parser corners.)
 //
 // What is not measured (KNOWN-LIMITATIONS.md, "Checkout budget"): the
-// host's own core.autocrlf (operator config, at most 2x), and the
 // interval between the measure and a checkout of a branch by name: a
 // branch that moves in between is checked out at its new tip. In
 // standalone the pre-receive hook (service/internal/githttp) holds every
@@ -89,7 +82,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"path"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -143,27 +135,13 @@ type TreeStats struct {
 	Blobs    int64 // regular files and symbolic links (blob entries)
 	Trees    int64 // directories
 	Gitlinks int64 // submodule entries (mode 160000; written as an empty directory)
-	// TotalBytes is the summed blob sizes as git stores them, before any
-	// checkout-time expansion.
+	// TotalBytes is the summed blob sizes as git stores them — what a
+	// checkout writes in a repository with NeutralCheckoutAttributes.
 	TotalBytes int64
 	// PathBytes is the summed byte length of every entry's full path.
 	PathBytes int64
-	// AttributeFiles counts the entries named .gitattributes (any case).
-	AttributeFiles int64
-	// Expansion is the worst-case factor the tree's .gitattributes can
-	// multiply TotalBytes by when it is checked out (1 when they set no
-	// expanding attribute, or there are none; +Inf when a configured
-	// smudge filter driver applies). The total-bytes limit is applied to
-	// TotalBytes x Expansion.
-	Expansion float64
-	// ExpansionReason says where Expansion comes from ("" when it is 1):
-	// the attributes and their factors, or why the worst case was taken.
-	ExpansionReason string
 	// Complete is true when the whole listing was read.
 	Complete bool
-
-	// hexLen is the object-id length the listing printed (40 or 64).
-	hexLen int
 }
 
 // TreeLimit names the TreeBudget limit a measure crossed.
@@ -185,18 +163,10 @@ type TreeTooLargeError struct {
 	Limit TreeLimit
 	// Max is the limit that was crossed.
 	Max int64
-	// Seen is the running total when the measure stopped — for
-	// TreeLimitTotalBytes after the expansion — so a lower bound of the
-	// tree's real total.
+	// Seen is the running total when the measure stopped, so a lower
+	// bound of the tree's real total (for a merge refused on an
+	// allocation, the allocation git asked for).
 	Seen int64
-	// Expansion is the attribute expansion factor the total-bytes limit
-	// was applied with (1 when none). Seen already includes it.
-	Expansion float64
-	// Stored is the tree's blob bytes as git stores them, when Expansion
-	// was applied (so an operator can tell the factor from the size).
-	Stored int64
-	// Reason is the tree's ExpansionReason when Expansion > 1.
-	Reason string
 }
 
 // TreeTooLargeMessage is the GitError.Message of every ErrTreeTooLarge
@@ -210,12 +180,6 @@ func (e *TreeTooLargeError) Error() string {
 	case TreeLimitPathBytes:
 		return fmt.Sprintf("the tree's paths total more than %d bytes (checkout budget MaxPathBytesTotal)", e.Max)
 	case TreeLimitTotalBytes:
-		switch {
-		case math.IsInf(e.Expansion, 1):
-			return fmt.Sprintf("the tree's checkout runs a content filter that no byte limit bounds (%s); the checkout budget MaxTotalBytes (%d) cannot admit it at any setting", e.Reason, e.Max)
-		case e.Expansion > 1:
-			return fmt.Sprintf("the tree's files are %d bytes stored and can write up to %d on checkout (x%.4g: %s), over the %d-byte checkout budget MaxTotalBytes", e.Stored, e.Seen, e.Expansion, e.Reason, e.Max)
-		}
 		return fmt.Sprintf("the tree's files total more than %d bytes (checkout budget MaxTotalBytes)", e.Max)
 	}
 	return fmt.Sprintf("the tree exceeds the checkout budget (%s > %d)", e.Limit, e.Max)
@@ -456,26 +420,6 @@ func relabel(err error, op string) error {
 	return err
 }
 
-// bytesOver returns the total-bytes refusal when total x factor exceeds
-// limit, nil otherwise. Saturating: a product past MaxInt64 is over.
-func bytesOver(total int64, factor float64, limit int64) *TreeTooLargeError {
-	if factor < 1 || math.IsNaN(factor) {
-		factor = 1
-	}
-	exp := float64(total) * factor
-	if math.IsInf(factor, 1) && total == 0 {
-		exp = 0 // nothing stored, nothing a filter can expand
-	}
-	if exp <= float64(limit) {
-		return nil
-	}
-	seen := int64(math.MaxInt64)
-	if exp < float64(math.MaxInt64) {
-		seen = int64(exp)
-	}
-	return &TreeTooLargeError{Limit: TreeLimitTotalBytes, Max: limit, Seen: seen, Expansion: factor}
-}
-
 // measureOp is the op of every git command a measure runs (opRead, see
 // opClasses) and of the errors it returns; checkTrees relabels them.
 const measureOp = "measure_tree"
@@ -484,10 +428,15 @@ const measureOp = "measure_tree"
 // .gitattributes, their scan. b must be effective.
 func (c *CLIClient) measureTree(ctx context.Context, rev string, b TreeBudget) (TreeStats, error) {
 	const op = measureOp
+	// The budget's premise: checkouts in this repository write stored
+	// bytes. Without the neutral attributes line nothing the listing sums
+	// bounds what they write, so the measure refuses (fail closed).
+	if err := c.requireNeutralCheckoutAttributes(ctx, op); err != nil {
+		return TreeStats{}, err
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	sink := &treeListingSink{budget: b, stop: cancel}
-	sink.stats.Expansion = 1
 	// -r recurses, -t lists each directory too (an inode the checkout
 	// creates, and the record that makes a deep tree's path bytes grow
 	// quadratically), -l adds each blob's size from its object header,
@@ -530,13 +479,6 @@ func (c *CLIClient) measureTree(ctx context.Context, rev string, b TreeBudget) (
 		return sink.stats, &GitError{Kind: ErrKindPermanent, Op: op, Message: "unterminated `git ls-tree -z` output"}
 	}
 	sink.stats.Complete = true
-	if err := c.scanAttributes(ctx, &sink.stats, sink.attrOIDs, sink.attrWorst); err != nil {
-		return sink.stats, err
-	}
-	if e := bytesOver(sink.stats.TotalBytes, sink.stats.Expansion, b.MaxTotalBytes); e != nil {
-		e.Stored, e.Reason = sink.stats.TotalBytes, sink.stats.ExpansionReason
-		return sink.stats, treeTooLarge(op, e)
-	}
 	return sink.stats, nil
 }
 
@@ -560,13 +502,6 @@ const (
 	// before its path: "<mode> <type> <oid> <size>\t" is at most about
 	// 6+1+6+1+64+1+20+1 bytes; the slack is generous.
 	maxRecordMetaBytes = 256
-	// maxAttributeScanBytes bounds the .gitattributes text one measure
-	// reads (all of it, in one `git cat-file --batch`): each file counts
-	// its size plus attrFileOverhead (the batch header git prints for it).
-	// A tree past it is taken to expand by the worst-case factor, and the
-	// refusal says so. Real repositories have a few hundred bytes.
-	maxAttributeScanBytes int64 = 1 << 20
-	attrFileOverhead      int64 = 64
 )
 
 // treeListingSink parses `git ls-tree -r -t -l -z` output as git writes
@@ -582,9 +517,6 @@ type treeListingSink struct {
 	delivered int64
 	over      *TreeTooLargeError
 	parseErr  error
-	attrOIDs  []string
-	attrCost  int64  // what the attribute scan would read (see maxAttributeScanBytes)
-	attrWorst string // why the scan cannot read the attributes ("" when it can): assume the worst
 }
 
 var errStopListing = errors.New("git: tree listing stopped")
@@ -650,7 +582,7 @@ func (s *treeListingSink) record(rec []byte) error {
 	if len(f) != 4 || !IsFullObjectName(f[2]) {
 		return s.malformed("unexpected fields")
 	}
-	mode, typ, oid, size := f[0], f[1], f[2], f[3]
+	mode, typ, size := f[0], f[1], f[3]
 	var blobBytes int64
 	switch {
 	case typ == TreeEntryBlob && (mode == "100644" || mode == "100755" || mode == "120000"):
@@ -661,34 +593,12 @@ func (s *treeListingSink) record(rec []byte) error {
 		}
 		blobBytes = v
 		s.stats.Blobs++
-		if strings.EqualFold(path.Base(string(p)), ".gitattributes") {
-			s.stats.AttributeFiles++
-			switch {
-			case s.attrWorst != "":
-			case mode == "120000":
-				// Older git reads attributes through a symbolic link.
-				s.attrWorst = "a symbolic link named .gitattributes (its target cannot be scanned)"
-			case v == 0:
-				// Empty: sets nothing.
-			default:
-				s.attrCost = satAdd(s.attrCost, v+attrFileOverhead)
-				if s.attrCost > maxAttributeScanBytes {
-					s.attrWorst = fmt.Sprintf("the tree's .gitattributes files exceed the %d bytes the scan reads", maxAttributeScanBytes)
-					s.attrOIDs = nil
-				} else {
-					s.attrOIDs = append(s.attrOIDs, oid)
-				}
-			}
-		}
 	case typ == TreeEntryTree && mode == "040000" && size == "-":
 		s.stats.Trees++
 	case typ == TreeEntryCommit && mode == "160000" && size == "-":
 		s.stats.Gitlinks++
 	default:
 		return s.malformed("unexpected mode/type %q %q", mode, typ)
-	}
-	if s.stats.hexLen == 0 {
-		s.stats.hexLen = len(oid)
 	}
 	s.stats.Entries++
 	s.stats.PathBytes = satAdd(s.stats.PathBytes, int64(len(p)))
@@ -699,8 +609,7 @@ func (s *treeListingSink) record(rec []byte) error {
 	case s.stats.PathBytes > s.budget.MaxPathBytesTotal:
 		s.cross(&TreeTooLargeError{Limit: TreeLimitPathBytes, Max: s.budget.MaxPathBytesTotal, Seen: s.stats.PathBytes})
 	case s.stats.TotalBytes > s.budget.MaxTotalBytes:
-		// Face value already over: no attribute can make it smaller.
-		s.cross(&TreeTooLargeError{Limit: TreeLimitTotalBytes, Max: s.budget.MaxTotalBytes, Seen: s.stats.TotalBytes, Expansion: 1})
+		s.cross(&TreeTooLargeError{Limit: TreeLimitTotalBytes, Max: s.budget.MaxTotalBytes, Seen: s.stats.TotalBytes})
 	default:
 		return nil
 	}

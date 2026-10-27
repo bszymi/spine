@@ -21,10 +21,12 @@ change.
   target tip, plus the target when the switch to it is a checkout), `ResetBranch`'s
   `read-tree -m -u` and its `--reset -u` fallback, the shared tree's restore (`reset --hard` of
   HEAD and the switch home), and `Clone` (now `--no-checkout`, measured, then `reset --hard`) —
-  and refuses one over 200,000 entries, 2 GiB of blob bytes (after the expansion the tree's own
-  `.gitattributes` can apply, parsed: `ident`, `text`/`eol=crlf`, `working-tree-encoding`; a
-  `filter=` with a host-defined smudge driver is refused outright) or 16 MiB of summed path bytes,
-  before anything is written or any ref moves. The measure streams `git ls-tree -r -t -l -z`
+  and refuses one over 200,000 entries, 2 GiB of blob bytes or 16 MiB of summed path bytes,
+  before anything is written or any ref moves. Every budgeted repository carries
+  `git.NeutralCheckoutAttributes` last in `info/attributes`, so what a checkout writes is exactly
+  the stored bytes the measure sums (no attribute file or host setting can expand it); a merge is
+  measured by its result after the switch, under `GIT_ALLOC_LIMIT` = max(`MaxTotalBytes`, the read
+  allocation limit). The measure streams `git ls-tree -r -t -l -z`
   (object headers only) and stops at the first crossing. `spine serve` now needs git >= 2.38 and
   logs a Warn at start for a workspace tree already over the budget. New variables:
   `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`, `SPINE_GIT_TREE_MAX_PATH_BYTES` (a
@@ -52,6 +54,17 @@ change.
   Blob and tree tips (a tag of a key) are admitted unmeasured.
 - A code-repository clone the budget refuses is a permanent (413-class) error, remembered per
   remote and budget for 10 minutes instead of being fetched again on every access.
+- **Checkouts write stored bytes.** `spine serve` appends `* -text -ident -filter !eol
+  !working-tree-encoding !conflict-marker-size` as the last line of each served repository's
+  `info/attributes` (operator lines kept): no end-of-line conversion, `ident` expansion, smudge
+  filter or re-encoding on checkout — an LFS pointer stays a pointer.
+- **Commit-side normalisation is off** in those repositories: `git add` keeps CRLF content and
+  does not collapse `$Id: … $`.
+- **Conflict markers are always 7 characters** in a conflicted merge, whatever
+  `conflict-marker-size` a tree sets.
+- **The working tree looks modified once on upgrade** where files were checked out with
+  conversions; the shared tree's restore resets it (tracked changes are quarantined as usual).
+- Not neutralised (operator configuration): a host `merge.<name>.driver` and `pull.twohead`.
 - With the deadline on, `EnterBranch` adds its worktree `--no-checkout` and fills it with
   `reset --hard`, so a worktree's `post-checkout` hook no longer runs.
 
@@ -64,17 +77,18 @@ change.
 - New API (adapters/git): `TreeBudget{MaxEntries, MaxTotalBytes, MaxPathBytesTotal}` (a field
   <= 0 means its default; `DefaultTreeBudget()`, `Effective()`), `TreeBudget.Measure` /
   `TreeBudget.Check(ctx, *CLIClient, treeish)`, `MeasureTree(ctx, *CLIClient, treeish)`,
-  `TreeStats`, `ErrTreeTooLarge` with the typed cause `*TreeTooLargeError{Limit, Max, Seen,
-  Expansion}` inside `*GitError{Kind: ErrKindPermanent, Message: TreeTooLargeMessage}` (distinct
+  `TreeStats`, `NeutralCheckoutAttributes`, `EnsureNeutralCheckoutAttributes` /
+  `HasNeutralCheckoutAttributes(ctx, repoDir)`, `ErrNeutralAttributesMissing` (a budgeted measure
+  on a repository without the line), `MergeAllocRefusedMessage`, `ErrTreeTooLarge` with the typed
+  cause `*TreeTooLargeError{Limit, Max, Seen}` inside `*GitError{Kind: ErrKindPermanent, Message: TreeTooLargeMessage}` (distinct
   from `ErrBlobTooLarge` and `ErrOutputTooLarge`), `WithTreeBudget`, `WithMutateTimeout`,
   `*MutateTimeoutError` (matches `context.DeadlineExceeded`) inside
   `*GitError{Kind: ErrKindPermanent, Message: MutateTimeoutMessage}`, `CheckoutLimits`,
   `CLIClient.CheckoutLimits()`, `SetDefaultCheckoutLimits` / `DefaultCheckoutLimits`,
   `EnterBranchWithLimits`, `CheckBudgetGitVersion` / `MinBudgetGitVersion` (a budgeted merge needs
   git >= 2.38), `TreeObjectTooLargeMessage`, and the constants `DefaultTreeMaxEntries`,
-  `DefaultTreeMaxTotalBytes`, `DefaultTreeMaxPathBytesTotal`, `DefaultMutateTimeout`;
-  `TreeStats.ExpansionReason` and `TreeTooLargeError.Stored` / `Reason`. No interface gains a
-  method.
+  `DefaultTreeMaxTotalBytes`, `DefaultTreeMaxPathBytesTotal`, `DefaultMutateTimeout`. No
+  interface gains a method.
 - An embedder that runs its own checkouts and merges (SMP: `gitread.CheckTreeDiff`,
   `boundRunBranchCheckout`, `RealGitOperator.MergeBound`, the `/git/{workspace}` gateway) can hold
   them to the same budget with `git.TreeBudget{…}.Check(ctx, client, sha)` before the command, or

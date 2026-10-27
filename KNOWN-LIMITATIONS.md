@@ -1125,15 +1125,35 @@ The following limitations have been resolved:
   blob bytes and 16 MiB of summed path bytes (`git.TreeBudget`; owner question 1, defaults pending
   the owner). The measure reads object headers through a streamed `git ls-tree -r -t -l -z` that
   stops at the first crossing, so measuring a bomb costs about its first 200,000 entries.
-- **A merge is measured by its result** (review round 1). `git merge-tree --write-tree` computes
-  the tree the merge will leave (merge-ort, as `git merge` runs it; conflict markers included) on
+- **Checkouts write stored bytes** (review round 2). Every budgeted repository carries
+  `git.NeutralCheckoutAttributes` — `* -text -ident -filter !eol !working-tree-encoding
+  !conflict-marker-size` — as the last line of `<git-common-dir>/info/attributes`, the
+  highest-precedence attribute source, so no `.gitattributes` (macros included), operator attribute
+  file (`core.attributesFile`, the system file, an earlier line of `info/attributes`) or
+  `core.autocrlf` / `core.eol` setting can make a checkout, merge or linked worktree write more
+  than the blobs the measure sums; conflict markers are always 7 characters. `spine serve` writes
+  the line at start, when it builds a workspace's services, on every push it serves, into every
+  budgeted clone and into every code-repository clone it reuses (operator lines are kept), and a
+  budgeted measure refuses (`git.ErrNeutralAttributesMissing`, fail closed) a repository whose
+  file does not end in it. `merge` is left alone, so `binary` and `merge=union` merge as before.
+  Not neutralised (operator configuration): a host `merge.<name>.driver` named by a `merge=`
+  attribute, and `pull.twohead` (Spine never pulls). Consequences: an LFS pointer stays a pointer,
+  `git add` keeps CRLF and does not collapse `$Id: … $`, and a tree checked out with conversions
+  before the upgrade looks modified once, until the shared tree's restore resets it.
+- **A merge is measured by its result** (review rounds 1-2). After the switch to the target — in
+  the working tree `git merge` will see, whose merge attributes it reads — `git merge-tree
+  --write-tree` computes the tree the merge will leave (merge-ort; conflict markers included) on
   the target tip read inside the working-tree hold the merge takes, and that tree is measured on
-  every limit before the switch; after the switch the tip is checked again (a moved tip is a
-  transient refusal). The target is measured on its own only when the switch to it is a checkout
-  (HEAD on another branch); an up-to-date replay (result = target tree) is not measured. So two
-  merges from one base can no longer walk `main` over the budget, and a repair merge that brings
-  an over-budget `main` back under it is admitted. This needs git >= 2.38: `spine serve` refuses
-  to start on an older git, and a budgeted library merge on one is refused.
+  every limit before `git merge` runs; the tip is checked again after the switch and after the
+  measure (a moved tip is a transient refusal). The target is measured on its own before the
+  switch when the switch is a checkout (HEAD on another branch); an up-to-date replay (result =
+  target tree) is not measured. merge-tree and the measured `git merge` run under
+  `GIT_ALLOC_LIMIT` = max(`MaxTotalBytes`, the read allocation limit) — 2 GiB by default; a merge
+  that needs one allocation over it is refused (`git.MergeAllocRefusedMessage`). (The 16 MiB read
+  limit alone would refuse a merge of any packed file over 16 MiB.) So two merges from one base can
+  no longer walk `main` over the budget, and a repair merge that brings an over-budget `main` back
+  under it is admitted. This needs git >= 2.38: `spine serve` refuses to start on an older git, and
+  a budgeted library merge on one is refused.
 - **On in standalone, off for embedders.** `spine serve` installs the budget and a 2-minute
   deadline on every local mutating git command as the process default
   (`git.SetDefaultCheckoutLimits`; `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`,
@@ -1157,27 +1177,13 @@ The following limitations have been resolved:
   are refused until it is moved aside; hooks kept under a custom `core.hooksPath` (repository,
   global or system config) do not run for pushes served by Spine, which logs one Warn per
   repository naming them.
-- **Checkout-time expansion by attributes.** A tree's own `.gitattributes` can rewrite content on
-  checkout: `ident` turns each 4-byte `$Id$` into 47 bytes (71 with SHA-256), `text`/`eol=crlf`
-  doubles a file of newlines, `working-tree-encoding` re-encodes (UTF-32 4x). Every
-  `.gitattributes` of the tree is read in one `git cat-file --batch` (up to 1 MiB of attribute
-  text, each file counted at its size + 64 bytes) and parsed — comments, quoted patterns, unset
-  (`-a`) and unspecified (`!a`) attributes, `[attr]` macros and the built-in `binary` — and the byte
-  limit is applied to the stored bytes times the worst-case factor of the expanding attributes some
-  line sets (2 for text/eol=crlf/crlf, 11.75 for ident, 8 for a non-UTF-8 encoding, multiplied);
-  which paths a pattern matches is not evaluated, so the factor can only be too high. Past the
-  1 MiB, or for a symbolic link named `.gitattributes`, the worst case (188x; 284x with SHA-256) is
-  taken and the refusal says why; every refusal names the stored size, the factor and the
-  attributes. A `filter=<name>` whose smudge (or process) driver the host's git config defines —
-  git-lfs would fetch arbitrary content — is refused at any limit (Spine configures none; a
-  `filter=` with no driver is inert). Not measured: the host's own `core.autocrlf` (at most 2x).
 - **Not atomic with a checkout by name.** A branch measured by name is looked up, measured and
   then checked out by git, which reads the ref again; a branch that moves in between is written at
   its new tip. In standalone every pushed tip passes the same budget at pre-receive, so a branch
   cannot move to an over-budget tree there; a merge re-checks the tip it measured, and
   `MergeBound` merges the exact measured commit. A writer outside the process that moves the
-  checked-out branch between the merge's post-switch check and `git merge` (git refuses pushes to
-  it by default) is not covered. The totals bound one tree at a time: concurrent worktrees of
+  checked-out branch between the merge's last tip check and `git merge` (git refuses pushes to it
+  by default), or that edits `info/attributes` behind the server, is not covered. The totals bound one tree at a time: concurrent worktrees of
   different branches each get the full budget (no per-tenant disk quota; out of scope).
 - **Mutate deadline.** On expiry the command is SIGTERMed (git removes its locks) and the call
   fails with a permanent error wrapping `git.MutateTimeoutError`. With a deadline, `EnterBranch`

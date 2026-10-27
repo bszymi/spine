@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -282,5 +283,187 @@ func TestCheckBudgetGitVersion(t *testing.T) {
 	}
 	if err := git.CheckBudgetGitVersion(context.Background()); err != nil {
 		t.Fatalf("this host's git: %v", err)
+	}
+}
+
+// mtSides commits, on top of base, a target T and a source S that change
+// the same line of each of files f0..f{n-1}.txt differently; T also
+// carries extraAttrs in its .gitattributes. Returns their ids.
+func mtSides(t *testing.T, repo, base string, n int, extraAttrs string) (target, source string) {
+	t.Helper()
+	mk := func(word string, attrs bool) map[string][]byte {
+		m := map[string][]byte{}
+		for i := 0; i < n; i++ {
+			m[fmt.Sprintf("f%d.txt", i)] = []byte(word + "\nsep\nsep\nsep\n")
+		}
+		if attrs {
+			m[".gitattributes"] = []byte(extraAttrs)
+		}
+		return m
+	}
+	// base: the files with "base", and README.md from tbRepo's base.
+	baseFiles := mk("base", false)
+	baseFiles["README.md"] = []byte("hello\n")
+	b := ntTree(t, repo, base, baseFiles)
+	tf := mk("ours", true)
+	tf["README.md"] = []byte("hello\n")
+	sf := mk("theirs", false)
+	sf["README.md"] = []byte("hello\n")
+	return ntTree(t, repo, b, tf), ntTree(t, repo, b, sf)
+}
+
+// TestMerge_ConvergenceMarkersAreBoundedByTheNeutralLine (review round 2,
+// P1-C): convergence merges a divergence branch into a run branch while
+// the shared tree's HEAD is main. A run branch that sets
+// `conflict-marker-size` large made `git merge` (which reads the target's
+// attributes after the switch) write markers that long, while the result
+// had been measured under main's attributes — 90-300 MB past a 16 MiB
+// budget in the review. With the neutral line every conflict marker is 7
+// characters, and the result is measured after the switch.
+func TestMerge_ConvergenceMarkersAreBoundedByTheNeutralLine(t *testing.T) {
+	ctx := context.Background()
+	repo, base, _, _ := tbRepo(t)
+	T, S := mtSides(t, repo, base, 3, "* conflict-marker-size=100000\n")
+	tbGit(t, repo, nil, "update-ref", "refs/heads/spine/run/r1", T)
+	tbGit(t, repo, nil, "update-ref", "refs/heads/spine/div/d1", S)
+	budget := git.TreeBudget{MaxEntries: 1000, MaxTotalBytes: 64 << 10, MaxPathBytesTotal: 1 << 20}
+	c := git.NewCLIClient(repo, git.WithHomeBranch("main"), git.WithTreeBudget(budget))
+	_, err := c.Merge(ctx, git.MergeOpts{Source: "spine/div/d1", Target: "spine/run/r1", Strategy: "merge-commit", Message: "m"})
+	defer func() { _, _ = c.Merge(ctx, git.MergeOpts{Source: "--abort", Strategy: "abort"}) }()
+	if errors.Is(err, git.ErrTreeTooLarge) {
+		return // a bounded refusal is acceptable
+	}
+	var written int64
+	for i := 0; i < 3; i++ {
+		b, rerr := os.ReadFile(filepath.Join(repo, fmt.Sprintf("f%d.txt", i)))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		written += int64(len(b))
+		if !strings.Contains(string(b), "\n<<<<<<< ") && !strings.HasPrefix(string(b), "<<<<<<< ") {
+			t.Fatalf("f%d.txt has no 7-character conflict marker (merge err %v):\n%.200s", i, err, b)
+		}
+		if strings.Contains(string(b), "<<<<<<<<") {
+			t.Fatalf("f%d.txt has a conflict marker longer than 7 characters (%d bytes)", i, len(b))
+		}
+	}
+	if written > budget.MaxTotalBytes {
+		t.Fatalf("the conflicted files total %d bytes, over the %d-byte budget", written, budget.MaxTotalBytes)
+	}
+}
+
+// TestMerge_ResultIsComputedInTheTargetsWorkingTree (review round 2,
+// P1-C): merge-tree reads merge attributes from the working tree it runs
+// in. The target sets `merge=union` and main does not; computed before the
+// switch (in main's tree) the measured result had conflict markers, while
+// `git merge` after the switch unions cleanly. Now the measured tree is
+// the tree the merge commits. (Mutation: computing it before the switch
+// fails this test.)
+func TestMerge_ResultIsComputedInTheTargetsWorkingTree(t *testing.T) {
+	for _, v := range mergeVariants {
+		t.Run(v.name, func(t *testing.T) {
+			repo, base, _, _ := tbRepo(t)
+			T, S := mtSides(t, repo, base, 1, "*.txt merge=union\n")
+			tbGit(t, repo, nil, "update-ref", "refs/heads/target", T)
+			tbGit(t, repo, nil, "update-ref", "refs/heads/source", S)
+			c := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{}))
+			var measured []string
+			c.SetMergeResultHookForTest(func(tree string) { measured = append(measured, tree) })
+			var err error
+			if v.name == "Merge" {
+				_, err = c.Merge(context.Background(), git.MergeOpts{Source: "source", Target: "target", Strategy: "merge-commit", Message: "m"})
+			} else {
+				_, err = c.MergeBound(context.Background(), git.MergeOpts{SourceSHA: S, Target: "target", Strategy: "merge-commit", Message: "m"})
+			}
+			if err != nil {
+				t.Fatalf("union merge: %v", err)
+			}
+			got := tbGit(t, repo, nil, "rev-parse", "target^{tree}")
+			if len(measured) != 1 || measured[0] != got {
+				t.Fatalf("measured %v, the merge committed tree %s", measured, got)
+			}
+		})
+	}
+}
+
+// gitEnvRecorder puts a git wrapper first on PATH that logs, for every
+// merge-tree and merge, the GIT_ALLOC_LIMIT it ran with.
+func gitEnvRecorder(t *testing.T) string {
+	t.Helper()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not on PATH")
+	}
+	d := t.TempDir()
+	log := filepath.Join(d, "env.log")
+	script := "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in merge-tree|merge) echo \"$a GIT_ALLOC_LIMIT=$GIT_ALLOC_LIMIT\" >> " + log + "; break;; -*) ;; *) break;; esac; done\nexec " + gitPath + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(d, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", d+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+// TestMerge_RunsUnderTheMergeAllocLimit (review round 2): merge-tree and
+// the measured `git merge` run under GIT_ALLOC_LIMIT = max(MaxTotalBytes,
+// the read allocation limit); without a budget neither gets one.
+func TestMerge_RunsUnderTheMergeAllocLimit(t *testing.T) {
+	repo, base, _, _ := tbRepo(t)
+	b1 := mtBranch(t, repo, base, "b1", "d1", 2, 1)
+	log := gitEnvRecorder(t)
+	c := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{MaxTotalBytes: 64 << 20}))
+	if _, err := c.Merge(context.Background(), git.MergeOpts{Source: b1, Target: "main", Strategy: "merge-commit", Message: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(log)
+	want := fmt.Sprintf("GIT_ALLOC_LIMIT=%d", 64<<20)
+	if !strings.Contains(string(got), "merge-tree "+want) || !strings.Contains(string(got), "merge "+want) {
+		t.Fatalf("recorded:\n%s\nwant merge-tree and merge with %s", got, want)
+	}
+
+	repo2, base2, _, _ := tbRepo(t)
+	b2 := mtBranch(t, repo2, base2, "b2", "d2", 2, 1)
+	_ = os.Remove(log)
+	if _, err := git.NewCLIClient(repo2).Merge(context.Background(), git.MergeOpts{Source: b2, Target: "main", Strategy: "merge-commit", Message: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = os.ReadFile(log)
+	if strings.Contains(string(got), "merge-tree") || strings.Contains(string(got), "GIT_ALLOC_LIMIT=1") || strings.Contains(string(got), "GIT_ALLOC_LIMIT=2") || strings.Contains(string(got), "GIT_ALLOC_LIMIT=6") {
+		t.Fatalf("an unbudgeted merge ran with a merge alloc limit:\n%s", got)
+	}
+}
+
+// TestMerge_AllocRefusalIsABudgetRefusal: a merge whose computation needs
+// one allocation over its limit (a 2 MB file changed on both sides, under
+// a 1 MiB limit) is refused as ErrTreeTooLarge with
+// MergeAllocRefusedMessage, before `git merge` runs. (Mutation: without
+// the limit merge-tree succeeds and the refusal is the measure's.)
+func TestMerge_AllocRefusalIsABudgetRefusal(t *testing.T) {
+	repo, base, _, _ := tbRepo(t)
+	var big strings.Builder
+	for i := 0; i < 100000; i++ {
+		fmt.Fprintf(&big, "line %07d\n", i)
+	}
+	lines := big.String() // ~1.3 MB
+	tbGit(t, repo, nil, "checkout", "-q", "-b", "grow", base)
+	testutil.WriteFile(t, repo, "big.txt", lines)
+	tbGit(t, repo, nil, "add", "big.txt")
+	tbGit(t, repo, nil, "commit", "-q", "-m", "big")
+	grown := tbGit(t, repo, nil, "rev-parse", "HEAD")
+	tbGit(t, repo, nil, "checkout", "-q", "-b", "a", grown)
+	testutil.WriteFile(t, repo, "big.txt", "head a\n"+lines)
+	tbGit(t, repo, nil, "commit", "-q", "-am", "a")
+	tbGit(t, repo, nil, "checkout", "-q", "-b", "b", grown)
+	testutil.WriteFile(t, repo, "big.txt", lines+"tail b\n")
+	tbGit(t, repo, nil, "commit", "-q", "-am", "b")
+	tbGit(t, repo, nil, "checkout", "-q", "a")
+	c := git.NewCLIClient(repo, git.WithMaxBlobBytes(64<<10), git.WithTreeBudget(git.TreeBudget{MaxEntries: 1000, MaxTotalBytes: 1 << 20, MaxPathBytesTotal: 1 << 20}))
+	_, err := c.Merge(context.Background(), git.MergeOpts{Source: "b", Target: "a", Strategy: "merge-commit", Message: "m"})
+	var ge *git.GitError
+	if !errors.Is(err, git.ErrTreeTooLarge) || !errors.As(err, &ge) || ge.Message != git.MergeAllocRefusedMessage {
+		t.Fatalf("err = %v, want the merge allocation refusal", err)
+	}
+	if st := tbGit(t, repo, nil, "status", "--porcelain"); st != "" {
+		t.Fatalf("working tree changed:\n%s", st)
 	}
 }
