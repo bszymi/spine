@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: "Standalone push-gate races: case-folding storage, the review-freeze window, git slot starvation"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
