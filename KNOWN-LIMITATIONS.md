@@ -951,6 +951,19 @@ The following limitations have been resolved:
   address (or a runner host) share each other's repositories. Give each tenant its own runner
   addresses. A job-scoped clone token, after which trusted CIDRs could be dropped, is a follow-up
   (TASK-006 owner question 2).
+- **Only the served repository's protocol paths reach `git-http-backend`** (INIT-024 TASK-004,
+  from TASK-006's security review). The handler's read and push classification used to match path
+  suffixes, and `git-http-backend` serves whatever directory precedes the protocol part of the path
+  as a repository: `/git/<ws>/spine/.git/info/refs` reached it with the primary (non-bare)
+  repository's `.git` as the repository, and any other git directory inside the tree (a
+  submodule's under `.git/modules`, a nested clone) was reachable the same way, also token-less for
+  a trusted peer — within the bound workspace only. Now a read or a push is exactly one of the
+  paths `git-http-backend` serves at the repository root (`/info/refs`, `/git-upload-pack`,
+  `/git-receive-pack`, `/HEAD`, `/objects/info/{packs,alternates,http-alternates}`, a loose object
+  or a pack/idx by its full id), and the gateway classifies on the same path it hands the handler.
+  Any other path — a prefix, a `.` or `..` segment, a doubled or trailing slash — is refused with
+  `403` before `git-http-backend` runs; TASK-006's `..` residual (refused only by
+  `git-http-backend`'s own alias check, with a `500`) is closed with it.
 - **Residual: `SPINE_GIT_HTTP_DEV_NO_AUTH` is not workspace-scoped.** The development flag (accepted
   only with `SPINE_ENV=development`) lets every client read every workspace, in every mode.
 - **Residual: a single-mode server without an auth service tells workspaces apart.** The one
@@ -1139,10 +1152,20 @@ The following limitations have been resolved:
   TASK-008).
 - **Git floor:** git 2.30 or newer (`rev-parse --end-of-options`). `spine serve` refuses to start
   below it; embedders call `git.CheckGitVersion` at boot. Every shipped image runs 2.39.5 or later.
-- **Residual — user `?ref=` for a non-branch name still follows DWIM.** A read with
-  `?ref=<name>` where `<name>` is not an existing branch resolves as git always has, so a pushed
-  `refs/<name>` beats `refs/tags/<name>`. Name tags in full (`?ref=refs/tags/<name>`). TASK-016
-  blocks such pushes for non-operators.
+- **No DWIM for a missing reserved or home branch** (INIT-024 TASK-004; review finding N-10). A
+  bare revision in the reserved namespace (first component a case-fold spelling of `spine`, the
+  rule push admission uses: run, planning and divergence branches, `spine/init`) or naming the
+  tree's home branch, with no `refs/heads/<n>`, is `not_found` — never resolved by git's DWIM. A
+  run branch is usually missing because cleanup deleted it, and the evidence querier still reads it
+  for terminal runs; a same-named `refs/tags/<n>` or `refs/<n>` used to answer for it in every
+  read (`ReadFile`, `RefSHA`, `Diff`, `ListFiles`, `TreeEntryType`, `MergeBase`, `Log{Since}`,
+  `MeasureTree`). Name such a tag in full (`refs/tags/spine/...`) to read it.
+- **Residual — user `?ref=` for any other non-branch name still follows DWIM.** A read with
+  `?ref=<name>` where `<name>` is not an existing branch, outside the reserved namespace and not
+  the home branch, resolves as git always has, so a pushed `refs/<name>` beats
+  `refs/tags/<name>`. Name tags in full (`?ref=refs/tags/<name>`). TASK-016 blocks such pushes for
+  non-operators. Narrowing DWIM to the reserved and home names keeps `?ref=<tag>` and abbreviated
+  ids working on the public API (TASK-004 owner question 1 default: narrow).
 - **Residual — a branch beats a same-named tag in a bare-name read.** Revisions resolve
   branch-first, so a bare `<name>` that is both `refs/heads/<name>` and `refs/tags/<name>` reads
   the branch; git itself, and Spine before INIT-023, read the tag. Branch-first is what stops a
@@ -1188,18 +1211,20 @@ The following limitations have been resolved:
   path since the wave 4 follow-up, `git cat-file -s` before) and refuses one over the per-blob
   limit before reading it (`git.DefaultMaxBlobBytes`, 4 MiB — the worktree
   read limit too; `git.WithMaxBlobBytes`), with a permanent error matching `git.ErrBlobTooLarge`
-  (API 413). Every other read command — listings, diff, log, rev-parse, merge-base — fails past
-  16 MiB of output (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`, never below 4 KiB;
-  `git.ErrOutputTooLarge`).
+  (API 413). Every other read command — log, rev-parse, merge-base — fails past 16 MiB of output
+  (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`, never below 4 KiB;
+  `git.ErrOutputTooLarge`). The listings (`ListFiles`, `ListFilesFunc`) and `Diff` are parsed as
+  git writes them (INIT-024 TASK-004) and bounded by what they **keep**, not by what git prints:
+  see "Listings bound the paths they keep" below.
   Read commands also run with `GIT_ALLOC_LIMIT` (4 x the per-blob limit, never below 1 MiB, which
   git's own fixed allocations need; `git.WithMaxGitAllocBytes`), so git refuses any single
   allocation over it — it will not inflate a small blob stored as a delta on a huge base — and
   read and diff commands pin git's delta-base
   cache to the per-blob limit (`core.deltaBaseCacheLimit`, passed in `GIT_CONFIG_PARAMETERS`
   after any inherited entries); they run in the C locale so git's refusal is recognised whatever
-  the host's language. A command's output is held once: the parsed paths and messages share its
+  the host's language. Any other command's output is held once: the parsed messages share its
   buffer, which grows in powers of two (so while it grows it is briefly held at half and full
-  size). Mutating commands (checkout, merge, commit, add, branch, config, push) keep only the
+  size); a listing holds only the paths it keeps, each copied once. Mutating commands (checkout, merge, commit, add, branch, config, push) keep only the
   first 16 MiB of their output and never fail on its size. Defaults pending the owner (task owner
   questions 1 and 4).
 - **git's memory per read is about three times the alloc limit, not one.** `GIT_ALLOC_LIMIT` is
@@ -1210,15 +1235,58 @@ The following limitations have been resolved:
   concurrent read pays it, so a replica serving N such reads at once needs about N x 50 MiB of
   headroom for git. Lowering it means lowering the alloc limit (owner question 4), which refuses
   more legitimate deltas.
-- **A read-command output over the ceiling fails closed.** A commit on `main` whose listing or
-  diff exceeds 16 MiB (roughly 50k files, or fewer with long paths) makes `IncrementalSync`,
-  `FullRebuild` and `NextID` fail for that workspace — the sync state is `error` at the previous
-  commit and nothing is written — until the content is removed or the limit raised. Reaching it
-  takes a governed merge. Before TASK-003 the same commit exhausted the process's memory instead.
+- **Listings bound the paths they keep** (INIT-024 TASK-004; review finding N-6). A listing keeps
+  the paths its caller asked for — `ListFiles`' pattern, or `ListFilesFunc`'s predicate, applied
+  while git lists — and drops the rest as they arrive; `Diff` keeps every path it returns. What is
+  kept (each path plus its NUL) is held to the listing limit: `git.WithMaxOutputBytes` when the
+  embedder sets it, else `git.DefaultMaxListingBytes` (~17.2 MiB: the checkout budget's default
+  16 MiB of path bytes, one byte per default entry and 1 MiB of margin), and on a client that
+  carries a checkout budget never less than that budget's path bytes + entries + 1 MiB — so a tree
+  any budgeted merge admits always lists in full. A kept path longer than 4,096 bytes
+  (`git.MaxListingPathBytes`, Linux's `PATH_MAX`) refuses the listing; a dropped one never does.
+  Past either bound the listing fails closed with the same permanent `git.ErrOutputTooLarge`
+  (`OutputTooLargeError.PerPath` for the path bound). Artifact and workflow discovery
+  (`FullRebuild`), the first sync's workflow-row sweep, the branch-protection lookup and `NextID`
+  keep only the paths they use, through the optional `git.PathFilterLister` capability
+  (`git.ListFilesKeeping` falls back to `ListFiles` for a client without it), so a commit whose
+  listing is huge but which holds few governed files projects normally. Before, a merged commit
+  whose `ls-tree -r` printed more than 16 MiB (about 160k files, or a few thousand deep paths — a
+  few KB as a pack) failed every rebuild and every sync's sweep until it was reverted.
+- **Residual — a sync window whose changed paths alone exceed the listing limit fails closed.**
+  `IncrementalSync` diffs the last synced commit against head, and `Diff` keeps every path, so a
+  window that adds or removes more than the limit's worth of paths leaves the sync state `error`
+  at the previous commit; every later tick fails the same way. An operator rebuild
+  (`POST /api/v1/system/rebuild`, or `FullRebuild`) recovers it — it lists only the governed paths
+  — and later windows sync normally. With a checkout budget (`spine serve`) one merge's diff is at
+  most its two trees' path bytes, so a window over the default limit takes a near-budget tree
+  replaced wholesale, or many merges between two syncs. Falling back to a rebuild automatically is
+  a follow-up.
+- **Residual — more governed candidates than the limit, or one over 4,096 bytes.** A tree whose
+  `.md` and workflow paths alone exceed the listing limit, or which holds a governed path longer
+  than 4,096 bytes, still fails `FullRebuild` closed. Neither can come in through a governed merge
+  in standalone: the merge's governance guard runs `Diff`, which refuses the same path, and the
+  budget bounds the bytes.
 - **`diff` runs without `GIT_ALLOC_LIMIT`.** Rename detection loads both blobs of a candidate
   pair, and a legitimate large rename on `main` must not fail `Diff`; so a large blob already on
   the diff base can still be inflated in the git child while its rename is detected (its
-  delta-base cache is pinned like a read command's).
+  delta-base cache is pinned like a read command's). The step-output evidence count, whose
+  commit pair the run-branch author chooses, no longer goes through `Diff` (INIT-024 TASK-004;
+  review finding N-12): `CLIClient.CountChangedPaths` runs `git diff --name-only -z --no-renames`
+  as a read command (`GIT_ALLOC_LIMIT`, the pinned cache), which loads no blob, and keeps no path.
+  A rename then counts as two changed paths (a delete and an add). An operator without the
+  capability (SMP's) keeps counting through `Diff` (owner question 2 default).
+- **`Diff` ignores the repository's submodule ignore settings** (INIT-024 TASK-004). In a
+  non-bare tree `git diff <a> <b>` honours `submodule.<name>.ignore` in the checked-out
+  `.gitmodules` and `diff.ignoreSubmodules` in any config: `ignore = all` hid a gitlink change at a
+  governed path from the governance guard, the projection and the status cascade. `Diff` and
+  `CountChangedPaths` pass `--ignore-submodules=none`, so every gitlink change is reported
+  (`modified`). `ListFiles` (`ls-tree`) was never affected.
+- **History records cannot be forged by a commit message** (INIT-024 TASK-004; review finding
+  N-11). `Log` and `HasCommitWithTrailer` print each record after a boundary drawn per call from
+  `crypto/rand` (128 bits) and require every record to start with a full object id; anything else
+  fails the call (permanent, "unparseable log output"), never a skipped record. Before, a message
+  holding the fixed `---END---` separator and lines shaped like a record became a second entry of
+  `GET /api/v1/query/history`, with whatever id, author, date and trailers it chose.
 - **Named-ref window (closed by the wave 4 follow-up).** The size probe and the read are two git
   processes, but the read is `git cat-file blob <oid>` of the object the probe typed and sized, so
   a ref given by *name* that moves between them cannot change what is read. (Until then the read

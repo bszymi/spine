@@ -37,8 +37,9 @@ import (
 //	                                                   only); otherwise Branch        as its exact object id; as a
 //	                                                                                  CreateBranch base, with ^{commit}
 //	Rev     ReadFile/ListFiles/RefSHA/TreeEntryType    non-empty and ValidateRef      branch-first: an existing branch
-//	        ref; Diff from/to; MergeBase a/b;                                         as its exact object id, anything
-//	        LogOpts.Since                                                             else unchanged (see resolveRev)
+//	        ref; Diff from/to; MergeBase a/b;                                         as its exact object id; a missing
+//	        LogOpts.Since; CountChangedPaths                                          reserved or home branch NotFound;
+//	        from/to                                                                   anything else unchanged (resolveRev)
 //	Remote  remote of Push, PushBranch,                ^[A-Za-z0-9][A-Za-z0-9._-]*    unchanged
 //	        DeleteRemoteBranch                         (/[A-Za-z0-9._-]+)*, no ".."
 //
@@ -108,7 +109,10 @@ import (
 // gitlink unread, and a file entry that records a tag, a tree or a commit
 // (NotBlobError, ErrNotBlob; wave 4 follow-up); every
 // other read command fails past the per-command stdout limit
-// (OutputTooLargeError, ErrOutputTooLarge), and mutating
+// (OutputTooLargeError, ErrOutputTooLarge) — except the listings
+// (ListFiles, ListFilesFunc, Diff, CountChangedPaths), which parse git's
+// output as it streams and are bounded by the paths they keep (INIT-024
+// TASK-004, listing.go) — and mutating
 // commands drain their stdout instead of failing on its size. git's own
 // memory on read commands is bounded per allocation (GIT_ALLOC_LIMIT)
 // and its delta-base cache is pinned, which leaves about three times the
