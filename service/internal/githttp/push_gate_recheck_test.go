@@ -29,9 +29,18 @@ import (
 // the raw answer ("" when the server closed without one).
 func recheckRequest(t *testing.T, s *recheckSession, hello, token string, lines ...string) string {
 	t.Helper()
-	conn, err := net.Dial("unix", s.socket)
+	got, err := recheckExchange(s.socket, hello, token, lines...)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return got
+}
+
+// recheckExchange is recheckRequest for any goroutine.
+func recheckExchange(socket, hello, token string, lines ...string) (string, error) {
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		return "", err
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
@@ -40,7 +49,7 @@ func recheckRequest(t *testing.T, s *recheckSession, hello, token string, lines 
 		fmt.Fprintf(conn, "%s\n", l)
 	}
 	b, _ := io.ReadAll(conn)
-	return string(b)
+	return string(b), nil
 }
 
 // TestRecheck_ChannelIsPrivateSingleUseAndTokenBound: the socket's
@@ -388,4 +397,65 @@ func TestStorageProbe_MatchesTheHostFilesystem(t *testing.T) {
 	if _, err := probeRefStorage(context.Background(), t.TempDir()); err == nil {
 		t.Fatal("the probe of a non-repository answered")
 	}
+}
+
+// TestRecheck_StalledDecisionIsBoundedAndCancelled (codex review round
+// 1): a decision whose store read stalls is cut at the connection's
+// deadline, and closing the session — which ServeHTTP does once the
+// push's CGI has returned, before it gives the git slot back — cancels
+// one still running instead of waiting for it.
+func TestRecheck_StalledDecisionIsBoundedAndCancelled(t *testing.T) {
+	line := strings.Repeat("a", 40) + " " + strings.Repeat("b", 40) + " refs/heads/x"
+	stalled := func(started chan<- context.Context) recheckDecider {
+		return func(ctx context.Context, _ []RefUpdate) []string {
+			started <- ctx
+			<-ctx.Done() // a store read that returns only when cancelled
+			return nil
+		}
+	}
+
+	t.Run("close cancels a running decision", func(t *testing.T) {
+		started := make(chan context.Context, 1)
+		s, err := startRecheck(context.Background(), time.Minute, stalled(started))
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() { _, _ = recheckExchange(s.socket, recheckHello, s.token, line) }()
+		var dctx context.Context
+		select {
+		case dctx = <-started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the decision never started")
+		}
+		closed := make(chan struct{})
+		go func() { s.close(); close(closed) }()
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("close waited for a stalled decision instead of cancelling it")
+		}
+		if dctx.Err() == nil {
+			t.Fatal("the decision's context was not cancelled")
+		}
+	})
+
+	t.Run("a decision ends at the connection's deadline", func(t *testing.T) {
+		started := make(chan context.Context, 1)
+		s, err := startRecheck(context.Background(), 300*time.Millisecond, stalled(started))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.close()
+		begin := time.Now()
+		if got := recheckRequest(t, s, recheckHello, s.token, line); got != "" {
+			t.Errorf("an answer after the deadline: %q", got)
+		}
+		dctx := <-started
+		if _, ok := dctx.Deadline(); !ok {
+			t.Fatal("the decision has no deadline")
+		}
+		if elapsed := time.Since(begin); elapsed > 5*time.Second {
+			t.Fatalf("the stalled decision held the connection for %s (deadline 300ms)", elapsed)
+		}
+	})
 }

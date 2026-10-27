@@ -104,8 +104,13 @@ type recheckSession struct {
 	dir, socket, token string
 	ln                 net.Listener
 	decide             recheckDecider
-	ctx                context.Context
 	ioTimeout          time.Duration
+	// ctx is the decisions' context: the request's, cancelled by close
+	// (codex review round 1). A decision also stops at its connection's
+	// deadline, so a stalled store read can neither outlive the push nor
+	// keep close — and the push's git slot — waiting.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	wg sync.WaitGroup
 	// used is set by the first request that presents the token: the
@@ -113,10 +118,25 @@ type recheckSession struct {
 	used atomic.Bool
 }
 
-// startRecheck opens the channel of one push. ctx bounds the decision's
-// store reads; ioTimeout bounds each connection. The caller must close
-// the session once the push's CGI has returned.
-func startRecheck(ctx context.Context, ioTimeout time.Duration, decide recheckDecider) (*recheckSession, error) {
+// startRecheck opens the channel of one push. The decision's store reads
+// run under ctx, cut at the connection's deadline (ioTimeout after it was
+// accepted) and when the session is closed. The caller must close the
+// session once the push's CGI has returned.
+func startRecheck(parent context.Context, ioTimeout time.Duration, decide recheckDecider) (*recheckSession, error) {
+	ctx, cancel := context.WithCancel(parent)
+	s, err := openRecheck(ctx, ioTimeout, decide)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	s.ctx, s.cancel = ctx, cancel
+	s.wg.Add(1)
+	go s.serve()
+	return s, nil
+}
+
+// openRecheck creates the session's directory, token and listener.
+func openRecheck(ctx context.Context, ioTimeout time.Duration, decide recheckDecider) (*recheckSession, error) {
 	base := os.TempDir()
 	if len(base) > maxRecheckSocketBase {
 		base = "/tmp"
@@ -137,13 +157,10 @@ func startRecheck(ctx context.Context, ioTimeout time.Duration, decide recheckDe
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("push-admission re-check: %w", err)
 	}
-	s := &recheckSession{
+	return &recheckSession{
 		dir: dir, socket: socket, token: hex.EncodeToString(tok),
-		ln: ln, decide: decide, ctx: ctx, ioTimeout: ioTimeout,
-	}
-	s.wg.Add(1)
-	go s.serve()
-	return s, nil
+		ln: ln, decide: decide, ioTimeout: ioTimeout,
+	}, nil
 }
 
 // env is the session's part of the CGI environment.
@@ -151,9 +168,10 @@ func (s *recheckSession) env() []string {
 	return []string{EnvRecheckSocket + "=" + s.socket, EnvRecheckToken + "=" + s.token}
 }
 
-// close stops the listener, waits for every connection handler and
-// removes the socket's directory.
+// close cancels any decision still running, stops the listener, waits
+// for every connection handler and removes the socket's directory.
 func (s *recheckSession) close() {
+	s.cancel()
 	_ = s.ln.Close()
 	s.wg.Wait()
 	_ = os.RemoveAll(s.dir)
@@ -179,7 +197,8 @@ func (s *recheckSession) serve() {
 // line. A connection without the token gets no answer.
 func (s *recheckSession) handle(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(s.ioTimeout))
+	deadline := time.Now().Add(s.ioTimeout)
+	_ = conn.SetDeadline(deadline)
 	sc := bufio.NewScanner(io.LimitReader(conn, maxHookInputBytes+4096))
 	sc.Buffer(make([]byte, 0, 4096), maxHookLineBytes)
 	next := func() (string, bool) {
@@ -232,7 +251,11 @@ func (s *recheckSession) handle(conn net.Conn) {
 		}
 		lines = append(lines, RefUpdate{OldSHA: f[0], NewSHA: f[1], Ref: f[2]})
 	}
-	reply(s.decide(s.ctx, lines))
+	// The decision ends with the connection: an answer after the
+	// deadline could not be written anyway (the hook then refuses).
+	dctx, cancel := context.WithDeadline(s.ctx, deadline)
+	defer cancel()
+	reply(s.decide(dctx, lines))
 }
 
 // recheckAdmission is the server's apply-time decision for a push the
