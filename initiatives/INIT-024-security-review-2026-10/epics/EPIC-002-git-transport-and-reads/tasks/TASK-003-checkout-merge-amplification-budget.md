@@ -729,3 +729,61 @@ Codex (`codex review --base main`, plain, from the integration worktree): round 
 review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
 actionable regressions were identified"). It covered every merged task and coordination commit,
 including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.
+
+**Phase 3 (2026-10-28).** Round-4 tip `693fb648` merged as `23330ab7`. The conflicts were
+`CHANGELOG.md` and KNOWN-LIMITATIONS "Checkout Budget" (round 4's rewritten text taken, with the
+init-deadline case of `55789b28` added back) and this artifact (round 4's notes, then this
+section). Rechecks of the `55789b28` tests:
+- `TestPreauth_PendingRenormalisationIsInvisibleBeforeAuthentication` still holds on the round-4
+  code, unchanged: HEAD over the budget leaves the renormalisation pending, with the marker.
+- `TestServicePool_PendingRenormalisationStopsAtTheInitDeadline`: its property still holds (the
+  workspace is served while another operation holds the tree; red on the lifetime context). Its
+  final assertion expected the line and the marker after that build, but since round 4 the line is
+  added only under the hold. Coordination `31556f1f` now asserts that nothing changes under the
+  holder (no line, a.txt still converted) and that the next build, once the hold is released,
+  adds the line, restores the stored bytes and clears the marker.
+
+Codex round 1 (`codex review --base init/INIT-024-integration-a-p2`, session
+`01a181fe-f004-7ae0-bacb-8d4c6ed131cf`, `gpt-6.1-sol`, on `31556f1f`) covered this task's
+`6c71f215`/`6033df2d` and found two P2s in `neutral_attributes.go`, both fixed here on the integration branch:
+- `ed2f3ff1`: the fingerprints passed paths to `hash-object --stdin-paths`, one per line. git
+  C-unquotes a line that starts with `"`, drops a CR before the newline, and has no NUL-separated
+  form (git 2.39 and 2.54). So a leading quote failed the renormalisation or hashed another file,
+  a trailing CR could not be opened, and a newline was never fingerprinted. Paths are now
+  `hash-object -- <path>...` arguments. `TestNeutralAttributes_EveryPathShapeIsFingerprinted`
+  covers a leading quote, a quoted alias of another file, a backslash, a quoted octal escape, a
+  newline, a trailing CR, a leading dash and a name that is not UTF-8 (APFS refuses that one; it
+  passed on Linux in git-floor). Red on the previous code: five shapes.
+- `d200cec3`: the marker is untrusted input. Counts are plain digits, at most 2,097,152 and no more
+  than the rest of the file can hold; fields are non-empty; storage grows with the fields read;
+  any violation is "no record", which means the quarantine fallback. The writer refuses past the
+  same bound. This is the only place the marker is parsed.
+  `TestNeutralAttributes_RecordParserRefusesDamage` (19 shapes, the bound, the writer) and
+  `TestNeutralAttributes_DamagedMarkerFallsBackToTheQuarantine`. Red on the previous code: two
+  panics ("makeslice: cap out of range"), four damaged shapes accepted, the end-to-end call
+  panicked.
+
+Codex round 2 (`codex review --base 31556f1f`, session `01a1820e-b16a-7a71-b867-fe877c024998`,
+`gpt-6.1-sol`, on `d200cec3`), the last round, found one P2: the batches of `ed2f3ff1` were
+bounded by 128 KiB of raw bytes, past Windows' 32,767-unit command line.
+- `a33e399c`: `fingerprintBatches` bounds a batch by an upper bound of its Windows-quoted length,
+  at half the limit. `TestNeutralAttributes_FingerprintBatchesFitWindows` quotes each batch as
+  os/exec does on Windows (red on the old rule: 125,482 units), and
+  `TestNeutralAttributes_ManyConvertedFilesAreFingerprintedInBatches` covers 400 files across
+  several batches.
+- No codex round followed `a33e399c`; the budget had ended.
+
+Gates at `a33e399c`:
+- Cheap gates: lint-boundaries, `make build`, embed-smoketest, `go vet` ×3 rc 0;
+  golangci-lint `--new-from-rev main` plain / integration / scenario and gosec 0 issues; gofmt
+  clean (except the pre-existing `planning_run_test.go`); pincheck OK; `go mod tidy -diff` clean,
+  `verify` OK.
+- `-race`: `adapters/git`, `gitpool`, `githttp`, `workspace`, `gateway`, `cmd/spine` and
+  `core/worktreefs` rc 0.
+- `go test -p 4 ./...` rc 0.
+- `-tags integration`: this task's set plus `workspace` rc 0.
+- scenario-git-http: every step rc 0, 0 skips (90 / 26 / 154 / 12 / 24 / 37 + 1 / 19 + 1 / 1).
+- git-floor (git 2.39.5): STEP1 / STEP2 / EXTRA / EXTRA2 rc 0; all 8 path shapes pass on Linux.
+- SMP (`82899ace`): build and vet ×4 rc 0; `-race` on the SMP importers of `adapters/git`
+  (`cmd/customer-app`, `gitread`, `projectionwriter`, `spinecore`, `spineembedded`, `workspace`)
+  and `githttp` all ok; testgate Spine-runtime leg PASS (2447 passed, 3 allowed skips) and githttp leg PASS (590 passed, 1 allowed skip); no `ws_*` or `s24ia_*` database left, SMP untouched.

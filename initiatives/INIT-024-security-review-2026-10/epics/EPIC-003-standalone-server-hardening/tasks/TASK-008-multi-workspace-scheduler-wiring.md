@@ -507,3 +507,14 @@ Codex (`codex review --base main`, plain, from the integration worktree): round 
 review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
 actionable regressions were identified"). It covered every merged task and coordination commit,
 including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.
+
+**Phase 3 (2026-10-28).** TASK-003's round-4 re-merge (`23330ab7`) makes `EnsureNeutralWorkTree`
+take the tree's hold before it adds the neutral line. Coordination `31556f1f` keeps
+`TestServicePool_PendingRenormalisationStopsAtTheInitDeadline`'s property (the build gives up at
+the init deadline and the workspace is served while another operation holds its tree; red on the
+lifetime context). It replaces the final assertion with "nothing changes under the holder; the
+next build adds the line and restores the stored bytes". The `buildServiceSet` comment now names
+both waits. Gates at `a33e399c`, including `-race` and `-tags integration` on
+`service/internal/workspace` and `service/cmd/spine`, the scenario-git-http job (with
+`TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces`) and the SMP legs: see TASK-003's Integration A
+phase 3.
