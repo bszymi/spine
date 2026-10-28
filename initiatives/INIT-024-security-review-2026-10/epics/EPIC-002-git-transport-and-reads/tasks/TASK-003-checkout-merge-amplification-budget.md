@@ -613,3 +613,63 @@ a crash between the marker and the line on a real host (the order — marker fir
 crash relies on; the retry itself is tested); a pre-existing linked worktree of a converted clone
 (Spine's worktrees are its own, made after the line with `--no-checkout` + reset); GitHub CI
 (nothing is pushed); the full `make test-scenario` with a registry DB.
+
+### Review round 4 (2026-10-27; delta review of `37103f52..02334613`: 1 P2, 2 P3, 2 P4, all in the renormalisation)
+
+Fixed in `6c71f215` (`adapters/git/neutral_attributes.go`, a lock-order comment in `treelock.go`,
+tests, docs), and the codex finding below in `6033df2d`. `treebudget.go` (and its listing code,
+which T004 moves) is untouched.
+
+| Ruling | What was done | Tests (red at `02334613` / mutation) |
+|---|---|---|
+| 1 P2 stat-cache trust | Under the tree's hold, before deciding anything, `forceContentCompare` sets the index file's mtime to 1 s past the epoch (`git rev-parse --git-path index`, Lstat, regular only). git then treats every entry as racily clean (`is_racy_timestamp`: the entry's mtime is not older than the index's) and `git status` compares every tracked file's content under the neutral line; stat-matching files are hashed, not trusted. This is the "equivalent that re-hashes" rather than `read-tree HEAD`: it keeps the index's entries, staged changes and assume-unchanged / skip-worktree flags (a `read-tree HEAD` would drop staged changes; the record is anyway taken before the line, ruling 3), and status's refresh writes the index back with fresh stat data. The marker is cleared only after that comparison (and the rewrite). `--ignore-submodules=all`, `-c core.fsmonitor=false` (an fsmonitor's valid bits would skip the files). | `TestNeutralAttributes_StatCleanConvertedTreeIsRenormalised` (files dated an hour back + `update-index --refresh`, so non-racy; `status` clean under the old attributes): **red at `02334613`** — f.txt still `a\r\nb\r\n`, g.md still `$Id: 093c… $\r\nx\r\n`; green: both stored, marker cleared, and plain.bin (never converted) keeps its inode and mtime (content compared, not a blanket rewrite). Mutation (no mtime change): fails. |
+| 2 P3 unborn HEAD | `headUnborn`: HEAD names no commit, `symbolic-ref -q HEAD` names `refs/heads/…`, `show-ref --verify --quiet` of it exits 1 with empty stderr, and `ctx` is not done. Anything else returns the error and keeps the mark (a cancelled request as a transient `GitError` wrapping `ctx.Err()`). Probed on 2.54.0 and bookworm 2.39.5: a branch file that holds garbage or is empty makes `symbolic-ref -q HEAD` fail (128 "No such ref"); one that names a missing object makes `show-ref` exit 128; a real unborn branch gives 0 / 1 + empty. A `for-each-ref` broken-ref check was tried as well and dropped: its mutation survived on both versions (no shape reaches it). | `TestNeutralAttributes_TornHEADKeepsTheMark` (names-no-object and garbage) — **red at `02334613`**: "torn HEAD: want ErrRenormalisePending, got <nil>" (both); `…CancelledHEADProbeKeepsTheMark` (a test hook right before the HEAD probe cancels the request) — **red at `02334613`** with the same hook inserted into the base's `renormalise` (instrumentation only, `zz_r4shim.go`): "got <nil>"; `…UnbornHEADClearsTheMark` (green at both: a real unborn HEAD still clears). Mutations: any failure = unborn — torn and cancelled fail; show-ref check off — "names no object" fails; symbolic-ref check off — "garbage" fails. |
+| 3 P3 real changes | Before the line is written (under the old attributes, under the hold), `realChanges` records `git status --porcelain=v1 -z --untracked-files=no` (renames' sources included) into the marker: `spine-renormalise-record v1`, the count, NUL-terminated paths; written as a temp file renamed into place, so a marker is whole or absent. After the line, only paths with `X == ' '` (index matches HEAD), `Y == 'M'` (content differs) and not recorded are rewritten, from the index, with `git checkout-index -f -u -z --stdin` (HEAD's tree measured first); recorded paths, staged changes and untracked files are not touched; one Warn counts the recorded paths. A marker without a valid record (the round-3 build's text marker, or damage) falls back to `git stash create` (SHA at Warn), then rewrites every unstaged difference; staged paths are still never rewritten. Docs: CHANGELOG upgrade bullet rewritten; KNOWN-LIMITATIONS says what each tree kind does (shared tree: converted files rewritten when the line is added, real changes left to its restore as before; clone / served tree: real changes stay, a recorded path keeps its checked-out bytes; linked worktree; no-record fallback; assume-unchanged / skip-worktree trusted). | `TestNeutralAttributes_RealChangesAreLeftAsTheyWere` (racy and long-lived: an unstaged edit, a staged new file, an edit over a staged change, an untracked CRLF file, an assume-unchanged edit) — **red at `02334613`**: real.txt and g.md reset, staged.txt deleted; `TestClient_ReusedCloneKeepsItsRealChanges` (gitpool reuse) — **red**: edit reset, staged file deleted; `TestBudgetHook_RenormalisationKeepsRealChanges` (served tree, per push) — **red**: edit reset, staged file deleted, nothing staged; `…MarkerWithoutARecordQuarantinesFirst` (the round-3 marker shape; the quarantine commit holds the edit) — **red at `02334613`** on the staged path (the base reset it). Mutations: record ignored — the three real-changes tests fail; `X == ' '` guard off — the fallback test fails; quarantine off — the fallback test fails. |
+| 4 P4 linked worktrees | When the line is added, `markWorkTrees` records and marks this tree and every non-bare, non-prunable entry of `git worktree list --porcelain -z` (each worktree's own `--absolute-git-dir`; this tree skipped by its canonical git dir). Another worktree that cannot be marked is logged at Warn and left; a linked worktree is renormalised by a call on its own path. | `TestNeutralAttributes_LinkedWorktreesAreMarked` (a linked worktree checked out converted, with an edit) — **red at `02334613`**: "the linked worktree was not marked"; green: a call on it brings it to stored bytes and keeps its edit. Mutation (others not marked): fails. |
+| 5 P4 line outside the hold | `EnsureNeutralWorkTree` asks `ensureNeutral` (through `beforeAdd`, under the file's mutex) whether the line is being added; if it is and the tree is not held, it takes the tree's hold and goes again, so the record and the line are written under the hold, and the renormalisation re-enters it. Lock order: tree hold, then the per-file attributes mutex (now one per info/attributes file), documented beside `neutralWriteMus` and beside `treeLocks`; nothing waits for a tree while holding the mutex (other worktrees are recorded without their holds — KNOWN-LIMITATIONS). | `TestNeutralAttributes_LineWaitsForTheTreesHolder` (a sequence holds the tree; the call is seen waiting for it — `TreeRefsForTest` = 2 — while the line is still absent; the sequence's merge over the converted files succeeds; then the tree is renormalised) — **red at `02334613`**: "the line was added while a sequence held the tree"; `-race` on it, the linked and the cancelled tests and the touched packages: clean. Mutation (no hold before the line): fails. |
+
+The round-3 `TestBudgetHook_PendingRenormalisationDoesNotStopThePush` used an untracked file in a
+tracked directory's place to keep the renormalisation pending; with ruling 3 that deletion is a
+recorded real change and is left as it is, so the test now keeps it pending with a HEAD over the
+process budget (then lifted). Test seams: `adapters/git/neutral_export_test.go` (the HEAD-probe
+hook, `TreeRefsForTest`, the marker's name).
+
+**Codex on the round-4 delta** (`codex review --base init/INIT-024-TASK-003-r3`, plain; the one
+round allowed; model `gpt-6.1-sol` confirmed in the review sub-session):
+
+| Round | Review session | Findings | Disposition |
+|---|---|---|---|
+| R4 | `01a17eea-1396-7921-a530-8ea97dacce10` (on `6c71f215`) | P1 "Protect edits made after the renormalisation record is written": the record is taken when the line is added; a renormalisation that failed then and was retried later (or a linked worktree's, renormalised by a later call) took every unrecorded difference for a conversion, so an edit made in between was overwritten by `checkout-index -f` without quarantine (reproduced: first call refused on `MaxEntries: 1`, a clean tracked file edited, retry). | Real, fixed `6033df2d`. The call that records the tree and holds it since adds a PROOF to the marker before it rewrites anything: a fingerprint of each conversion-only file (`fingerprints`: the entry identified with `worktreefs.LstatEntry`, following nothing — a regular file `hash-object --stdin-paths`, which under the neutral line hashes its raw bytes; a link its target; other types, absent, unreachable — as the shared tree's phantom bookkeeping does; a path holding a newline gets none and is never proven). A later call rewrites only files whose fingerprint still matches and leaves a file edited since as it is (counted at Warn). A record no call has fingerprinted (a linked worktree's, or a crash right after the line) falls back to the quarantine (`git stash create`, SHA at Warn) before rewriting, as a marker without a record does. Docs: CHANGELOG, KNOWN-LIMITATIONS (retry; linked worktree; no-proof fallback). |
+
+Tests: `TestNeutralAttributes_EditAfterTheRecordIsKept` (first call refused on HEAD over the
+budget; then a clean file and a converted file edited; the unrestricted retry keeps both edits byte
+for byte, renormalises the untouched g.md, counts `changed_since_recorded=2`, quarantines nothing)
+— **red at `6c71f215`**: plain.bin back to "abc", f.txt to "a\nb\n"; `…LinkedWorktreesAreMarked`
+now also edits the linked worktree after the line: its call quarantines first and the quarantine
+holds the edit — **red at `6c71f215`** (no quarantine). Mutations: proof ignored on a retry —
+`…EditAfterTheRecordIsKept` fails; proof not written before the rewrite — fails; an unproven
+record rewritten without quarantine — `…LinkedWorktreesAreMarked` fails. No further codex round
+(one was allowed); this fix rests on the red runs and mutations.
+
+**Gates after review round 4** (all at `6033df2d`; heavy legs under the shared heavy-suite lock):
+
+| Gate | Result |
+|---|---|
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | rc=0 |
+| `go test -p 4 ./...` | rc=0, no failures |
+| `scenario-git-http` (`TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*`), own DB | rc=0 (87 / 26 / 130 passes, 0 skips) |
+| integration (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `core/artifact`, `core/workflow`) | rc=0 |
+| `-race` (`adapters/git`, `gitpool`, `githttp`, `cmd/spine`, `workspace`, `core/worktreefs`) | rc=0 (also run before each of the two commits) |
+| `git-floor` (golang:1.26-bookworm, git 2.39.5, `--pull=never`): both CI steps, the budget/hook tests, a verbose `TestMerge_*` / `TestCheckBudgetGitVersion` / `TestNeutralAttributes_*` run (18 tests, all nine round-4 ones included), plus an extra run of the gitpool `TestClient_Reused*` and githttp renormalisation tests (the CI filter does not reach them) | STEP1 / STEP2 / EXTRA / EXTRA2 rc=0; extra: all PASS |
+| golangci-lint v2.11.4 on the touched packages | the same findings as at round 3 (0 new vs the scaffold; a `deferUnlambda`, a G118 and a G703 were fixed before the first commit); `--enable-only=gosec`: 0 issues |
+| `gofmt -l` on changed files | clean |
+| `TestNoUnconfinedWorktreeIO` | passes (allowlist: the record's writer and reader, the marker's Lstat / remove, the index's time — git-administrative files only; the fingerprints go through `worktreefs`) |
+| SMP compatibility gate (`../spine` at `6033df2d`; its one uncommitted file was this artifact) | build and vet x4 rc=0; `-race` §5 packages: only the two by-design `gitread` contract tests (as at rounds 2-3); testgate runtime PASS (2,143) and githttp PASS (588); no `ws_*` / `s24003_*` databases left. No SMP change. |
+
+**Not run (review round 4):** a second codex round (one was allowed; `6033df2d` rests on its red runs
+and mutations); a real crash between the record, the line and the proof (the order — record, line,
+proof, rewrite, clear — is what a crash relies on; each retry path is tested); a concurrent
+non-Spine writer in the tree during the renormalisation (Spine's hold does not stop one); a tree
+whose differing paths exceed the 16 MiB command-output bound (`status` / `hash-object` output; the
+renormalisation then fails and stays marked — reachable only near the path-bytes budget); GitHub CI
+(nothing is pushed); the full `make test-scenario` with a registry DB.
