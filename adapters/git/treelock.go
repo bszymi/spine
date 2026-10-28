@@ -1219,7 +1219,10 @@ func (c *CLIClient) resetTreeOverRefusedSwitch(ctx context.Context, op, branch, 
 // contains a path the command would recreate is reported too,
 // conservatively.
 func (c *CLIClient) untrackedObstruction(ctx context.Context, op string, revs ...string) (string, error) {
-	args := append([]string{"diff", "--no-renames", "--name-only", "-z"}, revs...)
+	// --ignore-submodules=none (INIT-024 TASK-004 review round 1): a
+	// repository's submodule ignore settings must not hide a gitlink path
+	// the command rewrites.
+	args := append([]string{"diff", "--no-renames", "--name-only", "-z", "--ignore-submodules=none"}, revs...)
 	changed, _, err := c.runWith(ctx, op, runOpts{}, append(args, "--")...)
 	if err != nil {
 		return "", err
