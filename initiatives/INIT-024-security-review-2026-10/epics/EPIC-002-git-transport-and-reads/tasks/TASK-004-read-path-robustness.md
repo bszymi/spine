@@ -73,7 +73,8 @@ engine call site.
    - `ListFiles` and `Diff` parse their NUL-delimited stdout as a stream (new
      `adapters/git/listing.go`) instead of collecting it.
      - Kept bytes (the paths retained) stay under the per-command limit.
-     - Each path must be 4,096 bytes or less.
+     - ~~Each path must be 4,096 bytes or less.~~ *(Dropped in review round 1, P3-1: no per-path
+       limit; the kept-bytes limit bounds memory. See "Review round 1".)*
      - Exceeding either is the same `ErrOutputTooLarge`, so a refusal still fails closed.
      - The raw output size is no longer a limit.
    - `ListFiles` applies `pattern` while streaming.
@@ -120,6 +121,11 @@ engine call site.
   its own fix.
 - N-11 (Spine `Log`) and N-12 are inert for SMP: SMP's divergence client stubs `Log`, and its
   operator falls back to `Diff`.
+- **Carried to SMP EPIC-005 TASK-018** (review round 1, P4-7; recorded, not done here): SMP's
+  `gitread.Client.resolveRevLikeSpine` (`internal/customer/gitread/client.go:333`, SMP `82899ace`)
+  documents Spine's resolution rules 1–4 only. Its behaviour is right — a missing reserved or home
+  name passes through, is not batch-eligible, and Spine's own `ReadFile` then answers NotFound
+  (rule 5) — but the comment should name rule 5 so the two never drift.
 - **Carried to SMP EPIC-005 TASK-018** (recorded by TASK-004, not done here): SMP's
   `HistoryReader` formats `git log` with the same fixed separator
   (`internal/customer/spinecore/artifacthistoryreader.go:178` `historyLogFormat`, split at `:228`,
@@ -150,7 +156,10 @@ engine call site.
    - `FullRebuild` and `IncrementalSync` succeed and project both artifacts. Both fail at
      `a560c210`.
 2. **N-6 still fails closed** (`TestListFiles_KeptBytesOverLimitRefused`). Kept paths over the cap
-   give `ErrOutputTooLarge`, as does a 4,097-byte path.
+   give `ErrOutputTooLarge`. ~~as does a 4,097-byte path~~ *(amended in review round 1, P3-1: a
+   path of any length is listed, kept or dropped, and diffed; only the total binds — a per-path
+   refusal was a new projection wedge for embedders. `TestListFiles_KeptBytesOverLimitRefused`
+   now pins that 4,096-, 4,097- and 9,000-byte paths list.)*
 3. **N-6 stream contract** (`TestListFiles_StreamedEqualsBuffered`). Over the existing `-z`
    corpus (C-quoted, leading-space, non-ASCII paths), the output is byte-identical to the
    `a560c210` implementation.
@@ -297,7 +306,7 @@ declares `ChangedPathCounter` with the base's behaviour (nothing asserts it). "G
 | 2 | One enormous dropped path (bigger than the room left) | Refused (fail closed) when it exceeds the room left; such a path cannot be checked out, and in standalone the budget bounds path bytes. |
 | 3 | Many governed candidates (`.md` / workflow paths) at the repository root | Still fails closed past the listing limit — the "more governed candidates" residual. Not reachable through a budgeted merge (16 MiB of path bytes fits the limit); possible on SMP, whose listing limit is its `SMP_GIT_MAX_OUTPUT_BYTES`. |
 | 4 | A sync window whose diff is over the limit | Fails closed; an operator rebuild recovers (AC 1 third subtest). Automatic fallback: open question 1. |
-| 5 | A kept path > 4,096 bytes through a governed merge | The guard's `Diff` refuses it (every path kept), so the merge fails closed; a dropped one never refuses a listing (Deviation 2). |
+| 5 | *(superseded in review round 1: no per-path bound)* A kept path > 4,096 bytes through a governed merge | The guard's `Diff` refuses it (every path kept), so the merge fails closed; a dropped one never refuses a listing (Deviation 2). |
 | 6 | N-10 via qualified names | `refs/heads/<n>` is exact (rule 2, unchanged); `refs/tags/<n>` is what a caller who wants the tag names; `~ ^ : ..` are refused by `checkRev`. Case-fold spellings of the namespace are reserved (refadmit's fold), covered by `SPINE/run/y`. A reflog suffix (`<n>@{0}`) is not a branch name and keeps git's resolution — no Spine caller passes one; the public `?ref=` residual covers it. |
 | 7 | N-11: a message holding the boundary | Unpredictable (128 bits, drawn after the commits exist); author name and email cannot carry a newline (commit headers are line-based); any malformed record fails the call instead of being skipped. |
 | 8 | N-12: other ways `--name-only --no-renames` could load a blob | Tree-to-tree name-only output compares object ids; textconv and `diff.external` apply to patches only; `--no-renames` also turns off copy detection; GIT_ALLOC_LIMIT applies regardless (mutation M14 shows the limit catching rename detection). |
@@ -313,7 +322,8 @@ declares `ChangedPathCounter` with the base's behaviour (nothing asserts it). "G
    never less than its budget admits. Decision 3 holds: no new knob — an explicit
    `WithMaxOutputBytes(n)` is the listing limit (SMP passes one), exactly the old threshold for an
    unfiltered `ListFiles` (kept bytes == raw bytes there).
-2. **The 4,096-byte bound applies to kept paths only.** Holding every listed path to it would let
+2. *(Superseded in review round 1, P3-1: the per-path bound was dropped entirely.)* **The
+   4,096-byte bound applies to kept paths only.** Holding every listed path to it would let
    one long path anywhere in a tree (outside every governed directory) refuse discovery — a
    cheaper wedge than N-6 itself. A dropped path is read and dropped whatever its length (pinned by
    AC 2). The artifact's "strictly fewer refusals" holds except for a kept path over 4,096 bytes,
@@ -385,7 +395,7 @@ after; `s24004_*` databases dropped. No SMP change.
 |---|---|---|
 | M1 | the collector ignores the predicate | AC 1 (FullRebuild, IncrementalSync) |
 | M2 | kept-bytes cap off | AC 2 |
-| M3 | per-path bound off | AC 2 (4,097-byte path) |
+| M3 | per-path bound off *(the bound itself was dropped in review round 1)* | AC 2 (4,097-byte path) |
 | M4 | discovery lists unfiltered | AC 1 FullRebuild |
 | M5 | the sweep lists unfiltered | AC 1 IncrementalSync |
 | M6 | default listing limit = `DefaultMaxOutputBytes` | `TestListingLimit_AdmitsEveryBudgetedTree` |
@@ -423,7 +433,7 @@ after; `s24004_*` databases dropped. No SMP change.
   Either set `SMP_GIT_MAX_OUTPUT_BYTES` >= `git.DefaultMaxListingBytes`, or pass
   `git.WithTreeBudget` (the listing limit then follows the budget).
 - **Shared at the bump** (CHANGELOG "Changed (embedders)"): fewer listing refusals; a kept path over
-  4,096 bytes is refused; reserved/home names with no branch are NotFound; `Diff` reports gitlink
+  4,096 bytes is refused *(dropped in review round 1)*; reserved/home names with no branch are NotFound; `Diff` reports gitlink
   changes the repository's submodule settings hid (SMP's own diff already passes the flag); Log's
   strict parse. Re-run SMP's `gitread`, `projectionwriter` and `spinecore` suites at the bump (done
   here against this branch: green).
@@ -436,6 +446,69 @@ after; `s24004_*` databases dropped. No SMP change.
    refused as too large (`ErrOutputTooLarge`)? Today the state stays `error` at the previous
    commit until an operator rebuild, which now succeeds (residual in KNOWN-LIMITATIONS). Default
    taken: no automatic fallback (not in the design).
-2. Is a 4,096-byte cap on kept paths the right bound for `Diff` too (where every path is kept)? A
+2. *(Answered in review round 1: no — the cap is dropped.)* Is a 4,096-byte cap on kept paths the right bound for `Diff` too (where every path is kept)? A
    governed merge carrying such a path is refused by the guard's `Diff` (fail closed); such a path
    cannot be checked out on Linux anyway.
+
+### Review round 1 (2026-10-28; correctness + security review of `d1f5e6e1`: 0 P1/P2, one P3, P4s)
+
+Report: SMP repo `tmp/init027-orchestration/i24/t004-reviews/REVIEW.md`; probes `i24/t004-rev/`.
+Fixes on this branch, rulings by the coordinator:
+
+| Ruling | Finding | What was done | Tests (red at `d1f5e6e1` / mutation) |
+|---|---|---|---|
+| 1 | **P3-1** the 4,096-byte refusal of kept listing paths and of every Diff path was a new persistent projection wedge for embedders (a governed `.md` at a long path failed every FullRebuild; a long path anywhere in a sync window failed every IncrementalSync; reachable on SMP, whose own merges can admit such a path) | The per-path refusal is dropped for listings and Diff alike; memory is bounded by the kept-bytes limit. Every listing owner holds one unfinished record to `max(4 KiB, the room left)` (`listingBounds.carryBound`), and a record completed inside one write is held to the same bound, so the verdict does not depend on how the pipe chunked it. `OutputTooLargeError.PerPath` and `MaxListingPathBytes` are removed (nothing needed them). AC 2's 4,097-byte clause is amended in place; Deviation 2 is superseded. CHANGELOG "Changed (embedders)" names it. | `TestFullRebuild_LongGovernedPathProjects` (a 5,000-byte governed `.md` path projects) and `TestIncrementalSync_LongPathInTheWindowSyncs` (a 5,000-byte path in the window, the artifact change applied) — **red at `d1f5e6e1`**: "output holds a path longer than 4096 bytes" (`red/red-rr1.log`). `TestListFiles_KeptBytesOverLimitRefused` now pins 4,096-, 4,097- and 9,000-byte paths listing, kept or dropped, and diffing; only the total binds. Mutation Mo (per-path refusal back): caught. |
+| 2 | **P4-2** Diff kept both trees' paths under the tree-listing limit | `DefaultMaxDiffBytes` = 2 x (path budget + entries) + 1 MiB (~33.4 MiB); `diffLimit()` = explicit `WithMaxOutputBytes`, else that default, never below twice what a carried budget admits + margin. Diff and its collector use it. OQ1's automatic IncrementalSync → FullRebuild fallback is recorded as a **follow-up for TASK-010** (not built). | `TestListingLimit_AdmitsEveryBudgetedTree` reads the constants (default, explicit, budgeted, process default); `TestDiff_HoldsBothTreesWorthOfPaths` (~2.4 MB of paths between a ~2.1 MiB listing limit and a ~3.1 MiB diff limit: Diff returns all 25,000 records, the listing is refused). Mutations Mi (Diff on the listing limit), Mi2 (diff default = listing default): caught. |
+| 3 | **P4-3** three reviewer mutations survived: the carry bound removed (Ma), Diff's `s.finish()` removed (Mc), runListing's end-of-stream check removed (Md); the shims re-implemented the end-of-stream checks | `endOfStream` is the one end-of-stream verdict: runListing and every shim (`ParseNameStatusZChunkedForTest`, `ListedForTest`, `CountedForTest`) call it, and the shims end exactly as Diff/ListFiles do. A fake-git seam (a `git` on PATH that prints crafted output) drives the real `ListFiles`, `ListFilesFunc`, `Diff` and `CountChangedPaths`. | `TestListing_CarryOfADroppedPathIsBounded` (5, 12, 20, 40 KiB dropped paths in 1, 4 and 7 KiB writes under a 16 KiB limit; the carry never exceeds the limit; the 4 KiB floor), `TestListings_EndOfStreamThroughTheRealRunner`. Mutations Ma, Ma2 (completed-record bound off), Mb (floor off), Mc, Md, Me (endOfStream accepts a truncated stream): all caught. |
+| 4 | **P4-4** concrete request paths for the githttp defect in public text; an inaccurate "doubled slash refused" sentence; a garbled CHANGELOG intro; the embedders section missed HasCommitWithTrailer's strict parse | KNOWN-LIMITATIONS "Git HTTP", the CHANGELOG, `protocol_path.go` and both test headers now state the defect at defect level ("a path prefix inside the served tree reached git-http-backend as a repository"). The doubled-slash sentence now says what happens: inside the git path it is refused; through the gateway an empty segment where the repository segment goes is an empty repository id, which names the primary repository as it always has. CHANGELOG intro rewritten; the embedders bullet names `HasCommitWithTrailer`'s strict parse. The notes above carried no concrete request path. | — |
+| 5 | **P4-5** `untrackedObstruction`'s diff (`treelock.go`) lacked `--ignore-submodules=none` | Flag added (one argv element plus a three-line comment; TASK-003's lock-order comment untouched). | `TestUntrackedObstruction_SubmoduleIgnoreSettingsHideNoGitlink` (an untracked file where a forced switch writes a gitlink, under `ignore = all` and under `diff.ignoreSubmodules = all`) — **red at `d1f5e6e1`**: "" (not reported). Mutation Ml: caught. |
+| 6 | **P4-6** with the raw-size bound gone, nothing bounded the work of a listing: a few small objects expanding to 10^8 paths took 7.75 s per filtered listing | **Record ceiling:** a tree listing fails closed (`ErrOutputTooLarge`, new `OutputTooLargeError.Records`) past 4 x the client's budget entries (`DefaultTreeMaxEntries` without a budget: 800,000), kept or dropped; Diff and `CountChangedPaths` past twice that. **Pathspec:** new `ListFilesUnder(ctx, ref, dir, keep)` on `PathFilterLister` (`--literal-pathspecs ls-tree -r --name-only -z --full-tree [eoo] <rev> <dir>`; a dir that is not a clean relative path is never passed to git, the whole tree is listed and filtered instead); `ListFilesKeeping` takes the directory. Discovery with an artifacts directory, workflow discovery (`<dir>/workflows`, `workflows`) and `NextID` (its parent directory) scope their listings; repository-root discovery and the sweep rely on the ceiling. KNOWN-LIMITATIONS "Listings stop at a record ceiling". | `TestListing_RecordCeiling` (MaxEntries 50 / 20: listing ceiling 200 / 80, diff and count 400 / 160; refused or admitted as computed; a scoped listing under an 80-record ceiling), `TestListFilesUnder_WalksOneDirectory` (literal, not a glob; prefix exactness; unclean dirs; the fallback without the capability), `TestDiscovery_ScopesTheListingToItsDirectory` (the dirs discovery and NextID pass); argv rows in `TestRefGrammar_ArgvShape`. Mutations Mf, Mg, Mh (each ceiling off), Mj (no pathspec), Mk (unclean dirs as pathspecs), Mm (discovery unscoped), Mn (NextID unscoped): all caught. |
+| 7 | **P4-7** SMP `gitread.resolveRevLikeSpine` documents rules 1–4 only | Recorded under SMP impact as a TASK-018 carry item; SMP untouched. | — |
+
+Mutations (`t004/mutate_rr1.py`, overlay, worktree untouched; `t004/mut-rr1/summary.txt`): **17 / 17
+caught**, including the three the reviewer saw survive (Ma, Mc, Md).
+
+Deviations in this round:
+- `MaxListingPathBytes` (exported in round 0) is removed rather than kept: after P3-1 nothing
+  bounds a path by it; the 4 KiB carry floor is the unexported `listingCarryFloor`.
+- The ceiling follows the client's budget entry count (not a fixed constant), so a small budget
+  gives a small ceiling — the test's "small cap" — and an operator who raises
+  `SPINE_GIT_TREE_MAX_ENTRIES` raises it.
+- `PathFilterLister` gained `ListFilesUnder`; it is new in this task, so no shipped interface grows a
+  method (`gitread.Client` gets it by embedding).
+
+**Codex (second round; `codex review --base init/INIT-024-wave3-base`, plain; `gpt-6.1-sol` confirmed):**
+
+| Round | Review session | Findings | Disposition |
+|---|---|---|---|
+| 2 | `01a1828d-d186-7a40-8cc9-1be279c28e2c` (on `758fb405`; the lint-only commit `6456ab51` followed) | none: "No actionable regressions were identified in the changes relative to the specified merge base" (confidence 0.81) | clean |
+
+**Gates after review round 1** (code head `6456ab51`; the artifact was the only uncommitted file;
+heavy legs under the shared heavy-suite lock; logs `t004/gates/r2/`, `ci-r2/`, `smp-r2/`,
+`gitfloor/out-r2.log`):
+
+| Gate | Result |
+|---|---|
+| lint-boundaries, `make build`, embed-smoketest, `go vet` plain / integration / scenario | rc=0 |
+| `go test -p 4 ./...` | rc=0, no failures |
+| `scenario-git-http` (`TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*`), own DB `s24004_ci_r2` | rc=0 (90 / 26 / 154 passes, 0 skips) |
+| integration `-tags integration` (11 touched packages) | rc=0 |
+| `-race` (`adapters/git`, `gitpool`, `projection`, `githttp`, `gateway`, `core/artifact`, `core/evidence`, `core/engine`) | rc=0, no data race |
+| `git-floor` (golang:1.26-bookworm, git 2.39.5, `--pull=never`): both CI steps + every TASK-004 test verbose, round-1 tests included | STEP1 / STEP2 / EXTRA rc=0 (36 verbose PASS lines) |
+| golangci-lint v2.11.4 `--new-from-rev=init/INIT-024-wave3-base`, touched packages | 0 issues (3 found and fixed in `6456ab51`: 2 gocritic initClause, 1 staticcheck QF1001); `--enable-only=gosec`: 0 issues |
+| `gofmt -l` on changed files | clean except the pre-existing `core/artifact/id_allocator.go` |
+| SMP compatibility gate (SMP `82899ace`, `../spine` = `6456ab51`) | build and vet x4 rc=0; §5 `-race` packages rc=0, no failure; testgate runtime PASS (2,447 passed, 0 failed, 3 allowed skips), githttp PASS (590, 1 allowed skip); `ws_*` 0 before and after; `s24004_*` dropped. No SMP change. |
+| red runs at `d1f5e6e1` | `TestFullRebuild_LongGovernedPathProjects`, `TestIncrementalSync_LongPathInTheWindowSyncs`, `TestUntrackedObstruction_SubmoduleIgnoreSettingsHideNoGitlink` (`red/red-rr1.log`) |
+| mutations | 17 / 17 caught (`mut-rr1/summary.txt`) |
+
+**Commits (review round 1):** `9550dbc6` (P3-1, P4-2, P4-3, P4-6), `13808885` (P4-5), `758fb405`
+(P4-4 and the docs of the new bounds), `6456ab51` (lint), and this notes commit (AC 2 amendment,
+superseded marks, P4-7 carry item, this section).
+
+**Follow-up for TASK-010 (recorded, not built):** OQ1 — an `IncrementalSync` whose window `Diff` is
+refused as too large could fall back to `FullRebuild` on its own instead of holding the sync in
+error until an operator rebuild (reviewer: yes, as a follow-up).
+
+**Not run (review round 1):** a third codex round (round 2 was clean; the brief caps codex at three);
+the full `make test-scenario` with a registry DB; GitHub CI; a real 10^8-path tree (the record
+ceiling is tested with a small budget, and the reviewer's probe measured the unbounded case).
