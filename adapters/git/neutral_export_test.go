@@ -31,3 +31,12 @@ func ReadRenormaliseRecordForTest(path string) (changes []string, proof map[stri
 	rec, ok, err := readRenormaliseRecord(path)
 	return rec.changes, rec.proof, ok, err
 }
+
+// WriteRenormaliseRecordForTest writes a marker as markWorkTrees and
+// renormalise do.
+func WriteRenormaliseRecordForTest(path string, changes []string, proof map[string]string) error {
+	return writeRenormaliseRecord(path, renormaliseRecord{changes: changes, proof: proof})
+}
+
+// MaxRenormaliseRecordEntries is the per-section entry bound.
+const MaxRenormaliseRecordEntries = maxRenormaliseRecordEntries

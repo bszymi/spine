@@ -279,6 +279,12 @@ const renormaliseRecordHeader = "spine-renormalise-record v1\n"
 // maxRenormaliseRecordBytes bounds a marker, written or read.
 const maxRenormaliseRecordBytes = 64 << 20
 
+// maxRenormaliseRecordEntries bounds each section's entry count, written
+// or read: a record never names more paths than this (far above any tree
+// the default budget admits), so a damaged count cannot make the reader
+// allocate for more.
+const maxRenormaliseRecordEntries = 1 << 21
+
 // renormaliseRecord is a marker's content: the real changes, and the
 // proof (nil until the comparison under the line has been made).
 type renormaliseRecord struct {
@@ -292,6 +298,9 @@ type renormaliseRecord struct {
 // the same directory and renames it into place, so a marker is whole or
 // absent; a link at the path is replaced, never followed.
 func writeRenormaliseRecord(path string, rec renormaliseRecord) error {
+	if len(rec.changes) > maxRenormaliseRecordEntries || len(rec.proof) > maxRenormaliseRecordEntries {
+		return fmt.Errorf("the renormalise record names more than %d paths", maxRenormaliseRecordEntries)
+	}
 	var b bytes.Buffer
 	b.WriteString(renormaliseRecordHeader)
 	b.WriteString("changes " + strconv.Itoa(len(rec.changes)) + "\n")
@@ -333,7 +342,16 @@ func writeRenormaliseRecord(path string, rec renormaliseRecord) error {
 
 // readRenormaliseRecord reads the marker's record. ok is false when the
 // marker carries none (an older marker, a damaged one, or not a regular
-// file).
+// file); the caller then quarantines before it rewrites anything.
+//
+// The marker is untrusted input (INIT-024 integration A, codex): anything
+// that can write a work tree's git directory can write it, and a crash or
+// a disk error can tear it. Every count is decimal digits only, at most
+// maxRenormaliseRecordEntries, and no more than the fields the rest of the
+// file can hold (each at least one byte and its NUL); every field is
+// non-empty; nothing may follow the last section. Storage grows with the
+// fields actually read, never from a count. Any violation is "no record",
+// never a panic and never a partial record.
 func readRenormaliseRecord(path string) (rec renormaliseRecord, ok bool, err error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -355,19 +373,26 @@ func readRenormaliseRecord(path string) (rec renormaliseRecord, ok bool, err err
 	if !found || len(b) > maxRenormaliseRecordBytes {
 		return renormaliseRecord{}, false, nil
 	}
-	// section reads "<name> <count>\n" and then count*per NUL-terminated
-	// fields.
+	// section reads "<name> <count>\n" and then count*per NUL-terminated,
+	// non-empty fields.
 	section := func(name string, per int) ([]string, bool) {
 		line, after, found := bytes.Cut(rest, []byte("\n"))
-		label, count, _ := strings.Cut(string(line), " ")
-		n, convErr := strconv.Atoi(count)
-		if !found || label != name || convErr != nil || n < 0 {
+		if !found {
 			return nil, false
 		}
-		fields := make([]string, 0, n*per)
+		label, count, found := strings.Cut(string(line), " ")
+		if !found || label != name {
+			return nil, false
+		}
+		n, valid := renormaliseRecordCount(count)
+		// Each field takes at least two bytes (one of content, its NUL).
+		if !valid || n > len(after)/(2*per) {
+			return nil, false
+		}
+		var fields []string
 		for i := 0; i < n*per; i++ {
 			field, tail, found := bytes.Cut(after, []byte{0})
-			if !found {
+			if !found || len(field) == 0 {
 				return nil, false
 			}
 			fields = append(fields, string(field))
@@ -393,6 +418,25 @@ func readRenormaliseRecord(path string) (rec renormaliseRecord, ok bool, err err
 		rec.proof[pairs[i]] = pairs[i+1]
 	}
 	return rec, true, nil
+}
+
+// renormaliseRecordCount parses a record section's count: decimal digits
+// only, without a sign or a leading zero, at most
+// maxRenormaliseRecordEntries.
+func renormaliseRecordCount(s string) (int, bool) {
+	if s == "" || len(s) > len(strconv.Itoa(maxRenormaliseRecordEntries)) || (len(s) > 1 && s[0] == '0') {
+		return 0, false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n > maxRenormaliseRecordEntries {
+		return 0, false
+	}
+	return n, true
 }
 
 // renormalisePending reports whether the marker is there.

@@ -1314,13 +1314,16 @@ The following limitations have been resolved:
   - a retried renormalisation (the first failed: HEAD over the budget, a torn ref, a cancelled
     request) rewrites only the files whose fingerprint still matches the one taken before the
     first attempt's rewrite; a file edited since is left as it is;
-  - a tree whose marker has no record (an earlier build of this change wrote it), or whose record
+  - a tree whose marker has no record (an earlier build of this change wrote it, or it cannot be
+    read: damaged, torn, or past its bounds — the marker is untrusted input), or whose record
     was never fingerprinted (a crash right after the line): its tracked state is quarantined
     first, then every unrecorded unstaged difference is rewritten; staged changes are still never
     rewritten;
   - only the calling tree's hold is taken while the line is added; a sequence running in another
     worktree of the same repository at that moment runs on under the new attributes (one-time).
-  A tree whose renormalisation fails stays marked and is retried by the next call. A path marked
+  A tree whose renormalisation fails stays marked and is retried by the next call. A work tree
+  with more uncommitted changes than a record holds (2,097,152 paths) is not given the line (the
+  build or push logs why), so its budgeted measures keep refusing until it has fewer. A path marked
   assume-unchanged or skip-worktree is trusted as git trusts it: not compared, not rewritten. A
   shared-mode workspace build waits for the tree's hold (to add the line, or to renormalise a
   marked tree) at most its init deadline (`SPINE_WS_POOL_INIT_TIMEOUT`; "Shared Working Tree",
