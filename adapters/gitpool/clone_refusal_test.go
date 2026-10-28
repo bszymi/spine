@@ -172,3 +172,81 @@ func TestClient_ReusedConvertedCloneIsRenormalised(t *testing.T) {
 		})
 	}
 }
+
+// TestClient_ReusedCloneKeepsItsRealChanges (INIT-024 TASK-003 review
+// round 4, P3): renormalising a reused clone quarantined and reset EVERY
+// tracked change, a real uncommitted edit included. Now only the
+// conversion-only file goes to its stored bytes: the edit, a staged
+// file and an untracked file survive byte for byte, and the clone is no
+// longer marked.
+func TestClient_ReusedCloneKeepsItsRealChanges(t *testing.T) {
+	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{})
+	base := t.TempDir()
+	local := filepath.Join(base, "code")
+	g := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", local}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
+			"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@x.invalid", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@x.invalid")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return string(out)
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(local, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(name string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(local, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	if out, err := exec.Command("git", "init", "-q", "-b", "main", local).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	write(".gitattributes", "* text eol=crlf\n")
+	write("a.txt", "one\ntwo\n")
+	write("real.txt", "real\n")
+	g("add", "-A")
+	g("commit", "-q", "-m", "files")
+	for _, f := range []string{"a.txt", "real.txt"} {
+		if err := os.Remove(filepath.Join(local, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g("checkout", "--", ".") // checked out with the conversion
+	write("real.txt", "real\nuncommitted edit\n")
+	write("staged.txt", "staged\n")
+	g("add", "staged.txt")
+	write("untracked.txt", "mine\r\n")
+
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{}})
+	repo := &repository.Repository{ID: "code", Status: "active", LocalPath: local, CloneURL: "https://git.example/code.git"}
+	resolver := &stubResolver{lookups: map[string]lookupResult{"code": {repo: repo}}}
+	pool := newPool(t, &stubClient{}, resolver, func(p string, _ gitpool.Credential) git.GitClient { return git.NewCLIClient(p) },
+		gitpool.WithCloner(&fakeCloner{}), gitpool.WithRepoBase(base))
+	if _, err := pool.Client(context.Background(), "code"); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"a.txt": "one\ntwo\n", "real.txt": "real\nuncommitted edit\n", "staged.txt": "staged\n", "untracked.txt": "mine\r\n",
+	} {
+		if got := read(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if staged := g("diff", "--cached", "--name-only"); staged != "staged.txt\n" {
+		t.Errorf("staged = %q, want staged.txt kept staged", staged)
+	}
+	if _, err := os.Lstat(filepath.Join(local, ".git", "spine-renormalise-pending")); err == nil {
+		t.Error("the clone is still marked")
+	}
+}

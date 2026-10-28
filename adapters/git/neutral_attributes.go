@@ -28,9 +28,10 @@ package git
 // checkouts write stored bytes (an LFS pointer stays a pointer, CRLF is
 // not added), `git add` no longer normalises (CRLF content stays CRLF,
 // `$Id: … $` is not collapsed), conflict markers are always 7 characters,
-// and a tree checked out with conversions before the line would look
-// modified, so EnsureNeutralWorkTree brings it to the stored bytes
-// (retried until that succeeds).
+// and a tree checked out with conversions before the line no longer
+// matches its blobs, so EnsureNeutralWorkTree brings its conversion-only
+// files to the stored bytes by content, leaving real uncommitted changes
+// in place (retried until that succeeds).
 //
 // The writer is opt-in like the budget: `spine serve` calls
 // EnsureNeutralWorkTree for each repository it serves, a budgeted Clone
@@ -47,11 +48,16 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/core/worktreefs"
 )
 
 // NeutralCheckoutAttributes is the attributes line a budgeted repository
@@ -78,8 +84,21 @@ var ErrRenormalisePending = errors.New("git: the neutral checkout attributes are
 // maxInfoAttributesBytes bounds the read of an existing info/attributes.
 const maxInfoAttributesBytes = 1 << 20
 
-// neutralWriteMu serialises this process's writers of info/attributes.
-var neutralWriteMu sync.Mutex
+// neutralWriteMus serialises this process's writers of each
+// info/attributes file (one mutex per file, so a slow record of one
+// repository's work trees never holds another repository's writer).
+//
+// Lock order (review round 4): a work tree's hold (acquireTree) is taken
+// BEFORE the file's mutex, never after — EnsureNeutralWorkTree takes the
+// calling tree's hold and then writes the line under the mutex; nothing
+// waits for a tree while holding the mutex (the record of the other work
+// trees runs git there without taking their holds).
+var neutralWriteMus sync.Map // cleaned info/attributes path -> *sync.Mutex
+
+func neutralWriteMu(path string) *sync.Mutex {
+	mu, _ := neutralWriteMus.LoadOrStore(filepath.Clean(path), &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
 
 // infoAttributesPath returns $GIT_COMMON_DIR/info/attributes of repoDir.
 func infoAttributesPath(ctx context.Context, repoDir string) (string, error) {
@@ -165,17 +184,17 @@ func endsNeutral(content []byte) bool {
 // bare repository's directory — never a directory that merely lies
 // inside one (review round 3): the file written is that repository's.
 func EnsureNeutralCheckoutAttributes(ctx context.Context, repoDir string) error {
-	return ensureNeutral(ctx, repoDir, "")
+	return ensureNeutral(ctx, repoDir, nil)
 }
 
-// ensureNeutral is EnsureNeutralCheckoutAttributes. With a pendingMarker
-// path, a write that ADDS the line (the file did not end in it) first
-// creates that marker, so a work tree checked out under the old
-// attributes stays marked for renormalising until EnsureNeutralWorkTree
-// has done it (codex review round 3): the marker is on disk before the
-// line is, and a failed or interrupted renormalisation is retried by the
-// next call.
-func ensureNeutral(ctx context.Context, repoDir, pendingMarker string) error {
+// ensureNeutral is EnsureNeutralCheckoutAttributes. beforeAdd, when not
+// nil, runs under the file's mutex when the write ADDS the line (the file
+// did not end in it), before anything is written; its error leaves the
+// file as it was and is returned. EnsureNeutralWorkTree uses it to take
+// its hold of the tree first and to record and mark the work trees the
+// line will change (review rounds 3-4): the marks are on disk before the
+// line is.
+func ensureNeutral(ctx context.Context, repoDir string, beforeAdd func() error) error {
 	if err := requireRepositoryTop(ctx, repoDir); err != nil {
 		return err
 	}
@@ -183,8 +202,9 @@ func ensureNeutral(ctx context.Context, repoDir, pendingMarker string) error {
 	if err != nil {
 		return err
 	}
-	neutralWriteMu.Lock()
-	defer neutralWriteMu.Unlock()
+	mu := neutralWriteMu(path)
+	mu.Lock()
+	defer mu.Unlock()
 	have, exists, err := readInfoAttributes(path)
 	if err != nil {
 		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: "cannot read info/attributes", Err: err}
@@ -206,9 +226,9 @@ func ensureNeutral(ctx context.Context, repoDir, pendingMarker string) error {
 	writeErr := func(msg string, err error) error {
 		return &GitError{Kind: ErrKindPermanent, Op: "neutral_attributes", Message: msg, Err: err}
 	}
-	if pendingMarker != "" && !endsNeutral(have) {
-		if err := markRenormalisePending(pendingMarker); err != nil {
-			return writeErr("cannot mark the work tree for renormalising; info/attributes not written", err)
+	if beforeAdd != nil && !endsNeutral(have) {
+		if err := beforeAdd(); err != nil {
+			return err
 		}
 	}
 	dir := filepath.Dir(path)
@@ -239,29 +259,140 @@ func ensureNeutral(ctx context.Context, repoDir, pendingMarker string) error {
 
 // renormaliseMarker is the file, in a work tree's own git directory, that
 // says the work tree still holds files checked out before the neutral line
-// was added: created before the line is written, removed once the tree is
-// at its stored bytes (or found clean).
+// was added. It is written (atomically) before the line is, and holds the
+// RECORD (review round 4): every tracked path that differed from HEAD or
+// the index under the old attributes — the tree's real uncommitted
+// changes, staged or not, which renormalising leaves as they are — and,
+// once the call that wrote it has compared the tree under the line, the
+// PROOF: a fingerprint of each conversion-only file as it was then (codex
+// review round 4), so a later call rewrites only files still exactly as
+// they were. It is removed once the tree's conversion-only paths are at
+// their stored bytes (or there are none, or HEAD is unborn).
 const renormaliseMarker = "spine-renormalise-pending"
 
-// markRenormalisePending creates the marker. One already there (a regular
-// file) is kept; anything else at the path is refused, never followed
-// (O_EXCL does not follow a link).
-func markRenormalisePending(path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: a fixed name in git's own directory
-	if errors.Is(err, fs.ErrExist) {
-		if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode().IsRegular() {
-			return nil
-		}
-		return errors.New("the renormalise marker is not a regular file")
+// renormaliseRecordHeader opens a marker that carries a record. A marker
+// without it (one written by an earlier build of this change) or with a
+// damaged record has none: renormalising then falls back to quarantining
+// the tracked state first.
+const renormaliseRecordHeader = "spine-renormalise-record v1\n"
+
+// maxRenormaliseRecordBytes bounds a marker, written or read.
+const maxRenormaliseRecordBytes = 64 << 20
+
+// renormaliseRecord is a marker's content: the real changes, and the
+// proof (nil until the comparison under the line has been made).
+type renormaliseRecord struct {
+	changes []string
+	proof   map[string]string // conversion-only path -> its fingerprint
+}
+
+// writeRenormaliseRecord writes the marker at path: the header, "changes
+// <n>" and n NUL-terminated paths, then, with a proof, "proof <m>" and m
+// NUL-terminated path / fingerprint pairs. It writes a temporary file in
+// the same directory and renames it into place, so a marker is whole or
+// absent; a link at the path is replaced, never followed.
+func writeRenormaliseRecord(path string, rec renormaliseRecord) error {
+	var b bytes.Buffer
+	b.WriteString(renormaliseRecordHeader)
+	b.WriteString("changes " + strconv.Itoa(len(rec.changes)) + "\n")
+	for _, p := range rec.changes {
+		b.WriteString(p)
+		b.WriteByte(0)
 	}
+	if rec.proof != nil {
+		b.WriteString("proof " + strconv.Itoa(len(rec.proof)) + "\n")
+		keys := make([]string, 0, len(rec.proof))
+		for p := range rec.proof {
+			keys = append(keys, p)
+		}
+		sort.Strings(keys)
+		for _, p := range keys {
+			b.WriteString(p)
+			b.WriteByte(0)
+			b.WriteString(rec.proof[p])
+			b.WriteByte(0)
+		}
+	}
+	if b.Len() > maxRenormaliseRecordBytes {
+		return fmt.Errorf("the renormalise record is larger than %d bytes", maxRenormaliseRecordBytes)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".spine-renormalise-*")
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteString("the work tree is brought to its stored bytes by the next neutral-attributes call\n"); err != nil {
-		_ = f.Close()
+	defer func() { _ = os.Remove(tmp.Name()) }() // a no-op after the rename
+	if _, err := tmp.Write(b.Bytes()); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	return f.Close()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+// readRenormaliseRecord reads the marker's record. ok is false when the
+// marker carries none (an older marker, a damaged one, or not a regular
+// file).
+func readRenormaliseRecord(path string) (rec renormaliseRecord, ok bool, err error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return rec, false, err
+	}
+	if !fi.Mode().IsRegular() {
+		return rec, false, nil
+	}
+	f, err := os.Open(path) //nolint:gosec // G304: a fixed name in git's own directory
+	if err != nil {
+		return rec, false, err
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, maxRenormaliseRecordBytes+1))
+	if err != nil {
+		return rec, false, err
+	}
+	rest, found := bytes.CutPrefix(b, []byte(renormaliseRecordHeader))
+	if !found || len(b) > maxRenormaliseRecordBytes {
+		return renormaliseRecord{}, false, nil
+	}
+	// section reads "<name> <count>\n" and then count*per NUL-terminated
+	// fields.
+	section := func(name string, per int) ([]string, bool) {
+		line, after, found := bytes.Cut(rest, []byte("\n"))
+		label, count, _ := strings.Cut(string(line), " ")
+		n, convErr := strconv.Atoi(count)
+		if !found || label != name || convErr != nil || n < 0 {
+			return nil, false
+		}
+		fields := make([]string, 0, n*per)
+		for i := 0; i < n*per; i++ {
+			field, tail, found := bytes.Cut(after, []byte{0})
+			if !found {
+				return nil, false
+			}
+			fields = append(fields, string(field))
+			after = tail
+		}
+		rest = after
+		return fields, true
+	}
+	changes, okChanges := section("changes", 1)
+	if !okChanges {
+		return renormaliseRecord{}, false, nil
+	}
+	rec = renormaliseRecord{changes: changes}
+	if len(rest) == 0 {
+		return rec, true, nil
+	}
+	pairs, okProof := section("proof", 2)
+	if !okProof || len(rest) != 0 {
+		return renormaliseRecord{}, false, nil
+	}
+	rec.proof = make(map[string]string, len(pairs)/2)
+	for i := 0; i < len(pairs); i += 2 {
+		rec.proof[pairs[i]] = pairs[i+1]
+	}
+	return rec, true, nil
 }
 
 // renormalisePending reports whether the marker is there.
@@ -280,6 +411,32 @@ func clearRenormalisePending(path string) error {
 		return err
 	}
 	return nil
+}
+
+// forceContentCompare sets the index file's modification time to one
+// second past the epoch (review round 4, P2). git trusts an index entry
+// whose stat data matches its file — so a long-lived clone checked out
+// with conversions looks clean under the neutral line although its bytes
+// are not the stored ones — except when the entry is not older than the
+// index file ("racily clean"): then git compares the content. With the
+// index's time at 1 every entry is, so the next status hashes every
+// tracked file under the attributes in force and reports exactly the
+// files whose content differs. The index's entries, staged changes and
+// flags are untouched: only its own time changes, and the status's
+// refresh writes it back with fresh stat data. A missing index (nothing
+// checked out) needs nothing.
+func forceContentCompare(path string) error {
+	fi, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	case !fi.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	epoch := time.Unix(1, 0)
+	return os.Chtimes(path, epoch, epoch)
 }
 
 // requireRepositoryTop refuses a repoDir that is not the top of its
@@ -323,30 +480,49 @@ func requireRepositoryTop(ctx context.Context, repoDir string) error {
 }
 
 // EnsureNeutralWorkTree is EnsureNeutralCheckoutAttributes for an
-// existing clone with a work tree (review round 3). A clone checked out
+// existing clone with a work tree (review rounds 3-4). A clone checked out
 // before the line was written holds files as its old attributes or host
 // config converted them (CRLF, expanded idents), which no longer match
-// the blobs once conversion is off: status shows them modified and a
-// merge or switch over them is refused. So when this call ADDS the line,
-// it first marks the work tree (a file in its git directory), and a
-// marked tree is brought to the stored bytes, holding the tree like any
-// other stateful call: HEAD's tree is measured against the client's
-// budget (when it has one), a tracked file standing in the way of an
-// untracked one refuses, the tracked state is quarantined into an
-// unreferenced commit (`git stash create`, logged at Warn, as the shared
-// tree's restore does), and `reset --hard` writes HEAD's stored bytes. An
-// unborn HEAD or a clean tree needs nothing more. The mark is cleared only
-// then, so a renormalisation that fails or is interrupted (HEAD over the
-// budget, an obstruction, a cancelled request, a crash) is retried by the
-// next call — the error is returned meanwhile — rather than leaving the
-// tree converted under a file that already ends in the line (codex review
-// round 3). Such an error matches ErrRenormalisePending. A bare
-// repository is never marked; a file that already ended in the line, with
-// no mark, leaves the file and the tree alone.
+// the blobs once conversion is off: a merge or switch over them is
+// refused, and a read-modify-write through the tree would commit the
+// converted bytes. So:
 //
-// Only a marked tree is held (so the per-push call of the git HTTP
-// endpoint never waits behind a sequence once the line is there and the
-// tree is renormalised).
+//   - When this call ADDS the line, it first takes the tree's hold (so no
+//     sequence holding the tree runs on under changed attributes), then,
+//     under the old attributes, records each work tree's real changes —
+//     every tracked path that differs from HEAD or the index, staged or
+//     not — into a marker in that work tree's git directory: this tree's
+//     and every linked worktree's (`git worktree list`), the main one
+//     included when this is a linked one. Only then is the line written.
+//   - A marked tree (this one) is renormalised under its hold: HEAD unborn
+//     — identified positively — needs nothing; otherwise git compares
+//     every tracked file's content with the index under the new
+//     attributes (forceContentCompare: stat data alone would call a
+//     long-lived converted tree clean). The files that differ, whose
+//     index entry matches HEAD and that are not in the record, are the
+//     conversion-only ones when this call recorded the tree and has held
+//     it since; their fingerprints are added to the marker first (the
+//     PROOF), so a later call — a retry — rewrites only files still
+//     exactly as they were then, and leaves a file edited since as it is
+//     (codex review round 4). HEAD's tree is measured against the
+//     client's budget (when it has one) and they are rewritten from the
+//     index (`checkout-index -f -u`). Recorded paths, staged changes and
+//     untracked files are left exactly as they are (one Warn gives the
+//     counts). A marker with no record (written by an earlier build, or
+//     damaged), or a record no call has proven (a linked worktree's, or
+//     a crash right after the line), falls back to quarantining the
+//     tracked state first (`git stash create`, the SHA logged at Warn)
+//     and then rewriting every unstaged difference not recorded.
+//   - The mark is cleared only then. A renormalisation that fails or is
+//     interrupted (HEAD over the budget, a torn ref, a cancelled request,
+//     a crash) is retried by the next call; the error, returned
+//     meanwhile, matches ErrRenormalisePending.
+//
+// A bare repository is never marked itself (its linked worktrees are). A
+// file that already ended in the line, with no mark, leaves the file and
+// the tree alone, and holds nothing (so the per-push call of the git HTTP
+// endpoint never waits behind a sequence once the tree is renormalised).
+// Another work tree's mark is acted on by a call on that work tree.
 func (c *CLIClient) EnsureNeutralWorkTree(ctx context.Context) error {
 	const op = "neutral_attributes"
 	out, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "--is-bare-repository", "--absolute-git-dir")
@@ -357,26 +533,180 @@ func (c *CLIClient) EnsureNeutralWorkTree(ctx context.Context) error {
 	if len(fields) != 2 || fields[1] == "" {
 		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "unexpected rev-parse output for the repository's git directory"}
 	}
-	marker := ""
-	if fields[0] != "true" {
-		marker = filepath.Join(fields[1], renormaliseMarker)
+	bare, gitDir := fields[0] == "true", fields[1]
+	var release func() // the hold taken to add the line
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	recorded := false // this call recorded this tree, under the hold it still has
+	for {
+		err := ensureNeutral(ctx, c.repoPath, func() error {
+			if !bare && release == nil {
+				return errNeedTreeHold
+			}
+			if err := c.markWorkTrees(ctx, op, gitDir, bare); err != nil {
+				return err
+			}
+			recorded = !bare
+			return nil
+		})
+		if !errors.Is(err, errNeedTreeHold) {
+			if err != nil {
+				return err
+			}
+			break
+		}
+		h, err := c.lockTree(ctx)
+		if err != nil {
+			return err
+		}
+		release, ctx = h.release, h.ctx
 	}
-	if err := ensureNeutral(ctx, c.repoPath, marker); err != nil || marker == "" {
-		return err
+	if bare {
+		return nil
 	}
-	if err := c.renormalise(ctx, op, marker); err != nil {
+	if err := c.renormalise(ctx, op, filepath.Join(gitDir, renormaliseMarker), recorded); err != nil {
 		return fmt.Errorf("%w: %w", ErrRenormalisePending, err)
 	}
 	return nil
 }
 
-// renormalise is EnsureNeutralWorkTree's second half: the marked tree
-// brought to its stored bytes under the tree's hold, the mark cleared.
-func (c *CLIClient) renormalise(ctx context.Context, op, marker string) error {
+// errNeedTreeHold is ensureNeutral's answer, through beforeAdd, when the
+// line is to be added and the caller does not hold the tree yet.
+var errNeedTreeHold = errors.New("git: the tree's hold is needed before the neutral line is added")
+
+// markWorkTrees records the real changes of each work tree the line is
+// about to change, under the attributes still in force, and writes each
+// record as that tree's marker: this one first (when it has a work tree;
+// a failure refuses the line), then every other worktree `git worktree
+// list` names (a bare or prunable entry has no tree; a failure there is
+// logged and that tree left unmarked).
+func (c *CLIClient) markWorkTrees(ctx context.Context, op, selfGitDir string, bare bool) error {
+	if !bare {
+		paths, err := c.realChanges(ctx, op, "")
+		if err != nil {
+			return err
+		}
+		if err := writeRenormaliseRecord(filepath.Join(selfGitDir, renormaliseMarker), renormaliseRecord{changes: paths}); err != nil {
+			return &GitError{Kind: ErrKindPermanent, Op: op, Message: "cannot record the work tree's uncommitted changes; info/attributes not written", Err: err}
+		}
+	}
+	list, _, err := c.runWith(ctx, op, runOpts{}, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return err
+	}
+	for _, wt := range parseWorktreeList(list) {
+		if wt.bare || wt.prunable {
+			continue
+		}
+		if err := c.markOtherWorkTree(ctx, op, wt.path, selfGitDir); err != nil {
+			if ctx.Err() != nil {
+				return err
+			}
+			observe.Logger(ctx).Warn("a linked worktree could not be marked for renormalising; it keeps the bytes it was checked out with",
+				"repo_path", c.repoPath, "worktree", wt.path, "error", err)
+		}
+	}
+	return nil
+}
+
+// markOtherWorkTree records and marks the work tree at dir, unless it is
+// this one (selfGitDir; git canonicalises --absolute-git-dir).
+func (c *CLIClient) markOtherWorkTree(ctx context.Context, op, dir, selfGitDir string) error {
+	out, _, err := c.runWith(ctx, op, runOpts{}, "-C", dir, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return err
+	}
+	gd := strings.TrimSuffix(out, "\n")
+	if gd == "" || gd == selfGitDir {
+		return nil
+	}
+	paths, err := c.realChanges(ctx, op, dir)
+	if err != nil {
+		return err
+	}
+	return writeRenormaliseRecord(filepath.Join(gd, renormaliseMarker), renormaliseRecord{changes: paths})
+}
+
+// realChanges lists the tracked paths of the work tree at dir ("" for
+// this one) that differ from HEAD or from the index under the attributes
+// in force: `git status`, renames' sources included. Called before the
+// line is written, these are the tree's real uncommitted changes — a
+// file checked out with the old conversions compares equal under them.
+func (c *CLIClient) realChanges(ctx context.Context, op, dir string) ([]string, error) {
+	args := []string{"status", "--porcelain=v1", "-z", "--untracked-files=no"}
+	if dir != "" {
+		// Another tree, not held: read only, never rewrite its index.
+		args = append([]string{"--no-optional-locks", "-C", dir}, args...)
+	}
+	out, _, err := c.runWith(ctx, op, runOpts{}, args...)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	fields := strings.Split(out, "\x00")
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if len(f) < 4 || f[2] != ' ' {
+			continue
+		}
+		paths = append(paths, f[3:])
+		if (f[0] == 'R' || f[0] == 'C') && i+1 < len(fields) {
+			i++
+			paths = append(paths, fields[i])
+		}
+	}
+	return paths, nil
+}
+
+// worktreeEntry is one record of `git worktree list --porcelain -z`.
+type worktreeEntry struct {
+	path           string
+	bare, prunable bool
+}
+
+// parseWorktreeList parses `git worktree list --porcelain -z`: records of
+// NUL-terminated "key[ value]" fields, each record ended by an empty one.
+func parseWorktreeList(out string) []worktreeEntry {
+	var list []worktreeEntry
+	var cur *worktreeEntry
+	for _, f := range strings.Split(out, "\x00") {
+		switch {
+		case f == "":
+			cur = nil
+		case strings.HasPrefix(f, "worktree "):
+			list = append(list, worktreeEntry{path: strings.TrimPrefix(f, "worktree ")})
+			cur = &list[len(list)-1]
+		case cur == nil:
+		case f == "bare":
+			cur.bare = true
+		case f == "prunable" || strings.HasPrefix(f, "prunable "):
+			cur.prunable = true
+		}
+	}
+	return list
+}
+
+// renormaliseHeadProbeHook, when set (tests only), runs right before
+// renormalise looks at HEAD.
+var renormaliseHeadProbeHook func()
+
+// renormalise is EnsureNeutralWorkTree's second half: the marked tree's
+// conversion-only paths brought to their stored bytes under the tree's
+// hold, the mark cleared. recorded says this call wrote the record and has
+// held the tree since: then every file that differs under the line and is
+// not recorded can only be a conversion. Otherwise (a retry, a linked
+// worktree, a crash) that has to be proven by the record's proof —
+// codex review round 4: an edit made after the record is not in it — and
+// a file that changed since is left as it is; with no proof at all the
+// tracked state is quarantined first.
+func (c *CLIClient) renormalise(ctx context.Context, op, marker string, recorded bool) error {
 	if pending, err := renormalisePending(marker); err != nil || !pending {
 		return err
 	}
-	h, err := c.lockTree(ctx)
+	h, err := c.lockTree(ctx) // re-enters the hold taken to add the line
 	if err != nil {
 		return err
 	}
@@ -392,35 +722,206 @@ func (c *CLIClient) renormalise(ctx context.Context, op, marker string) error {
 		}
 		return nil
 	}
-	if _, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "-q", "--verify", "HEAD^{commit}"); err != nil {
-		return done() // unborn HEAD: nothing checked out
+	if renormaliseHeadProbeHook != nil {
+		renormaliseHeadProbeHook()
 	}
-	status, _, err := c.runWith(ctx, op, runOpts{}, "status", "--porcelain=v1", "-z", "--untracked-files=no")
+	if unborn, err := c.headUnborn(ctx, op); err != nil {
+		return err
+	} else if unborn {
+		return done() // nothing checked out
+	}
+	rec, haveRecord, err := readRenormaliseRecord(marker)
 	if err != nil {
 		return err
 	}
-	if len(parseTrackedStatus(status)) == 0 {
+	keep := make(map[string]bool, len(rec.changes))
+	for _, p := range rec.changes {
+		keep[p] = true
+	}
+	index, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "--git-path", "index")
+	if err != nil {
+		return err
+	}
+	index = strings.TrimSuffix(index, "\n")
+	if !filepath.IsAbs(index) {
+		index = filepath.Join(c.repoPath, index)
+	}
+	if err := forceContentCompare(index); err != nil {
+		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "cannot set the index up for a content comparison", Err: err}
+	}
+	status, _, err := c.runWith(ctx, op, runOpts{}, "-c", "core.fsmonitor=false",
+		"status", "--porcelain=v1", "-z", "--untracked-files=no", "--no-renames", "--ignore-submodules=all")
+	if err != nil {
+		return err
+	}
+	var differ []string
+	for _, ch := range parseTrackedStatus(status) {
+		// The index entry matches HEAD and the file's content differs.
+		if ch.x == ' ' && ch.y == 'M' && !keep[ch.path] {
+			differ = append(differ, ch.path)
+		}
+	}
+	// Which of them are conversion-only, and whether to quarantine first.
+	var rewrite []string
+	changedSince, quarantine := 0, !haveRecord
+	switch {
+	case !haveRecord:
+		rewrite = differ
+	case rec.proof != nil:
+		now, err := c.fingerprints(ctx, op, differ)
+		if err != nil {
+			return err
+		}
+		for _, p := range differ {
+			if fp := rec.proof[p]; fp != "" && now[p] == fp {
+				rewrite = append(rewrite, p)
+			} else {
+				changedSince++
+			}
+		}
+	case recorded && len(differ) == 0:
+	case recorded:
+		// Prove them for a retry before anything can fail.
+		proof, err := c.fingerprints(ctx, op, differ)
+		if err != nil {
+			return err
+		}
+		rec.proof = proof
+		if err := writeRenormaliseRecord(marker, rec); err != nil {
+			return &GitError{Kind: ErrKindPermanent, Op: op, Message: "cannot write the renormalise proof", Err: err}
+		}
+		rewrite = differ
+	default:
+		// Recorded by another call, never proven (a linked worktree, or
+		// a crash right after the line).
+		rewrite, quarantine = differ, true
+	}
+	log := observe.Logger(ctx)
+	if len(rewrite) == 0 {
+		if len(rec.changes) > 0 || changedSince > 0 {
+			log.Warn("neutral checkout attributes added: tracked paths with uncommitted changes left as they were (they keep the bytes they were checked out with)",
+				"repo_path", c.repoPath, "left_as_they_were", len(rec.changes), "changed_since_recorded", changedSince)
+		}
 		return done()
 	}
 	if err := c.checkTrees(ctx, op, "HEAD"); err != nil {
 		return err
 	}
-	if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
-		return err
-	} else if p != "" {
-		return &GitError{Kind: ErrKindPermanent, Op: op,
-			Message: fmt.Sprintf("an untracked file is in the way of a tracked path the renormalising reset would rewrite (%q); nothing was reset", p)}
+	sha := ""
+	if quarantine {
+		if sha, err = c.quarantineTracked(ctx, op); err != nil {
+			return err
+		}
 	}
-	sha, err := c.quarantineTracked(ctx, op)
-	if err != nil {
+	var in strings.Builder
+	for _, p := range rewrite {
+		in.WriteString(p)
+		in.WriteByte(0)
+	}
+	if _, _, err := c.runWith(ctx, op, runOpts{stdin: strings.NewReader(in.String())},
+		"checkout-index", "-f", "-u", "-z", "--stdin"); err != nil {
 		return err
 	}
-	observe.Logger(ctx).Warn("work tree checked out with conversions brought to stored bytes after the neutral checkout attributes were added",
-		"repo_path", c.repoPath, "quarantine_sha", sha)
-	if _, _, err := c.runWith(ctx, op, runOpts{}, "reset", "--hard", "-q"); err != nil {
-		return err
+	if quarantine {
+		log.Warn("work tree checked out with conversions brought to stored bytes after the neutral checkout attributes were added; its files could not be proven conversion-only, so the tracked state was quarantined first",
+			"repo_path", c.repoPath, "rewritten", len(rewrite), "left_as_they_were", len(rec.changes), "quarantine_sha", sha)
+	} else {
+		log.Warn("work tree checked out with conversions brought to stored bytes after the neutral checkout attributes were added",
+			"repo_path", c.repoPath, "rewritten", len(rewrite), "left_as_they_were", len(rec.changes), "changed_since_recorded", changedSince)
 	}
 	return done()
+}
+
+// fingerprints identifies each path's working-tree entry without reading
+// through it, as the shared tree's phantom bookkeeping does
+// (worktreefs.LstatEntry follows no link and opens nothing): a regular
+// file is "blob <id>" — its bytes hashed under the attributes in force,
+// which under the neutral line are its raw bytes (`hash-object
+// --stdin-paths`; a path holding a newline cannot be passed and gets no
+// fingerprint, so it is never proven) — a link "symlink <target>",
+// anything else its type, a missing entry "absent", an unreachable one
+// "unreachable".
+func (c *CLIClient) fingerprints(ctx context.Context, op string, paths []string) (map[string]string, error) {
+	fp := make(map[string]string, len(paths))
+	if len(paths) == 0 {
+		return fp, nil
+	}
+	tree, err := worktreefs.Open(c.repoPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tree.Close() }()
+	var regular []string
+	for _, p := range paths {
+		fi, target, err := tree.LstatEntry(p)
+		var pe *worktreefs.PathError
+		switch {
+		case err == nil && fi.Mode().IsRegular():
+			if !strings.Contains(p, "\n") {
+				regular = append(regular, p)
+			}
+		case err == nil && fi.Mode()&fs.ModeSymlink != 0:
+			fp[p] = "symlink " + target
+		case err == nil:
+			fp[p] = "type " + fi.Mode().Type().String()
+		case errors.Is(err, fs.ErrNotExist):
+			fp[p] = "absent"
+		case errors.As(err, &pe) && (pe.Reason == worktreefs.ReasonSymlink || pe.Reason == worktreefs.ReasonNotDir):
+			fp[p] = "unreachable " + string(pe.Reason) + " " + pe.Component
+		default:
+			return nil, err
+		}
+	}
+	if len(regular) > 0 {
+		out, _, err := c.runWith(ctx, op, runOpts{stdin: strings.NewReader(strings.Join(regular, "\n") + "\n")},
+			"hash-object", "--stdin-paths")
+		if err != nil {
+			return nil, err
+		}
+		sums := strings.Fields(out)
+		if len(sums) != len(regular) {
+			return nil, &GitError{Kind: ErrKindPermanent, Op: op, Message: "hash-object printed an unexpected number of ids"}
+		}
+		for i, p := range regular {
+			fp[p] = "blob " + sums[i]
+		}
+	}
+	return fp, nil
+}
+
+// headUnborn reports whether HEAD is unborn, identified positively
+// (review round 4): HEAD names no commit, `symbolic-ref -q HEAD` names a
+// branch (refs/heads/...), `show-ref --verify --quiet` of it exits 1 with
+// nothing on stderr, and the request is not cancelled. Any other failure
+// is returned as an error, so the mark is kept and the next call retries:
+// a torn ref (symbolic-ref refuses a branch file that holds no object id;
+// show-ref exits 128 on one that names a missing object — git 2.39 and
+// 2.54 alike), a detached HEAD naming no commit, a cancelled request.
+func (c *CLIClient) headUnborn(ctx context.Context, op string) (bool, error) {
+	_, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "-q", "--verify", "HEAD^{commit}")
+	if err == nil {
+		return false, nil
+	}
+	notUnborn := func(msg string, cause error) (bool, error) {
+		if ctx.Err() != nil {
+			return false, &GitError{Kind: ErrKindTransient, Op: op, Message: "cancelled while looking at HEAD", Err: ctx.Err()}
+		}
+		return false, &GitError{Kind: ErrKindPermanent, Op: op, Message: msg, Err: cause}
+	}
+	if ctx.Err() != nil {
+		return notUnborn("", err)
+	}
+	out, _, err := c.runWith(ctx, op, runOpts{}, "symbolic-ref", "-q", "HEAD")
+	ref := strings.TrimSuffix(out, "\n")
+	if err != nil || !strings.HasPrefix(ref, "refs/heads/") || strings.Contains(ref, "\n") {
+		return notUnborn("HEAD names no commit and is not a branch", err)
+	}
+	_, stderr, err := c.runWith(ctx, op, runOpts{}, "show-ref", "--verify", "--quiet", ref)
+	var exit *exec.ExitError
+	if err == nil || !errors.As(err, &exit) || exit.ExitCode() != 1 || strings.TrimSpace(stderr) != "" || ctx.Err() != nil {
+		return notUnborn(fmt.Sprintf("HEAD's branch %q names no commit", ref), err)
+	}
+	return true, nil
 }
 
 // HasNeutralCheckoutAttributes reports whether repoDir's info/attributes

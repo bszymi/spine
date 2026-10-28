@@ -65,20 +65,35 @@ change.
 - **Conflict markers are always 7 characters** in a conflicted merge, whatever
   `conflict-marker-size` a tree sets.
 - **Upgrade: trees checked out with conversions are brought to their stored bytes once.** When
-  the line is first added to a repository with a work tree that was checked out with conversions
-  (a `text`/`eol`/`ident` attribute, or the host's `core.autocrlf`), its files would look modified:
-  the workspace tree (at `spine serve` start, or when a shared-mode workspace's services are
-  built), a code-repository clone the pool reuses, and a served repository on its first push each
-  have HEAD's tree measured, their tracked state quarantined into an unreferenced commit (logged at
-  Warn, as the shared tree's restore does) and `reset --hard` to the stored bytes. The shared
-  tree's restore would also repair the workspace tree on its first sequence. The tree is marked
-  (a file in its git directory) before the line is written and the mark is cleared only once the
-  tree is at its stored bytes or clean, so a renormalisation that fails or is interrupted (HEAD
-  over the budget, a tracked file in an untracked one's way, a cancelled request, a workspace
-  build's init deadline, a crash) is retried by the next call — the next start, workspace build, reuse or push — and returns its
-  error meanwhile (matching `git.ErrRenormalisePending`). A push is not refused for it (its
-  measure needs only the line); it logs a Warn and the next push retries. A tree whose file
-  already ends in the line, with no mark, is not touched again.
+  the line is first added to a repository whose work trees were checked out with conversions (a
+  `text`/`eol`/`ident` attribute, or the host's `core.autocrlf`), their files no longer match the
+  blobs: merges over them are refused, and a read-modify-write through the tree would commit the
+  converted bytes. `CLIClient.EnsureNeutralWorkTree` — at `spine serve` start (the single-mode
+  workspace tree), when a shared-mode workspace's services are built, when the pool reuses a
+  code-repository clone, and on every push the git endpoint serves — handles it:
+  - it takes the calling tree's hold before it adds the line, so a sequence holding the tree never
+    runs on under changed attributes;
+  - under the old attributes it records each work tree's real changes (every tracked path that
+    differs from HEAD or the index, staged or not) into a marker in that work tree's git
+    directory — the calling tree's and every linked worktree's — and only then writes the line;
+  - it renormalises the calling tree under its hold: git compares every tracked file's content
+    (not its stat data, which would call a long-lived converted tree clean), and only the files
+    whose content differs, whose index entry matches HEAD and that are not in the record are
+    rewritten from the index (HEAD's tree is measured first). Recorded paths, staged changes and
+    untracked files are left exactly as they are, and one Warn gives their count; a recorded path
+    keeps the bytes it was checked out with until it is committed or discarded. Before rewriting,
+    the call adds a fingerprint of each such file to the marker, so a retry (after HEAD over the
+    budget, a torn ref, a cancelled request) rewrites only files still exactly as they were and
+    leaves a file edited since as it is. A marker without a record (written by an earlier build of
+    this change, or damaged), or with a record no call has fingerprinted (a linked worktree's, or a
+    crash right after the line), falls back to quarantining the tracked state first (`git stash
+    create`, the SHA logged at Warn) and then rewriting every unstaged difference not recorded;
+  - the mark is cleared only then. An unborn HEAD is identified positively; a renormalisation that
+    fails or is interrupted (HEAD over the budget, a torn ref, a cancelled request, a workspace
+    build's init deadline, a crash) is retried by the next call and returns its error meanwhile (matching
+    `git.ErrRenormalisePending`). A push is not refused for it (its measure needs only the line);
+    it logs a Warn and the next push retries. A linked worktree is renormalised by a call on it.
+  A tree whose file already ends in the line, with no mark, is not touched again.
 - Not neutralised (operator configuration): a host `merge.<name>.driver` and `pull.twohead`.
 - With the deadline on, `EnterBranch` adds its worktree `--no-checkout` and fills it with
   `reset --hard`, so a worktree's `post-checkout` hook no longer runs.

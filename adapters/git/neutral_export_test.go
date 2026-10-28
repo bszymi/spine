@@ -1,0 +1,26 @@
+package git
+
+// Test seams for the neutral attributes' renormalisation (INIT-024
+// TASK-003 review round 4).
+
+// SetRenormaliseHeadProbeHookForTest sets the function renormalise runs
+// right before it looks at HEAD (nil clears it).
+func SetRenormaliseHeadProbeHookForTest(fn func()) {
+	renormaliseHeadProbeHook = fn
+}
+
+// TreeRefsForTest is the number of holders and waiters of the tree at
+// dir: 2 while one call holds it and another waits for it.
+func TreeRefsForTest(dir string) int {
+	key := canonicalTreeKey(dir)
+	treeMu.Lock()
+	defer treeMu.Unlock()
+	if l := treeLocks[key]; l != nil {
+		return l.refs
+	}
+	return 0
+}
+
+// RenormaliseMarkerName is the marker's file name in a work tree's git
+// directory.
+const RenormaliseMarkerName = renormaliseMarker

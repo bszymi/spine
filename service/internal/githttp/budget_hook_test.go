@@ -322,30 +322,43 @@ func TestBudgetHook_WarnsOnceWhenHooksPathIsOverridden(t *testing.T) {
 	}
 }
 
-// TestBudgetHook_PendingRenormalisationDoesNotStopThePush (codex review
-// round 3): a served work tree whose renormalisation cannot finish yet —
-// here an untracked file stands where a tracked directory was — does not
-// refuse pushes (the hook's measure needs only the line, which is in
-// place): each push warns and retries (the install runs per receive-pack
-// request), and once the obstruction is gone
-// the next push brings the tree to its stored bytes and stops warning.
-func TestBudgetHook_PendingRenormalisationDoesNotStopThePush(t *testing.T) {
+// servedConvertedTree is a served work tree checked out with conversions
+// (`* text eol=crlf`) before the neutral line: f.txt is CRLF on disk, its
+// stored bytes are LF; real.txt is there to be edited.
+func servedConvertedTree(t *testing.T) string {
+	t.Helper()
 	repo := t.TempDir()
 	nulGit(t, repo, nil, "init", "-q", "-b", "main")
-	if err := os.MkdirAll(filepath.Join(repo, "d"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "d", "x"), []byte("x\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for name, content := range map[string]string{".gitattributes": "* text eol=crlf\n", "f.txt": "a\nb\n", "real.txt": "real\n"} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	nulGit(t, repo, nil, "add", "-A")
 	nulGit(t, repo, nil, "commit", "-q", "-m", "base")
-	if err := os.RemoveAll(filepath.Join(repo, "d")); err != nil {
-		t.Fatal(err)
+	for _, f := range []string{"f.txt", "real.txt"} {
+		if err := os.Remove(filepath.Join(repo, f)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(repo, "d"), []byte("in the way\n"), 0o644); err != nil {
-		t.Fatal(err)
+	nulGit(t, repo, nil, "checkout", "--", ".")
+	if b, _ := os.ReadFile(filepath.Join(repo, "f.txt")); string(b) != "a\r\nb\r\n" {
+		t.Fatalf("fixture: f.txt not converted: %q", b)
 	}
+	return repo
+}
+
+// TestBudgetHook_PendingRenormalisationDoesNotStopThePush (codex review
+// round 3): a served work tree whose renormalisation cannot finish yet —
+// here its HEAD is over the process's budget — does not refuse pushes
+// (the hook's measure needs only the line, which is in place): each push
+// warns and retries (the install runs per receive-pack request), and
+// once HEAD fits the next push brings the tree to its stored bytes and
+// stops warning.
+func TestBudgetHook_PendingRenormalisationDoesNotStopThePush(t *testing.T) {
+	repo := servedConvertedTree(t)
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{MaxEntries: 1}})
+	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
 	var logs bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
@@ -367,18 +380,55 @@ func TestBudgetHook_PendingRenormalisationDoesNotStopThePush(t *testing.T) {
 	if ok, err := git.HasNeutralCheckoutAttributes(context.Background(), repo); !ok || err != nil {
 		t.Fatalf("served repository lacks the neutral checkout attributes: %v %v", ok, err)
 	}
-	if err := os.Remove(filepath.Join(repo, "d")); err != nil {
-		t.Fatal(err)
-	}
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{})
 	logs.Reset()
 	nulGit(t, work, nil, "commit", "-q", "--allow-empty", "-m", "2")
 	if out, err := gitPush(t, work, url, "HEAD:refs/heads/f2"); err != nil {
-		t.Fatalf("push after the obstruction was removed: %v\n%s", err, out)
+		t.Fatalf("push once HEAD fits: %v\n%s", err, out)
 	}
 	if strings.Contains(logs.String(), warn) {
-		t.Fatalf("still pending after the obstruction was removed:\n%s", logs.String())
+		t.Fatalf("still pending once HEAD fits:\n%s", logs.String())
 	}
-	if b, err := os.ReadFile(filepath.Join(repo, "d", "x")); err != nil || string(b) != "x\n" {
-		t.Fatalf("the retried renormalisation did not restore d/x: %q %v", b, err)
+	if b, err := os.ReadFile(filepath.Join(repo, "f.txt")); err != nil || string(b) != "a\nb\n" {
+		t.Fatalf("the retried renormalisation did not bring f.txt to its stored bytes: %q %v", b, err)
+	}
+}
+
+// TestBudgetHook_RenormalisationKeepsRealChanges (review round 4, P3):
+// the per-push renormalisation of a served tree quarantined and reset
+// every tracked change. Now a real edit, a staged file and an untracked
+// file survive byte for byte, only the conversion-only file goes to its
+// stored bytes, and the tree is no longer marked.
+func TestBudgetHook_RenormalisationKeepsRealChanges(t *testing.T) {
+	repo := servedConvertedTree(t)
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("real.txt", "real\nuncommitted edit\n")
+	write("staged.txt", "staged\n")
+	nulGit(t, repo, nil, "add", "staged.txt")
+	write("untracked.txt", "mine\r\n")
+	h := budgetHandler(t, repo)
+	url := budgetServer(t, h, repo)
+	work := budgetClone(t, url)
+	nulGit(t, work, nil, "commit", "-q", "--allow-empty", "-m", "x")
+	if out, err := gitPush(t, work, url, "HEAD:refs/heads/f"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	for name, want := range map[string]string{
+		"f.txt": "a\nb\n", "real.txt": "real\nuncommitted edit\n", "staged.txt": "staged\n", "untracked.txt": "mine\r\n",
+	} {
+		if b, err := os.ReadFile(filepath.Join(repo, name)); err != nil || string(b) != want {
+			t.Errorf("%s = %q (%v), want %q", name, b, err, want)
+		}
+	}
+	if staged := nulGit(t, repo, nil, "diff", "--cached", "--name-only"); staged != "staged.txt" {
+		t.Errorf("staged = %q, want staged.txt kept staged", staged)
+	}
+	if _, err := os.Lstat(filepath.Join(repo, ".git", "spine-renormalise-pending")); err == nil {
+		t.Error("the served tree is still marked")
 	}
 }
