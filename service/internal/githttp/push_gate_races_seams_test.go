@@ -31,6 +31,9 @@ func pgrSetStorageProbe(h *Handler, p func(ctx context.Context, repoPath string)
 	h.storageProbe = p
 }
 
+// pgrSetProbeRetry sets how long h reuses a failed probe's refusal.
+func pgrSetProbeRetry(h *Handler, d time.Duration) { h.probeRetry = d }
+
 // pgrRealStorageProbe is the built-in case-sensitivity probe.
 func pgrRealStorageProbe() func(ctx context.Context, repoPath string) (bool, error) {
 	return probeRefStorage

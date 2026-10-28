@@ -20,16 +20,22 @@ package githttp
 // directory. Any pair that collides (the second create finds the first
 // file, a read returns the other name's content, or the listing lacks a
 // name) is folding storage. The files live in a fresh directory under
-// <git-common-dir>/refs whose name starts with '.', which git's loose-ref
-// iteration skips and no valid ref name can address, and the directory is
-// removed before the probe returns. It needs no git process, no object
-// and works in an empty repository.
+// <git-common-dir>/refs/heads — the directory the protected branches'
+// loose ref files live in, so per-directory case folding there is seen
+// too (review round 1, P4-10) — whose name starts with '.', which git's
+// loose-ref iteration (for-each-ref, pack-refs, the ref advertisement)
+// skips and no valid ref name can address; the directory is removed
+// before the probe returns. It needs no git process, no object and works
+// in an empty repository. A reftable repository has no refs/heads
+// directory (git keeps a placeholder file there); the probe then runs in
+// refs/, and on folding storage refuses that repository too, although
+// reftable does not store ref names as files (fail closed).
 //
 // It runs once per repository and handler lifetime, from
-// ensureReceivePackConfig, whenever receive-pack is enabled (owner
-// question 2: a repository that fails it has receive-pack refused —
-// http.receivepack=false and a 403 naming the requirement — while clones
-// and fetches are served as before).
+// ensurePushStorage, on the first push request with receive-pack enabled
+// (owner question 2: a repository that fails it has receive-pack
+// refused — http.receivepack=false and a 403 naming the requirement —
+// while clones and fetches are served as before).
 
 import (
 	"bytes"
@@ -42,6 +48,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"testing"
 )
 
 // storageProbePairs are the names a folding filesystem identifies. The
@@ -64,13 +71,25 @@ func probeRefStorage(ctx context.Context, repoPath string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	dir, err := os.MkdirTemp(filepath.Join(common, "refs"), ".spine-storage-probe-")
+	parent := filepath.Join(common, "refs", "heads")
+	if fi, err := os.Stat(parent); err != nil || !fi.IsDir() {
+		parent = filepath.Join(common, "refs") // reftable, or no loose branch directory
+	}
+	dir, err := os.MkdirTemp(parent, ".spine-storage-probe-")
 	if err != nil {
 		return false, fmt.Errorf("case-sensitivity probe: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
-	return probeDirFolds(dir)
+	folds, err := probeDirFolds(dir)
+	if probeDirHookForTest != nil {
+		probeDirHookForTest(dir)
+	}
+	return folds, err
 }
+
+// probeDirHookForTest, when set, is called with the probe's directory
+// (its files in place) before it is removed.
+var probeDirHookForTest func(dir string)
 
 // probeDirFolds runs the probe in dir, an empty directory the caller owns.
 func probeDirFolds(dir string) (bool, error) {
@@ -146,6 +165,14 @@ const caseFoldingStorageMessage = "git push is refused for this repository: it i
 	"Serve it from a case-sensitive, normalization-sensitive filesystem (KNOWN-LIMITATIONS: \"Served " +
 	"Repositories Need Case- and Normalization-Sensitive Storage\"). Clones and fetches are not affected."
 
+// isTestBinary reports whether this process is a `go test` binary; a
+// variable so the refusal can be tested.
+var isTestBinary = testing.Testing
+
+// errNotATestBinary is FakeCaseSensitiveStorageOnFoldingHostForTests'
+// refusal outside a test binary.
+var errNotATestBinary = errors.New("githttp: the case-sensitivity probe can be faked in a test binary only")
+
 // storageProbeOverride, when set, is the probe of every handler NewHandler
 // builds instead of probeRefStorage (FakeCaseSensitiveStorageOnFoldingHostForTests).
 var storageProbeOverride atomic.Pointer[storageProbe]
@@ -166,8 +193,13 @@ func defaultStorageProbe() storageProbe {
 // afterwards treat storage as case-sensitive and reports true. On a
 // case-sensitive host (Linux, CI) it changes nothing, and every test runs
 // the real probe. Production code never calls it, and the package is
-// internal, so no embedder can.
+// internal, so no embedder can; and it refuses — an error, nothing
+// changed — outside a test binary (testing.Testing; review round 1,
+// P4-5), so no `spine` command can switch the probe off.
 func FakeCaseSensitiveStorageOnFoldingHostForTests() (bool, error) {
+	if !isTestBinary() {
+		return false, errNotATestBinary
+	}
 	dir, err := os.MkdirTemp("", "spine-storage-probe-")
 	if err != nil {
 		return false, err

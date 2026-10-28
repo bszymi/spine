@@ -495,11 +495,12 @@ func commitRetryFor(eng schedulerEngine) func(ctx context.Context, runID string)
 // describes what pushes will actually get.
 //
 // limits are the slot caps and the command-read deadline (INIT-024
-// TASK-005; zero fields: githttp's defaults).
+// TASK-005; zero fields: the defaults of the mode, gitHTTPLimits.effective).
 func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs map[string][]string, receivePackEnabled bool, policy branchprotect.Policy, runs refadmit.RunReader, stepDefs refadmit.StepDefLookup, perWorkspace bool, limits gitHTTPLimits, log *slog.Logger) *githttp.Handler {
 	if wsResolver == nil {
 		return nil
 	}
+	effLimits := limits.effective(perWorkspace)
 	h, err := githttp.NewHandler(githttp.Config{
 		ResolveRepoPath: func(ctx context.Context, workspaceID string) (string, error) {
 			cfg, err := wsResolver.Resolve(ctx, workspaceID)
@@ -516,17 +517,18 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs map[string]
 		// The pre-receive hook holds pushes to the client's checkout
 		// budget (INIT-024 TASK-003; installCheckoutLimits set it).
 		TreeBudget: processTreeBudget(),
-		// Fair slots and the command-read deadline (INIT-024 TASK-005).
-		MaxConcurrent:             limits.MaxConcurrent,
-		MaxConcurrentPerWorkspace: limits.MaxConcurrentPerWorkspace,
-		MaxConcurrentPerActor:     limits.MaxConcurrentPerActor,
-		CommandReadTimeout:        limits.CommandReadTimeout,
+		// Fair slots and the command-read deadline (INIT-024 TASK-005),
+		// with the defaults of this server's mode.
+		MaxConcurrent:             effLimits.MaxConcurrent,
+		MaxConcurrentPerWorkspace: effLimits.MaxConcurrentPerWorkspace,
+		MaxConcurrentPerActor:     effLimits.MaxConcurrentPerActor,
+		CommandReadTimeout:        effLimits.CommandReadTimeout,
 	})
 	if err != nil {
 		log.Warn("git HTTP endpoint disabled", "reason", err.Error())
 		return nil
 	}
-	logGitHTTPLimits(log, limits)
+	logGitHTTPLimits(log, limits, perWorkspace)
 	if len(trustedCIDRs) == 0 {
 		// Recommend the runners' own addresses, never a subnet: a
 		// range that contains a Docker bridge gateway or a reverse

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/cgi" //nolint:gosec // G504: CVE-2016-5386 is a pre-1.6.3 Go issue; this codebase runs 1.26+
@@ -94,24 +95,24 @@ type Handler struct {
 	// an endless command stream with no flush.
 	maxPushCommandBytes int
 
-	// mu protects ensuredRepos which tracks repos whose local
-	// http.receivepack config has been aligned with receivePackEnabled,
-	// and storageFolds, the case-sensitivity probe's verdict per repo
-	// (INIT-024 TASK-005, review finding N-8; storage_probe.go): true
-	// refuses receive-pack, false admits it, absent (the probe has not
-	// answered) refuses it too.
-	mu           sync.Mutex
-	ensuredRepos map[string]bool
-	storageFolds map[string]bool
-
-	// ensureMu serialises the first alignment of each repository, which
-	// runs before a request takes a slot: concurrent first requests would
-	// otherwise race on the repository's config lock and probe directory.
-	ensureMu sync.Mutex
+	// mu protects repos: per repository path, its config alignment and
+	// the case-sensitivity probe's verdict (repoAlignment; INIT-024
+	// TASK-005, review finding N-8; storage_probe.go).
+	mu    sync.Mutex
+	repos map[string]*repoAlignment
 
 	// storageProbe answers whether a repository's refs live on storage
 	// that folds names (probeRefStorage, or a test's).
 	storageProbe storageProbe
+
+	// probeRetry is how long a failed probe's refusal is reused before
+	// a push probes the repository again (review round 1, P4-6).
+	probeRetry time.Duration
+
+	// admissions bounds the pushes of one principal, and of one
+	// workspace, that are being read and admitted (before their git
+	// slot; review round 1, P3-1): 2x the slot caps, no process-wide cap.
+	admissions *gitSlots
 
 	// budgetHook is the checkout-budget pre-receive hook every
 	// receive-pack POST installs and pins (INIT-024 TASK-003,
@@ -265,6 +266,7 @@ func NewHandler(cfg Config) (*Handler, error) {
 		resolveRepoPath:     cfg.ResolveRepoPath,
 		gitBackendPath:      backendPath,
 		slots:               newGitSlots(perActor, perWorkspace, maxConcurrent),
+		admissions:          newGitSlots(admissionFactor*perActor, admissionFactor*perWorkspace, math.MaxInt),
 		commandReadTimeout:  commandReadTimeout,
 		opTimeout:           opTimeout,
 		trustedByWorkspace:  trustedByWorkspace,
@@ -273,9 +275,9 @@ func NewHandler(cfg Config) (*Handler, error) {
 		runRefs:             cfg.RunRefs,
 		stepDefs:            cfg.StepDefs,
 		maxPushCommandBytes: defaultMaxPushCommandBytes,
-		ensuredRepos:        make(map[string]bool),
-		storageFolds:        make(map[string]bool),
+		repos:               make(map[string]*repoAlignment),
 		storageProbe:        defaultStorageProbe(),
+		probeRetry:          defaultProbeRetry,
 	}, nil
 }
 
@@ -379,17 +381,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Align the repo's local http.receivepack with the flag. Without
-	// this, git-http-backend refuses push even when our gate above
-	// allows it, because the repo config still carries an explicit
-	// `http.receivepack=false` from a previous handler lifetime. With
-	// receive-pack on, the first alignment also probes the repository's
-	// storage (INIT-024 TASK-005, N-8). It runs once per repository and
-	// handler lifetime, serialised, before any slot is taken.
-	if err := h.ensureReceivePackConfig(r.Context(), repoPath); err != nil {
-		log.Error("failed to align receivepack config", "error", err, "repo_path", repoPath)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+	// Align the repo's local git config with the flag. With receive-pack
+	// off, every request pins http.receivepack=false once per repository
+	// and handler lifetime. With it on, only a push request aligns the
+	// repository, after probing its storage (INIT-024 TASK-005, N-8): a
+	// read never waits on, nor triggers, the probe or a config write.
+	// Without the alignment git-http-backend refuses a push even when our
+	// gate allows it, because the repo config may still carry an explicit
+	// `http.receivepack=false` from a previous handler lifetime.
+	if !h.receivePackEnabled {
+		if err := h.ensureReceivePackConfig(r.Context(), repoPath); err != nil {
+			log.Error("failed to align receivepack config", "error", err, "repo_path", repoPath)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// A repository on storage that folds ref names never takes a push
@@ -397,16 +402,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// fetches go on below). Refused at the advertisement and at the
 	// POST, before any of the body is read.
 	if push {
-		switch folds, probed := h.storageVerdict(repoPath); {
-		case !probed:
-			log.Error("git push refused: the repository's storage could not be probed for case sensitivity (fail closed)",
-				"repo_path", repoPath)
-			http.Error(w, "push gate unavailable", http.StatusInternalServerError)
-			return
-		case folds:
+		switch err := h.ensurePushStorage(r.Context(), repoPath); {
+		case errors.Is(err, errCaseFoldingStorage):
 			log.Warn("git push refused: the repository is on case- or normalization-insensitive storage",
 				"remote_addr", r.RemoteAddr, "repo_path", repoPath)
 			http.Error(w, caseFoldingStorageMessage, http.StatusForbidden)
+			return
+		case err != nil:
+			log.Error("git push refused: the repository's storage could not be probed for case sensitivity, or its receive-pack config not aligned (fail closed)",
+				"repo_path", repoPath, "error", err)
+			http.Error(w, "push gate unavailable", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -419,10 +424,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// update BEFORE the push takes a slot (INIT-024 TASK-005, N-13): a
 	// client that stalls there, or whose push is refused, never holds
 	// one.
+	//
+	// That work — buffering up to maxPushCommandBytes of command section
+	// and running the admission and the branch-protection policy for each
+	// ref — is bounded on its own (review round 1, P3-1): a principal may
+	// have at most 2x its git-slot cap of pushes in it at once, and a
+	// workspace 2x its cap (admissions); one more is answered 503 at
+	// once. It holds no git slot, and is released as soon as the gate has
+	// decided.
+	principal := slotPrincipalOf(r)
 	var admitted *admittedPush
 	if push && r.Method == http.MethodPost {
+		admRelease, admFull := h.admissions.acquire(principal)
+		if admRelease == nil {
+			log.Warn("git push rejected — too many pushes of this principal or workspace being admitted",
+				"remote_addr", r.RemoteAddr,
+				"cap", string(admFull),
+			)
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "too many concurrent git pushes being admitted", http.StatusServiceUnavailable)
+			return
+		}
 		var ok bool
-		if admitted, ok = h.prereceive(w, r, log); !ok {
+		admitted, ok = h.prereceive(w, r, log)
+		admRelease()
+		if !ok {
 			return
 		}
 		r.Body = admitted.body
@@ -430,7 +456,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// A slot of the principal's, the workspace's and the process's caps
 	// (push_slots.go). Held until the CGI has answered.
-	principal := slotPrincipalOf(r)
 	release, full := h.slots.acquire(principal)
 	if release == nil {
 		log.Warn("git request rejected — concurrency limit reached",
@@ -892,13 +917,21 @@ var errCommandReadTimeout = errors.New("command section not received within the 
 // The server's ReadTimeout is a deadline on the whole request, so the
 // connection's read deadline is never moved forward: the read runs in a
 // goroutine, and when the command-read deadline passes first the read is
-// cut — the connection's read deadline is set to now
-// (http.ResponseController), which makes the blocked Read return; with a
-// ResponseWriter that cannot set it, the body is closed instead — and
-// the goroutine is waited for, so nothing reads the body once
-// ServeHTTP returns. The request is refused either way, so the deadline
-// is never restored. On success the connection's deadline is untouched:
-// the pack is read under the server's ReadTimeout, as before.
+// cut: the connection's read deadline is set to now
+// (http.ResponseController), which makes the blocked Read return. The
+// goroutine is then waited for, so nothing reads the body once ServeHTTP
+// returns, and the request is refused, so the deadline is never
+// restored. On success the connection's deadline is untouched: the pack
+// is read under the server's ReadTimeout, as before.
+//
+// The cut needs a ResponseWriter that reaches the connection — net/http's
+// own, or a wrapper with Unwrap (the gateway's statusWriter has one;
+// TestGitHTTP_GatewayCutsStalledCommandSection pins it through the full
+// middleware chain). With any other writer the fallback, closing the body,
+// is best-effort only: it unblocks a body that honours a concurrent Close
+// (a pipe), but a net/http server body takes the blocked Read's lock, so
+// such a read then ends at the server's ReadTimeout, still holding no git
+// slot (review round 1, P4-3).
 func (h *Handler) readCommandSections(w http.ResponseWriter, r *http.Request) (*commandSections, error) {
 	type result struct {
 		sec *commandSections
@@ -1051,68 +1084,129 @@ func trimRefsHeads(ref string) string {
 	return strings.TrimPrefix(ref, "refs/heads/")
 }
 
-// ensureReceivePackConfig aligns the repo's local git config with the
-// handler's ReceivePackEnabled setting. Idempotent per repo path per
-// handler lifetime — the values never flip at runtime, so caching by
-// path is safe.
-//
-// Writes two keys:
+// admissionFactor sizes the admission counters from the slot caps
+// (review round 1, P3-1 ruling: 2x per principal and per workspace).
+const admissionFactor = 2
+
+// defaultProbeRetry is how long a failed storage probe's refusal is
+// reused before a push probes again (review round 1, P4-6).
+const defaultProbeRetry = 30 * time.Second
+
+// errCaseFoldingStorage: the repository's storage folds ref names, so
+// receive-pack is refused for it.
+var errCaseFoldingStorage = errors.New("the repository's storage folds ref names")
+
+// repoAlignment is one repository's config alignment and storage
+// verdict. Its mutex serialises the alignment and the probe of that
+// repository only — a per-repository singleflight: concurrent first
+// pushes to it wait for one probe, other repositories do not wait.
+type repoAlignment struct {
+	mu sync.Mutex
+	// aligned: the config holds the value for the current state
+	// (disabled: false; enabled: the verdict's).
+	aligned bool
+	// probed and folds: the probe's answer, once it has given one.
+	probed, folds bool
+	// failedAt and failure: the last probe failure, reused for
+	// probeRetry.
+	failedAt time.Time
+	failure  error
+}
+
+func (h *Handler) alignment(repoPath string) *repoAlignment {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	a := h.repos[repoPath]
+	if a == nil {
+		a = &repoAlignment{}
+		h.repos[repoPath] = a
+	}
+	return a
+}
+
+// ensureReceivePackConfig pins a repository's receive-pack config to
+// false when receive-pack is disabled. Idempotent per repo path per
+// handler lifetime — the value never flips at runtime.
+func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) error {
+	a := h.alignment(repoPath)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.aligned {
+		return nil
+	}
+	if err := writeReceivePackConfig(ctx, repoPath, false); err != nil {
+		return err
+	}
+	a.aligned = true
+	return nil
+}
+
+// ensurePushStorage is the receive-pack-enabled alignment of a
+// repository, run by push requests only (review round 1, P4-6: a read
+// never waits on the probe). The first push probes the repository's
+// storage (INIT-024 TASK-005, review finding N-8; storage_probe.go) and
+// writes the config to match: on case-sensitive storage both keys true;
+// on storage that folds ref names both false — git-http-backend itself
+// then refuses receive-pack — and errCaseFoldingStorage for every push;
+// clones and fetches are served as before (owner question 2). A probe
+// that cannot answer writes both false, refuses the push (fail closed),
+// and its refusal is reused for probeRetry before a push probes again,
+// so a failing probe does not run on every request.
+func (h *Handler) ensurePushStorage(ctx context.Context, repoPath string) error {
+	a := h.alignment(repoPath)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.probed {
+		if !a.aligned {
+			if err := writeReceivePackConfig(ctx, repoPath, !a.folds); err != nil {
+				return err
+			}
+			a.aligned = true
+		}
+		if a.folds {
+			return errCaseFoldingStorage
+		}
+		return nil
+	}
+	if a.failure != nil && time.Since(a.failedAt) < h.probeRetry {
+		return a.failure
+	}
+	folds, err := h.storageProbe(ctx, repoPath)
+	if err != nil {
+		a.failure, a.failedAt = fmt.Errorf("case-sensitivity probe: %w", err), time.Now()
+		observe.Logger(ctx).Error("case-sensitivity probe of a served repository failed; its pushes are refused, and it is probed again after a pause",
+			"repo_path", repoPath, "retry_after", h.probeRetry.String(), "error", err)
+		_ = writeReceivePackConfig(ctx, repoPath, false) // best effort: git-http-backend refuses too
+		return a.failure
+	}
+	a.probed, a.folds, a.failure = true, folds, nil
+	if folds {
+		observe.Logger(ctx).Error("served repository is on case- or normalization-insensitive storage; receive-pack is refused for it (clones and fetches are served). "+
+			"See KNOWN-LIMITATIONS: Served Repositories Need Case- and Normalization-Sensitive Storage",
+			"repo_path", repoPath)
+	}
+	if err := writeReceivePackConfig(ctx, repoPath, !folds); err != nil {
+		return err
+	}
+	a.aligned = true
+	if folds {
+		return errCaseFoldingStorage
+	}
+	return nil
+}
+
+// writeReceivePackConfig writes two keys:
 //   - http.receivepack: exposes (or hides) git-http-backend's
 //     receive-pack entry for this repo.
 //   - receive.advertisePushOptions: makes the ref-advertisement include
 //     the `push-options` capability. Without this, `git push -o ...`
 //     on the client silently drops options and our pre-receive gate
 //     never sees them — EPIC-004 TASK-003 depends on this being set.
-//
-// With receive-pack enabled it first probes the repository's storage
-// (INIT-024 TASK-005, review finding N-8; storage_probe.go) and records
-// the verdict for storageVerdict. A repository whose storage folds ref
-// names gets both keys false — git-http-backend itself then refuses
-// receive-pack — and its pushes are refused by ServeHTTP; reads are
-// served as before (owner question 2). A probe that cannot answer is not
-// cached: the keys are written false, pushes are refused (fail closed)
-// and the next request probes again.
-//
-// It runs before the request takes a slot, so the first alignment of
-// each repository is serialised (ensureMu); afterwards it is a map
-// lookup.
-func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) error {
-	if h.repoEnsured(repoPath) {
-		return nil
-	}
-	h.ensureMu.Lock()
-	defer h.ensureMu.Unlock()
-	if h.repoEnsured(repoPath) {
-		return nil
-	}
-
+func writeReceivePackConfig(ctx context.Context, repoPath string, enabled bool) error {
 	value := "false"
-	cache := true
-	if h.receivePackEnabled {
-		folds, err := h.storageProbe(ctx, repoPath)
-		h.mu.Lock()
-		switch {
-		case err != nil:
-			cache = false
-			delete(h.storageFolds, repoPath)
-		case folds:
-			h.storageFolds[repoPath] = true
-		default:
-			h.storageFolds[repoPath] = false
-			value = "true"
-		}
-		h.mu.Unlock()
-		switch {
-		case err != nil:
-			observe.Logger(ctx).Error("case-sensitivity probe of a served repository failed; its pushes are refused until a probe succeeds",
-				"repo_path", repoPath, "error", err)
-		case folds:
-			observe.Logger(ctx).Error("served repository is on case- or normalization-insensitive storage; receive-pack is refused for it (clones and fetches are served). "+
-				"See KNOWN-LIMITATIONS: Served Repositories Need Case- and Normalization-Sensitive Storage",
-				"repo_path", repoPath)
-		}
+	if enabled {
+		value = "true"
 	}
-
 	for _, kv := range [][2]string{
 		{"http.receivepack", value},
 		{"receive.advertisePushOptions", value},
@@ -1126,28 +1220,7 @@ func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) 
 			return fmt.Errorf("git config %s=%s: %w", kv[0], kv[1], err)
 		}
 	}
-
-	if cache {
-		h.mu.Lock()
-		h.ensuredRepos[repoPath] = true
-		h.mu.Unlock()
-	}
 	return nil
-}
-
-func (h *Handler) repoEnsured(repoPath string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.ensuredRepos[repoPath]
-}
-
-// storageVerdict reports the probe's verdict on repoPath: probed is
-// false when no probe has answered (pushes are refused, fail closed).
-func (h *Handler) storageVerdict(repoPath string) (folds, probed bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	folds, probed = h.storageFolds[repoPath]
-	return folds, probed
 }
 
 // isReadOnly returns true if the request is a read-only git operation.

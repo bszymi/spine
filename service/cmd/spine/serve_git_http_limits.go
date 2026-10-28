@@ -72,16 +72,28 @@ func loadGitHTTPLimits() (gitHTTPLimits, error) {
 	return l, nil
 }
 
-// effective is l with every default filled in.
-func (l gitHTTPLimits) effective() gitHTTPLimits {
+// effective is l with every unset field filled in for the server's
+// mode. Shared mode (a ServicePool of workspaces): 8 process-wide, 4 per
+// workspace, 2 per actor (owner question 1). Single mode — one workspace,
+// whose per-workspace cap is the server's whole capacity — defaults the
+// per-workspace and per-actor caps to the process-wide one (8), so a
+// single-workspace server never has fewer slots than the one cap of 5 it
+// had, and raising SPINE_GIT_HTTP_MAX_CONCURRENT raises its capacity
+// (review round 1, P3-2 ruling, refining owner question 1 for single
+// mode).
+func (l gitHTTPLimits) effective(shared bool) gitHTTPLimits {
 	if l.MaxConcurrent == 0 {
 		l.MaxConcurrent = githttp.DefaultMaxConcurrent
 	}
+	perWorkspace, perActor := githttp.DefaultMaxConcurrentPerWorkspace, githttp.DefaultMaxConcurrentPerActor
+	if !shared {
+		perWorkspace, perActor = l.MaxConcurrent, l.MaxConcurrent
+	}
 	if l.MaxConcurrentPerWorkspace == 0 {
-		l.MaxConcurrentPerWorkspace = githttp.DefaultMaxConcurrentPerWorkspace
+		l.MaxConcurrentPerWorkspace = perWorkspace
 	}
 	if l.MaxConcurrentPerActor == 0 {
-		l.MaxConcurrentPerActor = githttp.DefaultMaxConcurrentPerActor
+		l.MaxConcurrentPerActor = perActor
 	}
 	if l.CommandReadTimeout == 0 {
 		l.CommandReadTimeout = githttp.DefaultCommandReadTimeout
@@ -92,15 +104,27 @@ func (l gitHTTPLimits) effective() gitHTTPLimits {
 // logGitHTTPLimits reports the effective caps once at startup, and warns
 // when a cap is set above the one that contains it, where it has no
 // effect: a workspace never gets more than the process-wide ceiling, and
-// an actor never more than its workspace's cap. A single-workspace
-// server's capacity is its per-workspace cap.
-func logGitHTTPLimits(log *slog.Logger, l gitHTTPLimits) {
-	e := l.effective()
+// an actor never more than its workspace's cap. In single mode the
+// per-workspace cap is the server's capacity, so a process-wide cap set
+// above an explicitly set per-workspace cap is named as having no effect
+// (review round 1, P3-2).
+func logGitHTTPLimits(log *slog.Logger, l gitHTTPLimits, shared bool) {
+	e := l.effective(shared)
+	mode := "single"
+	if shared {
+		mode = "shared"
+	}
 	log.Info("git HTTP slots",
+		"mode", mode,
 		"max_concurrent", e.MaxConcurrent,
 		"max_concurrent_per_workspace", e.MaxConcurrentPerWorkspace,
 		"max_concurrent_per_actor", e.MaxConcurrentPerActor,
 		"command_read_timeout", e.CommandReadTimeout.String())
+	if !shared && l.MaxConcurrent != 0 && l.MaxConcurrentPerWorkspace != 0 && l.MaxConcurrent > l.MaxConcurrentPerWorkspace {
+		log.Warn(EnvGitHTTPMaxConcurrent+" is above "+EnvGitHTTPMaxConcurrentPerWorkspace+" on a single-workspace server; "+
+			EnvGitHTTPMaxConcurrentPerWorkspace+" is the binding cap (the server's capacity), the rest has no effect",
+			"max_concurrent", e.MaxConcurrent, "max_concurrent_per_workspace", e.MaxConcurrentPerWorkspace)
+	}
 	if e.MaxConcurrentPerWorkspace > e.MaxConcurrent {
 		log.Warn(EnvGitHTTPMaxConcurrentPerWorkspace+" is above "+EnvGitHTTPMaxConcurrent+"; a workspace gets at most the process-wide ceiling",
 			"max_concurrent_per_workspace", e.MaxConcurrentPerWorkspace, "max_concurrent", e.MaxConcurrent)

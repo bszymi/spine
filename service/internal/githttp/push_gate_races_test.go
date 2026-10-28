@@ -758,6 +758,10 @@ func TestReceivePack_RefusedOnCaseFoldingStorage(t *testing.T) {
 	})
 
 	t.Run("probe failure refuses pushes and is retried", func(t *testing.T) {
+		// A failing probe refuses pushes; its refusal is reused for the
+		// retry window instead of probing on every request, reads never
+		// probe, and once the window has passed a push probes again
+		// (review round 1, P4-6).
 		repo2, _, _, _ := nulRepo(t, "")
 		h2 := pgrHandler(t, Config{
 			ResolveRepoPath:    func(context.Context, string) (string, error) { return repo2, nil },
@@ -765,18 +769,30 @@ func TestReceivePack_RefusedOnCaseFoldingStorage(t *testing.T) {
 		}, 0, 0, 0, 0)
 		p := &pgrFoldingProbe{err: fmt.Errorf("disk on fire")}
 		pgrSetStorageProbe(h2, p.probe)
-		if w := pgrServe(h2, http.MethodGet, "/info/refs?service=git-receive-pack", "", http.NoBody, repo2, "ws-1", pgrAlice, ""); w.Code != http.StatusInternalServerError {
+		const retry = 300 * time.Millisecond
+		pgrSetProbeRetry(h2, retry)
+		pushAdv := func() *httptest.ResponseRecorder {
+			return pgrServe(h2, http.MethodGet, "/info/refs?service=git-receive-pack", "", http.NoBody, repo2, "ws-1", pgrAlice, "")
+		}
+		if w := pushAdv(); w.Code != http.StatusInternalServerError {
 			t.Errorf("push advertisement after a failed probe: %d %q, want 500", w.Code, w.Body.String())
+		}
+		if w := pushAdv(); w.Code != http.StatusInternalServerError {
+			t.Errorf("second push advertisement within the retry window: %d %q, want 500", w.Code, w.Body.String())
 		}
 		if code := pgrTry(h2, repo2, "ws-1", pgrAlice, ""); code != http.StatusOK {
 			t.Errorf("fetch advertisement after a failed probe: %d, want 200", code)
 		}
+		if n := p.n(); n != 1 {
+			t.Errorf("probe ran %d times within the retry window (two pushes, one read), want 1", n)
+		}
 		p.set(false, nil)
-		if w := pgrServe(h2, http.MethodGet, "/info/refs?service=git-receive-pack", "", http.NoBody, repo2, "ws-1", pgrAlice, ""); w.Code != http.StatusOK {
+		time.Sleep(retry + 100*time.Millisecond)
+		if w := pushAdv(); w.Code != http.StatusOK {
 			t.Errorf("push advertisement once the probe answers: %d %q, want 200", w.Code, w.Body.String())
 		}
-		if n := p.n(); n != 3 {
-			t.Errorf("probe ran %d times, want 3 (no failed answer is cached)", n)
+		if n := p.n(); n != 2 {
+			t.Errorf("probe ran %d times, want 2 (probed again after the retry window)", n)
 		}
 	})
 

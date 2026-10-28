@@ -26,7 +26,11 @@ package githttp
 //     random bytes, compared in constant time, accepted once and only for
 //     this push's socket; both disappear when the push's CGI returns.
 //     Neither is ever logged, and the hook drops both from its own
-//     environment before it starts any process.
+//     environment before it starts any process. git passes the same
+//     environment to the repository's other hooks for that push (update,
+//     post-receive and the like, when an operator keeps them in the
+//     pinned hooks directory): by then the token is spent and the socket
+//     no longer listens, so it is of no use to them (review round 1).
 //   - Decision. The server re-decides with the same evaluator the
 //     pre-pack gate used (refadmit, one admission table), over the same
 //     per-request run reader and step-definition lookup, the same actor
@@ -114,8 +118,16 @@ type recheckSession struct {
 
 	wg sync.WaitGroup
 	// used is set by the first request that presents the token: the
-	// token is single-use.
+	// token is single-use, and the listener is closed then (review round
+	// 1, P4-7).
 	used atomic.Bool
+
+	// conns are the accepted connections still being served; close
+	// closes them, so a connection that stalls cannot hold close — and
+	// the push's git slot — until its deadline.
+	connMu sync.Mutex
+	conns  map[net.Conn]struct{}
+	closed bool
 }
 
 // startRecheck opens the channel of one push. The decision's store reads
@@ -160,6 +172,7 @@ func openRecheck(ctx context.Context, ioTimeout time.Duration, decide recheckDec
 	return &recheckSession{
 		dir: dir, socket: socket, token: hex.EncodeToString(tok),
 		ln: ln, decide: decide, ioTimeout: ioTimeout,
+		conns: map[net.Conn]struct{}{},
 	}, nil
 }
 
@@ -173,6 +186,12 @@ func (s *recheckSession) env() []string {
 func (s *recheckSession) close() {
 	s.cancel()
 	_ = s.ln.Close()
+	s.connMu.Lock()
+	s.closed = true
+	for c := range s.conns {
+		_ = c.Close()
+	}
+	s.connMu.Unlock()
 	s.wg.Wait()
 	_ = os.RemoveAll(s.dir)
 }
@@ -184,9 +203,22 @@ func (s *recheckSession) serve() {
 		if err != nil {
 			return // closed
 		}
+		s.connMu.Lock()
+		if s.closed {
+			s.connMu.Unlock()
+			_ = conn.Close()
+			return
+		}
+		s.conns[conn] = struct{}{}
+		s.connMu.Unlock()
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer func() {
+				s.connMu.Lock()
+				delete(s.conns, conn)
+				s.connMu.Unlock()
+			}()
 			s.handle(conn)
 		}()
 	}
@@ -217,6 +249,8 @@ func (s *recheckSession) handle(conn net.Conn) {
 	if !s.used.CompareAndSwap(false, true) {
 		return
 	}
+	// Spent: nothing else is accepted on this push's socket.
+	_ = s.ln.Close()
 	reply := func(msgs []string) {
 		var b strings.Builder
 		if len(msgs) == 0 {

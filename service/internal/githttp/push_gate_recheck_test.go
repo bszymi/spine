@@ -72,11 +72,12 @@ func TestRecheck_ChannelIsPrivateSingleUseAndTokenBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(s.close) // close is idempotent; the end of the test closes it too
 	other, err := startRecheck(context.Background(), 5*time.Second, func(context.Context, []RefUpdate) []string { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer other.close()
+	t.Cleanup(other.close)
 
 	fi, err := os.Stat(s.dir)
 	if err != nil || fi.Mode().Perm() != 0o700 {
@@ -93,6 +94,12 @@ func TestRecheck_ChannelIsPrivateSingleUseAndTokenBound(t *testing.T) {
 	if got := recheckRequest(t, s, recheckHello, strings.Repeat("0", 64), line); got != "" {
 		t.Errorf("a wrong token got an answer: %q", got)
 	}
+	// Review round 1 (P4-4, mutant MR2): the whole token, not a prefix.
+	for name, tok := range map[string]string{"empty": "", "truncated": s.token[:32], "one short": s.token[:63], "extended": s.token + "00"} {
+		if got := recheckRequest(t, s, recheckHello, tok, line); got != "" {
+			t.Errorf("a %s token got an answer: %q", name, got)
+		}
+	}
 	if got := recheckRequest(t, s, "spine-push-recheck 2", s.token, line); got != "" {
 		t.Errorf("another protocol version got an answer: %q", got)
 	}
@@ -104,7 +111,9 @@ func TestRecheck_ChannelIsPrivateSingleUseAndTokenBound(t *testing.T) {
 	if got := recheckRequest(t, s, recheckHello, s.token, line); got != "ok\n" {
 		t.Fatalf("the push's own request: %q, want ok", got)
 	}
-	if got := recheckRequest(t, s, recheckHello, s.token, line); got != "" {
+	// Spent: the socket no longer listens, and the token is not accepted
+	// again on a connection accepted before.
+	if got, err := recheckExchange(s.socket, recheckHello, s.token, line); err == nil && got != "" {
 		t.Errorf("the token was accepted twice: %q", got)
 	}
 
@@ -119,6 +128,7 @@ func TestRecheck_ChannelIsPrivateSingleUseAndTokenBound(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(s2.close)
 		if got := recheckRequest(t, s2, recheckHello, s2.token, tc.line); !strings.HasPrefix(got, "refuse\n") {
 			t.Errorf("%s: %q, want a refusal", tc.name, got)
 		}
@@ -130,6 +140,7 @@ func TestRecheck_ChannelIsPrivateSingleUseAndTokenBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(s3.close)
 	if got := recheckRequest(t, s3, recheckHello, s3.token, line); got != "refuse\nrefused with a newline\n" {
 		t.Errorf("a message is one line: %q", got)
 	}
