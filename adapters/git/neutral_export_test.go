@@ -24,3 +24,10 @@ func TreeRefsForTest(dir string) int {
 // RenormaliseMarkerName is the marker's file name in a work tree's git
 // directory.
 const RenormaliseMarkerName = renormaliseMarker
+
+// ReadRenormaliseRecordForTest reads the marker at path as renormalise
+// does (INIT-024 integration A): ok false means "no record".
+func ReadRenormaliseRecordForTest(path string) (changes []string, proof map[string]string, ok bool, err error) {
+	rec, ok, err := readRenormaliseRecord(path)
+	return rec.changes, rec.proof, ok, err
+}

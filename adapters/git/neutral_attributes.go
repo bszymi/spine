@@ -836,9 +836,8 @@ func (c *CLIClient) renormalise(ctx context.Context, op, marker string, recorded
 // through it, as the shared tree's phantom bookkeeping does
 // (worktreefs.LstatEntry follows no link and opens nothing): a regular
 // file is "blob <id>" — its bytes hashed under the attributes in force,
-// which under the neutral line are its raw bytes (`hash-object
-// --stdin-paths`; a path holding a newline cannot be passed and gets no
-// fingerprint, so it is never proven) — a link "symlink <target>",
+// which under the neutral line are its raw bytes (`hash-object -- <path>...`,
+// in batches of fingerprintArgBytes) — a link "symlink <target>",
 // anything else its type, a missing entry "absent", an unreachable one
 // "unreachable".
 func (c *CLIClient) fingerprints(ctx context.Context, op string, paths []string) (map[string]string, error) {
@@ -857,9 +856,7 @@ func (c *CLIClient) fingerprints(ctx context.Context, op string, paths []string)
 		var pe *worktreefs.PathError
 		switch {
 		case err == nil && fi.Mode().IsRegular():
-			if !strings.Contains(p, "\n") {
-				regular = append(regular, p)
-			}
+			regular = append(regular, p)
 		case err == nil && fi.Mode()&fs.ModeSymlink != 0:
 			fp[p] = "symlink " + target
 		case err == nil:
@@ -872,22 +869,41 @@ func (c *CLIClient) fingerprints(ctx context.Context, op string, paths []string)
 			return nil, err
 		}
 	}
-	if len(regular) > 0 {
-		out, _, err := c.runWith(ctx, op, runOpts{stdin: strings.NewReader(strings.Join(regular, "\n") + "\n")},
-			"hash-object", "--stdin-paths")
+	// The paths are hash-object's arguments, after "--", never lines of
+	// --stdin-paths input (INIT-024 integration A, codex): git reads that
+	// input one path per line, C-unquotes a line that starts with `"` and
+	// drops a CR before the newline, and has no NUL-separated form — so a
+	// name with a leading quote failed the renormalisation ("line is badly
+	// quoted") or was read as another file's name, and one with a newline
+	// or a trailing CR could not be passed. An argument carries every byte
+	// of a path as is (a backslash, a newline, a name that is not UTF-8).
+	// Batches keep each command line short.
+	for start := 0; start < len(regular); {
+		end, size := start, 0
+		for end < len(regular) && (end == start || size+len(regular[end])+1 <= fingerprintArgBytes) {
+			size += len(regular[end]) + 1
+			end++
+		}
+		batch := regular[start:end]
+		out, _, err := c.runWith(ctx, op, runOpts{}, append([]string{"hash-object", "--"}, batch...)...)
 		if err != nil {
 			return nil, err
 		}
 		sums := strings.Fields(out)
-		if len(sums) != len(regular) {
+		if len(sums) != len(batch) {
 			return nil, &GitError{Kind: ErrKindPermanent, Op: op, Message: "hash-object printed an unexpected number of ids"}
 		}
-		for i, p := range regular {
+		for i, p := range batch {
 			fp[p] = "blob " + sums[i]
 		}
+		start = end
 	}
 	return fp, nil
 }
+
+// fingerprintArgBytes bounds the path bytes of one fingerprints
+// hash-object command line, far below any platform's argument limit.
+const fingerprintArgBytes = 128 << 10
 
 // headUnborn reports whether HEAD is unborn, identified positively
 // (review round 4): HEAD names no commit, `symbolic-ref -q HEAD` names a
