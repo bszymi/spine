@@ -16,8 +16,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/testutil"
@@ -113,5 +116,139 @@ func TestNeutralAttributes_EveryPathShapeIsFingerprinted(t *testing.T) {
 				t.Error("the marker is still there after the retry")
 			}
 		})
+	}
+}
+
+// winEscapeArg is Go's syscall.EscapeArg on Windows (how os/exec quotes an
+// argument for CreateProcess), copied so the bound can be checked on any
+// platform.
+func winEscapeArg(s string) string {
+	if s == "" {
+		return `""`
+	}
+	needsBackslash, hasSpace := false, false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"', '\\':
+			needsBackslash = true
+		case ' ', '\t':
+			hasSpace = true
+		}
+	}
+	if !needsBackslash && !hasSpace {
+		return s
+	}
+	if !needsBackslash {
+		return `"` + s + `"`
+	}
+	var b []byte
+	if hasSpace {
+		b = append(b, '"')
+	}
+	slashes := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		default:
+			slashes = 0
+		case '\\':
+			slashes++
+		case '"':
+			for ; slashes > 0; slashes-- {
+				b = append(b, '\\')
+			}
+			b = append(b, '\\')
+		}
+		b = append(b, c)
+	}
+	if hasSpace {
+		for ; slashes > 0; slashes-- {
+			b = append(b, '\\')
+		}
+		b = append(b, '"')
+	}
+	return string(b)
+}
+
+// TestNeutralAttributes_FingerprintBatchesFitWindows (codex round 2): a
+// fingerprint batch's command line, quoted as on Windows, stays within
+// CreateProcess's 32,767 UTF-16 units — for the worst quoting shapes,
+// long names and names that are not ASCII — and the batches keep every
+// path once, in order.
+func TestNeutralAttributes_FingerprintBatchesFitWindows(t *testing.T) {
+	const gitExe = `C:\Program Files\Git\cmd\git.exe` // a long but ordinary git path
+	shapes := []string{
+		strings.Repeat(`\"`, 40) + " x",                   // every quote after a backslash, with a space
+		strings.Repeat(`\`, 79) + " ",                     // trailing backslashes doubled before the closing quote
+		"dir/" + strings.Repeat("é", 60) + ".txt",         // two UTF-8 bytes, one UTF-16 unit each
+		"dir/" + strings.Repeat("\U0001F600", 30) + ".md", // four bytes, two units each
+		"plain/file.txt",
+		strings.Repeat("long-", 2000), // one path past half the limit
+	}
+	var paths []string
+	for i := 0; i < 3000; i++ {
+		paths = append(paths, fmt.Sprintf("%s-%d", shapes[i%len(shapes)], i))
+	}
+	batches := git.FingerprintBatchesForTest(paths)
+	if len(batches) < 2 {
+		t.Fatalf("%d batch(es) for %d paths; want several", len(batches), len(paths))
+	}
+	var back []string
+	for i, batch := range batches {
+		if len(batch) == 0 {
+			t.Fatalf("batch %d is empty", i)
+		}
+		line := winEscapeArg(gitExe) + " hash-object --"
+		for _, p := range batch {
+			line += " " + winEscapeArg(p)
+		}
+		if n := len(utf16.Encode([]rune(line))); n > 32767 {
+			t.Fatalf("batch %d (%d paths): its Windows command line is %d UTF-16 units; CreateProcess takes at most 32767", i, len(batch), n)
+		}
+		back = append(back, batch...)
+	}
+	if !reflect.DeepEqual(back, paths) {
+		t.Fatal("the batches do not hold every path once, in order")
+	}
+}
+
+// TestNeutralAttributes_ManyConvertedFilesAreFingerprintedInBatches: end
+// to end, more converted files than one batch takes are proven and then
+// brought to their stored bytes.
+func TestNeutralAttributes_ManyConvertedFilesAreFingerprintedInBatches(t *testing.T) {
+	ctx := context.Background()
+	repo := testutil.NewTempRepo(t)
+	testutil.WriteFile(t, repo, ".gitattributes", "* text eol=crlf\n")
+	var names []string
+	for i := 0; i < 400; i++ {
+		name := fmt.Sprintf("dir/%s\"quoted\\name-%03d.txt", strings.Repeat("n", 40), i)
+		names = append(names, name)
+		testutil.WriteFile(t, repo, name, fmt.Sprintf("file %d\nline\n", i))
+	}
+	if n := len(git.FingerprintBatchesForTest(names)); n < 2 {
+		t.Fatalf("fixture: %d batch(es); want several", n)
+	}
+	tbGit(t, repo, nil, "add", "-A")
+	tbGit(t, repo, nil, "commit", "-q", "-m", "files")
+	if err := os.RemoveAll(filepath.Join(repo, "dir")); err != nil {
+		t.Fatal(err)
+	}
+	tbGit(t, repo, nil, "checkout", "--", ".")
+	err := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{MaxEntries: 1})).EnsureNeutralWorkTree(ctx)
+	if !errors.Is(err, git.ErrRenormalisePending) {
+		t.Fatalf("first call: %v; want ErrRenormalisePending", err)
+	}
+	gd := tbGit(t, repo, nil, "rev-parse", "--absolute-git-dir")
+	_, proof, ok, err := git.ReadRenormaliseRecordForTest(filepath.Join(gd, git.RenormaliseMarkerName))
+	if err != nil || !ok || len(proof) != len(names) {
+		t.Fatalf("proof after the first call: ok=%v err=%v n=%d; want %d", ok, err, len(proof), len(names))
+	}
+	if err := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{})).EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	for i, name := range names {
+		if b := rnRead(t, repo, name); b != fmt.Sprintf("file %d\nline\n", i) {
+			t.Fatalf("%q = %q; want its stored bytes", name, b)
+		}
 	}
 }

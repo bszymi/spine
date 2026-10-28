@@ -40,3 +40,7 @@ func WriteRenormaliseRecordForTest(path string, changes []string, proof map[stri
 
 // MaxRenormaliseRecordEntries is the per-section entry bound.
 const MaxRenormaliseRecordEntries = maxRenormaliseRecordEntries
+
+// FingerprintBatchesForTest splits paths as the renormalisation's
+// fingerprints do.
+func FingerprintBatchesForTest(paths []string) [][]string { return fingerprintBatches(paths) }

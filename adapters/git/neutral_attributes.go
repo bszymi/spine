@@ -881,7 +881,7 @@ func (c *CLIClient) renormalise(ctx context.Context, op, marker string, recorded
 // (worktreefs.LstatEntry follows no link and opens nothing): a regular
 // file is "blob <id>" — its bytes hashed under the attributes in force,
 // which under the neutral line are its raw bytes (`hash-object -- <path>...`,
-// in batches of fingerprintArgBytes) — a link "symlink <target>",
+// in fingerprintBatches) — a link "symlink <target>",
 // anything else its type, a missing entry "absent", an unreachable one
 // "unreachable".
 func (c *CLIClient) fingerprints(ctx context.Context, op string, paths []string) (map[string]string, error) {
@@ -921,14 +921,8 @@ func (c *CLIClient) fingerprints(ctx context.Context, op string, paths []string)
 	// quoted") or was read as another file's name, and one with a newline
 	// or a trailing CR could not be passed. An argument carries every byte
 	// of a path as is (a backslash, a newline, a name that is not UTF-8).
-	// Batches keep each command line short.
-	for start := 0; start < len(regular); {
-		end, size := start, 0
-		for end < len(regular) && (end == start || size+len(regular[end])+1 <= fingerprintArgBytes) {
-			size += len(regular[end]) + 1
-			end++
-		}
-		batch := regular[start:end]
+	// Batches keep each command line within every platform's limit.
+	for _, batch := range fingerprintBatches(regular) {
 		out, _, err := c.runWith(ctx, op, runOpts{}, append([]string{"hash-object", "--"}, batch...)...)
 		if err != nil {
 			return nil, err
@@ -940,14 +934,41 @@ func (c *CLIClient) fingerprints(ctx context.Context, op string, paths []string)
 		for i, p := range batch {
 			fp[p] = "blob " + sums[i]
 		}
-		start = end
 	}
 	return fp, nil
 }
 
-// fingerprintArgBytes bounds the path bytes of one fingerprints
-// hash-object command line, far below any platform's argument limit.
-const fingerprintArgBytes = 128 << 10
+// fingerprintBatches splits paths into hash-object argument lists whose
+// command line fits every platform (INIT-024 integration A, codex round
+// 2). The tightest is Windows: CreateProcess takes at most 32,767 UTF-16
+// units, and quoting an argument there at worst doubles it (each
+// backslash before a quote, and the quote itself, escaped) and adds two
+// quotes and a separating space; a byte of the path is at most one UTF-16
+// unit. So fingerprintArgCost bounds what a path adds, and a batch's
+// costs stay within fingerprintArgBudget — half the limit, which leaves
+// room for git's own path and the fixed arguments. A path costlier than
+// the budget alone gets a batch of its own.
+func fingerprintBatches(paths []string) [][]string {
+	var batches [][]string
+	for start := 0; start < len(paths); {
+		end, cost := start, 0
+		for end < len(paths) && (end == start || cost+fingerprintArgCost(paths[end]) <= fingerprintArgBudget) {
+			cost += fingerprintArgCost(paths[end])
+			end++
+		}
+		batches = append(batches, paths[start:end])
+		start = end
+	}
+	return batches
+}
+
+// fingerprintArgCost is an upper bound of the UTF-16 units p adds to a
+// Windows command line (fingerprintBatches), and so of the bytes it adds
+// anywhere else.
+func fingerprintArgCost(p string) int { return 2*len(p) + 3 }
+
+// fingerprintArgBudget is one fingerprint batch's cost bound.
+const fingerprintArgBudget = 16 << 10
 
 // headUnborn reports whether HEAD is unborn, identified positively
 // (review round 4): HEAD names no commit, `symbolic-ref -q HEAD` names a
