@@ -189,7 +189,8 @@ func (s *pathCollector) path(rec []byte) error {
 		s.err = &GitError{Kind: ErrKindPermanent, Op: s.op, Message: "empty path in `git ls-tree -z` output"}
 		return errStopListing
 	}
-	if s.records++; s.records > s.bounds.records {
+	s.records++
+	if s.records > s.bounds.records {
 		s.err = listingTooLarge(s.op, s.bounds.records, true)
 		return errStopListing
 	}
@@ -367,7 +368,8 @@ func (s *pathCounter) Write(p []byte) (int, error) {
 			}
 			return 0, errStopListing
 		}
-		if s.n++; int64(s.n) > s.maxRecords {
+		s.n++
+		if int64(s.n) > s.maxRecords {
 			s.err = listingTooLarge(s.op, s.maxRecords, true)
 			if s.stop != nil {
 				s.stop()

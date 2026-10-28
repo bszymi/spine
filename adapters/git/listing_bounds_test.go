@@ -374,7 +374,7 @@ func TestDiff_HoldsBothTreesWorthOfPaths(t *testing.T) {
 	c := git.NewCLIClient(dir, git.WithMaxOutputBytes(boundsCap), git.WithTreeBudget(git.TreeBudget{MaxPathBytesTotal: 1 << 20, MaxEntries: 50_000}))
 	listing, diff := c.ListingLimitForTest(), c.DiffLimitForTest()
 	paths := int64(n * (4 + 80 + 12 + 1))
-	if !(listing < paths && paths < diff) {
+	if listing >= paths || paths >= diff {
 		t.Fatalf("fixture: %d path bytes, listing limit %d, diff limit %d; want between them", paths, listing, diff)
 	}
 	if got, err := c.Diff(ctx, seed, head); err != nil || len(got) != n {
