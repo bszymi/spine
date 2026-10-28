@@ -90,7 +90,7 @@ This document tracks known gaps and deferred functionality.
   (`service/internal/githttp`). Spooling chunked bodies before CGI, with a size cap, is an
   INIT-023 EPIC-001 follow-up (owner: bszymi).
 
-### Git Push: Run-Branch Admission Is a Push-Start Check
+### Git Push: Run-Branch Admission Is Checked at Push Start and Again at Apply Time
 - With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, a run, planning or divergence branch is pushable only
   by the actor bound to its current step, or an operator (INIT-023 TASK-016). Three limits remain:
   - **Admission is decided twice; a narrow window remains.** The gate decides when the push's
@@ -223,8 +223,8 @@ This document tracks known gaps and deferred functionality.
     author: an operator who pushes commits to a run branch can then be bound to its review. That
     is within operator authority in standalone; where it matters, compare the run branch's commit
     authors with the reviewer before accepting.
-  - **A push admitted while bound counts its actor as an author** (see "Run-Branch Admission Is a
-    Push-Start Check"): since INIT-024 TASK-005 such a push lands only if the actor is still bound
+  - **A push admitted while bound counts its actor as an author** (see "Run-Branch Admission Is
+    Checked at Push Start and Again at Apply Time"): since INIT-024 TASK-005 such a push lands only if the actor is still bound
     when git applies it, and its actor counts as an author because it was bound.
 - **Planning runs without a recorded starter are reviewable by nobody (INIT-024 TASK-001,
   Decision 2; owner question 1 default: fail closed).** Separation of duties counts the actor who
@@ -969,16 +969,27 @@ The following limitations have been resolved:
 - **Git capacity is shared fairly, within one process (INIT-024 TASK-005, review finding N-13).**
   A git request takes one slot from three caps: its principal's — the (workspace, actor) of a token
   request, or the (workspace, peer address) of a token-less read, never a shared empty actor — its
-  workspace's, and the process's (defaults 2 / 4 / 8: `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_ACTOR`,
+  workspace's, and the process's (`SPINE_GIT_HTTP_MAX_CONCURRENT_PER_ACTOR`,
   `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_WORKSPACE`, `SPINE_GIT_HTTP_MAX_CONCURRENT`); a full cap
-  answers `503` with `Retry-After: 5`. A push takes its slot only after its command section has
-  arrived (within `SPINE_GIT_COMMAND_READ_TIMEOUT`, default 10 s) and been admitted, so a client that
-  stalls there holds none. Residuals: the caps are per replica; a fetch whose request body stalls,
-  and a push whose pack stalls, hold their own principal's slot until the server's 30 s
-  `ReadTimeout`; members of two workspaces can fill the process-wide ceiling between them; a single
-  workspace server's capacity is its per-workspace cap (4 by default; it was 5), and a runner fleet
-  sharing one token gets the per-actor cap (2) — raise the variables for it; the per-client-IP
-  rate limiter is unchanged.
+  answers `503` with `Retry-After: 5`. Defaults: in shared mode 2 / 4 / 8; on a single-workspace
+  server the per-workspace and per-actor caps default to the process-wide one (8), which is then the
+  server's capacity (it was one cap of 5) — an explicitly lower per-workspace cap binds, with a
+  startup warning when the process-wide cap is set above it. A push takes its slot only after its
+  command section has arrived (within `SPINE_GIT_COMMAND_READ_TIMEOUT`, default 10 s) and been
+  admitted, so a client that stalls there holds none; the command sections being read and admitted
+  at once are capped too, at twice the slot caps per principal and per workspace (one more push is
+  answered `503` at once). Residuals: the caps are per replica; each push in admission may buffer up
+  to the 1 MiB command-section cap and evaluates admission and branch protection for every ref it
+  names — there is no separate ref-count cap, the 1 MiB bounds it; a fetch whose request body
+  stalls, and a push whose pack stalls, hold their own principal's slot until the server's 30 s
+  `ReadTimeout`; members of two workspaces can fill the process-wide ceiling between them; in shared
+  mode runners that share one token share one actor's slots (2 by default) — raise
+  `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_ACTOR` for them; the per-client-IP rate limiter is unchanged.
+- **The command-read cut needs a ResponseWriter that reaches the connection.** A stalled command
+  section is cut by moving the connection's read deadline (`http.ResponseController`); the
+  gateway's middleware writers support it. Behind a writer that cannot, the fallback — closing the
+  request body — is best-effort: a net/http server body is then read until the server's
+  `ReadTimeout` (still without a git slot).
 
 ### SSE: An Event With an Unsafe ID Does Not Advance the Client Cursor
 - Since INIT-023 TASK-015 (audit P3-28) an event whose ID (or type) contains a control character,
@@ -1124,19 +1135,24 @@ The following limitations have been resolved:
   (APFS also folds the Kelvin sign onto `k` and NFD onto NFC). `core.ignorecase` prevents none of
   this.
 - **Status: enforced (INIT-024 TASK-005, review finding N-8).** With receive-pack on, the git
-  endpoint probes each repository's storage the first time it serves it (once per repository and
-  process lifetime): in a fresh directory under `<git-common-dir>/refs` whose name starts with `.`
-  (git's ref iteration skips it; it is removed at once), it creates three pairs of names a folding
-  filesystem identifies — ASCII case, Unicode NFC/NFD and the Kelvin sign against `k` — and reads
-  them back. A repository on storage that folds any pair has receive-pack refused: the push
-  advertisement and the push answer `403` naming this requirement before the body is read, and the
-  repository's `http.receivepack` is set to `false`. Clones and fetches are served as before (owner
-  question 2). A probe that cannot answer (an unwritable `refs/` directory) refuses pushes with
-  `500 push gate unavailable` and is retried on the next request. Note that a case-sensitive APFS
-  volume is still normalization-insensitive and is refused too. A deployment that serves pushes from
-  such storage today, against this requirement, has them refused after the upgrade; move the
-  repositories to a case-sensitive, normalization-sensitive filesystem. SMP's own gateway has no
-  probe yet (SMP companion epic).
+  endpoint probes each repository's storage on the first push request it serves for it (once per
+  repository and process lifetime; reads never run or wait on the probe): in a fresh directory under
+  `<git-common-dir>/refs/heads` — where the protected branches' loose ref files live — whose name
+  starts with `.` (git's ref iteration, `pack-refs` and the ref advertisement skip it; no ref name
+  can address it; it is removed at once), it creates three pairs of names a folding filesystem
+  identifies — ASCII case, Unicode NFC/NFD and the Kelvin sign against `k` — and reads them back. A
+  repository on storage that folds any pair has receive-pack refused: the push advertisement and the
+  push answer `403` naming this requirement before the body is read, and the repository's
+  `http.receivepack` is set to `false`. Clones and fetches are served as before (owner question 2).
+  A probe that cannot answer (an unwritable `refs/heads` directory) refuses pushes with `500 push
+  gate unavailable`; that refusal is reused for 30 seconds before a push probes again. A
+  case-sensitive APFS volume is still normalization-insensitive and is refused too. A **reftable**
+  repository (`git init --ref-format=reftable`) keeps no ref files and so cannot alias ref names,
+  but has no `refs/heads` directory: the probe runs in `refs/` and refuses it on folding storage as
+  well (a fail-closed false positive). A deployment that serves pushes from such storage today,
+  against this requirement, has them refused after the upgrade; move the repositories to a
+  case-sensitive, normalization-sensitive filesystem. SMP's own gateway has no probe yet (SMP
+  companion epic).
 
 ### Git Ref Arguments
 - **Grammar** (INIT-023 TASK-002; audit F10, P3-32, P3-36): the git client
