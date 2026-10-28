@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,13 +105,13 @@ func streamedListFiles(output []byte, chunk int, pattern string) ([]string, *Git
 	if pattern != "" {
 		keep = func(p string) bool { return matchSimpleGlob(pattern, p) }
 	}
-	s := newPathCollector("list_files", math.MaxInt64, keep)
+	s := newPathCollector("list_files", unboundedForTest, keep)
 	feedForTest(&s.nulRecords, output, chunk)
 	if err := s.refusal(); err != nil {
 		return nil, err
 	}
-	if s.unterminated() {
-		return nil, unterminatedListing()
+	if err := endOfStream(s, unterminatedListing); err != nil {
+		return nil, err
 	}
 	return s.paths, nil
 }

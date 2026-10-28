@@ -2,9 +2,7 @@ package git
 
 import (
 	"context"
-	"errors"
 	"math"
-	"strings"
 	"testing"
 )
 
@@ -61,66 +59,82 @@ func StderrKeptForTest(p []byte, chunk int) string {
 
 // ParseNameStatusZForTest runs Diff's streamed -z parser
 // (nameStatusCollector) over a whole output, written in one piece, with
-// no listing limit. It returns the parse error the way the buffered
-// parser it replaced did (INIT-023 TASK-003): a stream that does not end
-// in NUL is "unterminated record" whatever else is wrong with it.
+// no bounds, and ends it as Diff does (refusal, endOfStream, finish). It
+// returns the parse error itself (errMalformedDiff-wrapped), as the
+// buffered parser it replaced did.
 func ParseNameStatusZForTest(out string) ([]FileDiff, error) {
 	return ParseNameStatusZChunkedForTest(out, len(out))
 }
+
+// unboundedForTest is no limit at all.
+var unboundedForTest = listingBounds{bytes: math.MaxInt64, records: math.MaxInt64}
 
 // ParseNameStatusZChunkedForTest is ParseNameStatusZForTest with the
 // output written in chunk-sized writes (as os/exec's copy would hand it
 // over), so a test can split records at every byte.
 func ParseNameStatusZChunkedForTest(out string, chunk int) ([]FileDiff, error) {
-	if out == "" {
-		return nil, nil
-	}
-	if !strings.HasSuffix(out, "\x00") {
-		return nil, unterminatedDiff().Err
-	}
-	s := newNameStatusCollector("diff", math.MaxInt64)
+	s := newNameStatusCollector("diff", unboundedForTest)
 	feedForTest(&s.nulRecords, []byte(out), chunk)
-	if err := s.finish(); err != nil {
-		if s.parse != nil {
-			return nil, s.parse
-		}
-		return nil, err
+	err := s.refusal()
+	if err == nil {
+		err = endOfStream(s, unterminatedDiff)
+	}
+	if err == nil {
+		err = s.finish()
+	}
+	if err != nil {
+		return nil, err.Err
 	}
 	return s.diffs, nil
 }
 
 // ListedForTest feeds a `ls-tree -r --name-only -z` output to ListFiles'
-// streamed collector in chunk-sized writes and returns what it kept,
-// with the refusal or the truncation error ListFiles would return.
-func ListedForTest(out []byte, chunk int, limit int64, keep func(string) bool) ([]string, error) {
-	s := newPathCollector("list_files", limit, keep)
-	feedForTest(&s.nulRecords, out, chunk)
-	if err := s.refusal(); err != nil {
-		return nil, err
+// streamed collector in chunk-sized writes, bounded to limit kept bytes
+// and records records (<= 0: none), and ends it as runListing does,
+// returning what it kept or the refusal ListFiles would return. carry
+// reports the most bytes the collector ever carried for one unfinished
+// record.
+func ListedForTest(out []byte, chunk int, limit, records int64, keep func(string) bool) (paths []string, carry int, err error) {
+	b := listingBounds{bytes: limit, records: records}
+	if records <= 0 {
+		b.records = math.MaxInt64
 	}
-	if s.unterminated() {
-		return nil, unterminatedListing()
+	s := newPathCollector("list_files", b, keep)
+	carry = feedForTest(&s.nulRecords, out, chunk)
+	if gerr := s.refusal(); gerr != nil {
+		return nil, carry, gerr
 	}
-	return s.paths, nil
+	if gerr := endOfStream(s, unterminatedListing); gerr != nil {
+		return nil, carry, gerr
+	}
+	return s.paths, carry, nil
 }
 
-func feedForTest(s *nulRecords, p []byte, chunk int) {
+// feedForTest writes p to s in chunk-sized writes until s refuses one,
+// and returns the most bytes s carried between writes.
+func feedForTest(s *nulRecords, p []byte, chunk int) (maxCarry int) {
 	if chunk <= 0 {
 		chunk = len(p)
 	}
 	for len(p) > 0 {
 		n := min(chunk, len(p))
 		if _, err := s.Write(p[:n]); err != nil {
-			return
+			return maxCarry
 		}
+		maxCarry = max(maxCarry, len(s.carry))
 		p = p[n:]
 	}
+	return maxCarry
 }
 
 // CountedForTest feeds a `git diff --name-only -z` output to
-// CountChangedPaths' counter in chunk-sized writes.
-func CountedForTest(out []byte, chunk int) (int, error) {
-	s := &pathCounter{op: "count_changed_paths"}
+// CountChangedPaths' counter in chunk-sized writes (records: its ceiling,
+// <= 0 for none) and ends it as runListing does.
+func CountedForTest(out []byte, chunk int, records int64) (int, error) {
+	if records <= 0 {
+		records = math.MaxInt64
+	}
+	s := &pathCounter{op: "count_changed_paths", maxRecords: records}
 	for p := out; len(p) > 0; {
 		n := min(max(chunk, 1), len(p))
 		if _, err := s.Write(p[:n]); err != nil {
@@ -131,11 +145,16 @@ func CountedForTest(out []byte, chunk int) (int, error) {
 	if err := s.refusal(); err != nil {
 		return 0, err
 	}
-	if s.unterminated() {
-		return 0, errors.New("unterminated")
+	if err := endOfStream(s, unterminatedCount); err != nil {
+		return 0, err
 	}
 	return s.n, nil
 }
+
+// DiffLimitForTest and RecordCeilingForTest are the client's diff limit
+// and tree-listing record ceiling (diffLimit, recordCeiling).
+func (c *CLIClient) DiffLimitForTest() int64     { return c.diffLimit() }
+func (c *CLIClient) RecordCeilingForTest() int64 { return c.recordCeiling() }
 
 // ListingLimitForTest is the bound the client's streamed listings hold
 // the paths they keep to (listingLimit).

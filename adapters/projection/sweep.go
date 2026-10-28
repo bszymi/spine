@@ -157,7 +157,7 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) 
 		_, ok := rowPaths[p]
 		return ok
 	}
-	files, err := git.ListFilesKeeping(ctx, s.git, head, isRowPath)
+	files, err := git.ListFilesKeeping(ctx, s.git, head, "", isRowPath)
 	if err != nil {
 		return false, fmt.Errorf("list files at %s: %w", shortSHA(head), err)
 	}
@@ -179,7 +179,7 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) 
 		}
 		if atFrom == nil {
 			atFrom = map[string]struct{}{}
-			fromFiles, err := git.ListFilesKeeping(ctx, s.git, from, isRowPath)
+			fromFiles, err := git.ListFilesKeeping(ctx, s.git, from, "", isRowPath)
 			if err != nil {
 				log.Debug("projection: list files at the last synced commit", "from", shortSHA(from), "error", sanitizeForLog(err.Error()))
 			}

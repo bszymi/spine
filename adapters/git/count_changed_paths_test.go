@@ -113,16 +113,16 @@ func TestCountChangedPaths_UnderAllocLimit(t *testing.T) {
 func TestCountChangedPaths_StreamContract(t *testing.T) {
 	out := []byte("a.md\x00dir/b c.md\x00r\xc3\xa9.md\x00" + strings.Repeat("x", 10000) + "\x00")
 	for chunk := 1; chunk <= 64; chunk++ {
-		if n, err := git.CountedForTest(out, chunk); err != nil || n != 4 {
+		if n, err := git.CountedForTest(out, chunk, 0); err != nil || n != 4 {
 			t.Fatalf("%d-byte writes: %d, %v; want 4", chunk, n, err)
 		}
 	}
 	for _, bad := range []string{"\x00", "a\x00\x00", "a\x00b"} {
-		if _, err := git.CountedForTest([]byte(bad), 1); err == nil {
+		if _, err := git.CountedForTest([]byte(bad), 1, 0); err == nil {
 			t.Errorf("%q: no error", bad)
 		}
 	}
-	if n, err := git.CountedForTest(nil, 1); err != nil || n != 0 {
+	if n, err := git.CountedForTest(nil, 1, 0); err != nil || n != 0 {
 		t.Errorf("empty output: %d, %v", n, err)
 	}
 }

@@ -70,10 +70,10 @@ func NextID(ctx context.Context, gitClient FileLister, parentDir string, artifac
 
 	// Only the files under the parent directory are listed (INIT-024
 	// TASK-004, review finding N-6): with a git client that filters while
-	// it lists (git.PathFilterLister), a huge listing elsewhere in the tree
-	// no longer exceeds the listing limit. The loop below checks the
-	// prefix again.
-	files, err := git.ListFilesKeeping(ctx, gitClient, ref, func(file string) bool {
+	// it lists (git.PathFilterLister), git walks only that directory, so a
+	// huge listing elsewhere in the tree costs nothing. The loop below
+	// checks the prefix again.
+	files, err := git.ListFilesKeeping(ctx, gitClient, ref, scanDir, func(file string) bool {
 		return scanDir == "" || strings.HasPrefix(file, scanDir)
 	})
 	if err != nil {

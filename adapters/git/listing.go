@@ -15,15 +15,25 @@ package git
 // bound what they KEEP, not what git prints:
 //
 //   - The bytes kept — each kept path plus its NUL — stay within the
-//     client's listing limit (listingLimit), and no kept path is longer
-//     than MaxListingPathBytes. Exceeding either is the same permanent
-//     *GitError wrapping *OutputTooLargeError (ErrOutputTooLarge) as
-//     before, so a listing that cannot be held still fails closed.
+//     client's limit: listingLimit for a tree listing, diffLimit for a
+//     diff, which holds both trees' paths. Past it the listing fails with
+//     the same permanent *GitError wrapping *OutputTooLargeError
+//     (ErrOutputTooLarge) as before, so a listing that cannot be held
+//     still fails closed. There is no per-path length limit: one long path
+//     is bounded by the same total, and a cap on it would let a single
+//     path at a governed location refuse every listing of the tree (review
+//     round 1).
 //   - A path the caller does not keep (ListFiles' pattern, ListFilesFunc's
 //     predicate) is read and dropped: it costs the time to read it, not
-//     memory. The raw output size is no longer a limit.
+//     memory. The raw output size is no longer a limit; the number of
+//     records is (recordCeiling): a tree of a few small, shared subtrees
+//     expands to millions of listed paths, so a listing stops, fails
+//     closed, at a generous multiple of the checkout budget's entry count —
+//     a tree no budgeted checkout would admit. A caller that wants only
+//     one directory names it (ListFilesUnder), so git walks that subtree
+//     alone.
 //   - The one record git has not finished writing is held only up to the
-//     room the listing has left (never less than one maximal path), and
+//     room the listing has left (never less than listingCarryFloor), and
 //     git is stopped at the first refusal (the command's context is
 //     cancelled: SIGTERM, gitcmd.go).
 //
@@ -40,12 +50,22 @@ import (
 	"strings"
 )
 
-// MaxListingPathBytes is the longest path a streamed listing keeps
-// (Linux's PATH_MAX; a longer path cannot be checked out there, and
-// macOS's limit is lower). A kept path over it refuses the listing with
-// ErrOutputTooLarge (OutputTooLargeError.PerPath); a path the caller
-// drops is never held to it.
-const MaxListingPathBytes = 4096
+// listingCarryFloor is the least a listing lets one unfinished record
+// grow to, whatever room its limit has left: a record that does not fit
+// the room and is longer than this is refused before it is complete (a
+// kept record that long could not fit anyway; a dropped one costs the
+// refusal of a listing whose limit is all but used up).
+const listingCarryFloor = 4096
+
+// listingBounds is what one streamed listing may keep and read.
+type listingBounds struct {
+	bytes   int64 // kept bytes: every kept path plus its NUL
+	records int64 // records git may print, kept or not (recordCeiling)
+}
+
+// carryBound bounds the unfinished record of a listing that has kept
+// kept bytes: the room left, never less than listingCarryFloor.
+func (b listingBounds) carryBound(kept int64) int64 { return max(listingCarryFloor, b.bytes-kept) }
 
 // errStopListing is what a record stream's Write returns once it has
 // stopped: os/exec's copy goroutine then stops and closes the pipe, so git
@@ -136,33 +156,29 @@ func (s *nulRecords) unterminated() bool { return len(s.carry) > 0 }
 // keep accepts (nil keeps every path).
 type pathCollector struct {
 	nulRecords
-	op    string
-	keep  func(string) bool
-	limit int64 // kept-bytes cap
-	kept  int64 // bytes kept: every kept path plus its NUL
-	paths []string
-	err   *GitError
+	op      string
+	keep    func(string) bool
+	bounds  listingBounds
+	kept    int64 // bytes kept: every kept path plus its NUL
+	records int64 // records read, kept or not
+	paths   []string
+	err     *GitError
 }
 
-func newPathCollector(op string, limit int64, keep func(string) bool) *pathCollector {
-	s := &pathCollector{op: op, keep: keep, limit: limit}
+func newPathCollector(op string, bounds listingBounds, keep func(string) bool) *pathCollector {
+	s := &pathCollector{op: op, keep: keep, bounds: bounds}
 	s.nulRecords = nulRecords{pending: s.pendingPath, record: s.path}
 	return s
 }
 
-// pendingPath bounds a path git has not finished writing. Every path is
-// kept when there is no predicate, so one longer than
-// MaxListingPathBytes is already a refusal. With a predicate the path may
-// be dropped once complete, so it is held up to the room the listing has
-// left (never less than one maximal path): a path the caller drops costs
-// no more memory than one it keeps.
+// pendingPath bounds a path git has not finished writing to the room the
+// listing has left (listingBounds.carryBound): a path the caller drops
+// costs no more memory than one it keeps. path applies the same bound to
+// a path that ends in the write that completes it, so the verdict on a
+// long path does not depend on how the pipe chunked it.
 func (s *pathCollector) pendingPath(n int64) error {
-	bound := int64(MaxListingPathBytes)
-	if s.keep != nil {
-		bound = max(bound, s.limit-s.kept)
-	}
-	if n > bound {
-		s.err = listingTooLarge(s.op, s.limit, s.keep == nil)
+	if n > s.bounds.carryBound(s.kept) {
+		s.err = listingTooLarge(s.op, s.bounds.bytes, false)
 		return errStopListing
 	}
 	return nil
@@ -173,17 +189,21 @@ func (s *pathCollector) path(rec []byte) error {
 		s.err = &GitError{Kind: ErrKindPermanent, Op: s.op, Message: "empty path in `git ls-tree -z` output"}
 		return errStopListing
 	}
+	if s.records++; s.records > s.bounds.records {
+		s.err = listingTooLarge(s.op, s.bounds.records, true)
+		return errStopListing
+	}
+	if int64(len(rec)) > s.bounds.carryBound(s.kept) {
+		s.err = listingTooLarge(s.op, s.bounds.bytes, false)
+		return errStopListing
+	}
 	p := string(rec)
 	if s.keep != nil && !s.keep(p) {
 		return nil
 	}
-	if len(p) > MaxListingPathBytes {
-		s.err = listingTooLarge(s.op, MaxListingPathBytes, true)
-		return errStopListing
-	}
 	s.kept += int64(len(p)) + 1
-	if s.kept > s.limit {
-		s.err = listingTooLarge(s.op, s.limit, false)
+	if s.kept > s.bounds.bytes {
+		s.err = listingTooLarge(s.op, s.bounds.bytes, false)
 		return errStopListing
 	}
 	s.paths = append(s.paths, p)
@@ -194,23 +214,20 @@ func (s *pathCollector) refusal() *GitError { return s.err }
 
 // listingTooLarge is the size refusal of a streamed listing: the
 // envelope runSink has always returned for an overrun ("output exceeds
-// read limit", matching ErrOutputTooLarge). perPath marks a single kept
-// path over MaxListingPathBytes (Limit is then that bound).
-func listingTooLarge(op string, limit int64, perPath bool) *GitError {
-	if perPath {
-		limit = MaxListingPathBytes
-	}
+// read limit", matching ErrOutputTooLarge). records marks the record
+// ceiling (Limit is then a record count).
+func listingTooLarge(op string, limit int64, records bool) *GitError {
 	return &GitError{Kind: ErrKindPermanent, Op: op, Message: "output exceeds read limit",
-		Err: &OutputTooLargeError{Op: op, Limit: limit, PerPath: perPath}}
+		Err: &OutputTooLargeError{Op: op, Limit: limit, Records: records}}
 }
 
 // --- Diff ---
 
 // nameStatusCollector parses `git diff --name-status -z` as a stream:
 // records of "<status>\0<path>\0", or "<status>\0<src>\0<dst>\0" for a
-// status starting with R (rename) or C (copy); see parseNameStatusZ for
-// the mapping. Every record is kept, so every path is held to
-// MaxListingPathBytes and the kept bytes to the listing limit.
+// status starting with R (rename) or C (copy); see errMalformedDiff for
+// the mapping. Every record is kept: the kept bytes are held to the diff
+// limit and the records to the diff's record ceiling.
 //
 // A malformed stream is an error and returns no records: one mis-split
 // would shift every later record onto the wrong path. The checks are the
@@ -220,7 +237,7 @@ func listingTooLarge(op string, limit int64, perPath bool) *GitError {
 type nameStatusCollector struct {
 	nulRecords
 	op     string
-	limit  int64
+	bounds listingBounds
 	kept   int64
 	diffs  []FileDiff
 	fields []string // the fields of the record being read: status, then paths
@@ -228,15 +245,17 @@ type nameStatusCollector struct {
 	parse  error // the malformed-stream cause, wrapped in err
 }
 
-func newNameStatusCollector(op string, limit int64) *nameStatusCollector {
-	s := &nameStatusCollector{op: op, limit: limit, fields: make([]string, 0, 3)}
+func newNameStatusCollector(op string, bounds listingBounds) *nameStatusCollector {
+	s := &nameStatusCollector{op: op, bounds: bounds, fields: make([]string, 0, 3)}
 	s.nulRecords = nulRecords{pending: s.pendingField, record: s.field}
 	return s
 }
 
+// pendingField bounds a field git has not finished writing to the room
+// the diff has left (listingBounds.carryBound).
 func (s *nameStatusCollector) pendingField(n int64) error {
-	if n > MaxListingPathBytes {
-		s.err = listingTooLarge(s.op, MaxListingPathBytes, true)
+	if n > s.bounds.carryBound(s.kept) {
+		s.err = listingTooLarge(s.op, s.bounds.bytes, false)
 		return errStopListing
 	}
 	return nil
@@ -249,7 +268,15 @@ func (s *nameStatusCollector) malformed(format string, args ...any) error {
 }
 
 func (s *nameStatusCollector) field(rec []byte) error {
+	if int64(len(rec)) > s.bounds.carryBound(s.kept) { // as pendingPath's, whatever the chunking
+		s.err = listingTooLarge(s.op, s.bounds.bytes, false)
+		return errStopListing
+	}
 	if len(s.fields) == 0 {
+		if int64(len(s.diffs)) >= s.bounds.records {
+			s.err = listingTooLarge(s.op, s.bounds.records, true)
+			return errStopListing
+		}
 		status := string(rec)
 		if !validDiffStatus(status) {
 			return s.malformed("unexpected status field at record %d", len(s.diffs)+1)
@@ -257,13 +284,9 @@ func (s *nameStatusCollector) field(rec []byte) error {
 		s.fields = append(s.fields, status)
 		return nil
 	}
-	if len(rec) > MaxListingPathBytes {
-		s.err = listingTooLarge(s.op, MaxListingPathBytes, true)
-		return errStopListing
-	}
 	s.kept += int64(len(rec)) + 1
-	if s.kept > s.limit {
-		s.err = listingTooLarge(s.op, s.limit, false)
+	if s.kept > s.bounds.bytes {
+		s.err = listingTooLarge(s.op, s.bounds.bytes, false)
 		return errStopListing
 	}
 	s.fields = append(s.fields, string(rec))
@@ -316,12 +339,14 @@ func (s *nameStatusCollector) refusal() *GitError { return s.err }
 // pathCounter counts the NUL-terminated records of `git diff --name-only
 // -z` and keeps none of them: it holds only whether the record in
 // progress has started, so its memory is constant whatever git prints.
+// Past maxRecords (the diff's record ceiling) it stops and fails closed.
 type pathCounter struct {
-	op      string
-	n       int
-	partial bool // bytes of a record seen since the last NUL
-	stop    context.CancelFunc
-	err     *GitError
+	op         string
+	n          int
+	maxRecords int64
+	partial    bool // bytes of a record seen since the last NUL
+	stop       context.CancelFunc
+	err        *GitError
 }
 
 func (s *pathCounter) Write(p []byte) (int, error) {
@@ -342,7 +367,13 @@ func (s *pathCounter) Write(p []byte) (int, error) {
 			}
 			return 0, errStopListing
 		}
-		s.n++
+		if s.n++; int64(s.n) > s.maxRecords {
+			s.err = listingTooLarge(s.op, s.maxRecords, true)
+			if s.stop != nil {
+				s.stop()
+			}
+			return 0, errStopListing
+		}
 		s.partial = false
 		p = p[i+1:]
 	}
@@ -363,8 +394,8 @@ func (s *pathCounter) unterminated() bool               { return s.partial }
 //  2. the stream's own refusal: git was stopped by us, so its exit
 //     status and stderr say nothing;
 //  3. a failed command, classified from git's stderr;
-//  4. output that ended inside a record (the refusal unterminated
-//     builds).
+//  4. output that ended inside a record (endOfStream: the refusal
+//     unterminated builds).
 //
 // The command runs in the environment runSink gives its class
 // (commandEnv): the pinned delta-base cache and the C locale, and for a
@@ -397,6 +428,17 @@ func (c *CLIClient) runListing(ctx context.Context, op string, out recordStream,
 		gitErr.Err = runErr
 		return gitErr
 	}
+	if err := endOfStream(out, unterminated); err != nil {
+		return err
+	}
+	return nil
+}
+
+// endOfStream is a listing's verdict on the end of output git finished
+// cleanly: one that ended inside a record is truncated, the refusal
+// unterminated builds. Every streamed listing, and the test shims that
+// feed collectors directly, end through it.
+func endOfStream(out recordStream, unterminated func() *GitError) *GitError {
 	if out.unterminated() {
 		return unterminated()
 	}

@@ -95,10 +95,11 @@ func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string, artif
 	// Only the candidates the loop below can use are listed (INIT-024
 	// TASK-004, review finding N-6): with a git client that filters while
 	// it lists (git.PathFilterLister), a tree with a huge listing and few
-	// artifacts no longer exceeds the listing limit. The loop applies the
-	// same checks again, so the result is the one an unfiltered listing
-	// gives.
-	files, err := git.ListFilesKeeping(ctx, gitClient, ref, func(file string) bool {
+	// artifacts no longer exceeds the listing limit, and with an
+	// artifacts directory git walks only that subtree. The loop applies
+	// the same checks again, so the result is the one an unfiltered
+	// listing gives.
+	files, err := git.ListFilesKeeping(ctx, gitClient, ref, strings.TrimSuffix(prefix, "/"), func(file string) bool {
 		return discoveryCandidate(file, prefix)
 	})
 	if err != nil {
@@ -461,8 +462,9 @@ func DiscoverWorkflows(ctx context.Context, gitClient git.GitClient, ref string,
 	}
 
 	// Listed through the same filter as DiscoverAll's (INIT-024 TASK-004):
-	// only workflow definitions inside the directory are kept.
-	files, err := git.ListFilesKeeping(ctx, gitClient, ref, func(file string) bool {
+	// only workflow definitions inside the directory are kept, and git
+	// walks only its workflows/ subtree (IsWorkflowPath).
+	files, err := git.ListFilesKeeping(ctx, gitClient, ref, prefix+"workflows", func(file string) bool {
 		if prefix != "" && !strings.HasPrefix(file, prefix) {
 			return false
 		}

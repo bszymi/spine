@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -41,6 +42,9 @@ type GitClient interface {
 // (SMP's gitread.Client).
 type PathFilterLister interface {
 	ListFilesFunc(ctx context.Context, ref string, keep func(path string) bool) ([]string, error)
+	// ListFilesUnder is ListFilesFunc limited to the paths under dir
+	// (review round 1): git walks only that subtree.
+	ListFilesUnder(ctx context.Context, ref, dir string, keep func(path string) bool) ([]string, error)
 }
 
 // FileLister is the one GitClient method ListFilesKeeping needs.
@@ -49,21 +53,35 @@ type FileLister interface {
 }
 
 // ListFilesKeeping lists, in git's order, the paths at ref that keep
-// accepts (every path when keep is nil): through ListFilesFunc when gc
-// has it (PathFilterLister), else ListFiles(ref, "") filtered here —
+// accepts (every path when keep is nil), under dir when dir is not ""
+// (a repository-relative directory: only paths beginning "<dir>/"). With
+// a PathFilterLister it lists through ListFilesFunc / ListFilesUnder, so
+// only the kept paths count against the client's limit and git walks only
+// dir's subtree; otherwise through ListFiles(ref, "") filtered here —
 // exactly what every caller did before the capability, with the client's
-// limit then applying to the whole listing.
-func ListFilesKeeping(ctx context.Context, gc FileLister, ref string, keep func(path string) bool) ([]string, error) {
+// limit then applying to the whole listing. keep should enforce any
+// prefix it relies on itself: dir only narrows what git walks.
+func ListFilesKeeping(ctx context.Context, gc FileLister, ref, dir string, keep func(path string) bool) ([]string, error) {
 	if l, ok := gc.(PathFilterLister); ok {
+		if dir != "" {
+			return l.ListFilesUnder(ctx, ref, dir, keep)
+		}
 		return l.ListFilesFunc(ctx, ref, keep)
 	}
 	files, err := gc.ListFiles(ctx, ref, "")
-	if err != nil || keep == nil {
-		return files, err
+	if err != nil {
+		return nil, err
+	}
+	prefix := ""
+	if d := strings.TrimSuffix(dir, "/"); d != "" && d != "." {
+		prefix = d + "/"
+	}
+	if keep == nil && prefix == "" {
+		return files, nil
 	}
 	var kept []string
 	for _, f := range files {
-		if keep(f) {
+		if strings.HasPrefix(f, prefix) && (keep == nil || keep(f)) {
 			kept = append(kept, f)
 		}
 	}

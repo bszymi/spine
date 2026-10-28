@@ -77,6 +77,7 @@ import (
 //	ReadFile            --literal-pathspecs ls-tree -l -z --full-tree [eoo] <ref'> <path>, then cat-file -t <oid>, cat-file blob <oid>
 //	                    (rev-parse --verify --quiet [eoo] <ref'>^{tree} only after a failed ls-tree)
 //	ListFiles           ls-tree -r --name-only -z [eoo] <ref'>
+//	ListFilesUnder      --literal-pathspecs ls-tree -r --name-only -z --full-tree [eoo] <ref'> <dir>   (whole-tree argv for "" or an unclean dir)
 //	TreeEntryType       --literal-pathspecs ls-tree -z --full-tree [eoo] <ref'> <path>   (no "--": after eoo it is a pathspec)
 //	RefSHA              rev-parse --verify [eoo] <ref'>   (no call at all for an existing branch)
 //	MergeBase           merge-base [eoo] <a'> <b'>
@@ -1045,9 +1046,9 @@ func (c *CLIClient) DeleteBranch(ctx context.Context, name string) error {
 //
 // The output is parsed as git writes it (INIT-024 TASK-004, review
 // finding N-6; listing.go): what Diff holds is the paths it returns, held
-// to the listing limit (listingLimit) and each to MaxListingPathBytes;
-// past either it is the permanent ErrOutputTooLarge refusal it always
-// was, and the raw output is never buffered.
+// to the diff limit (diffLimit: both trees' worth of paths) and the
+// diff's record ceiling; past either it is the permanent ErrOutputTooLarge
+// refusal it always was, and the raw output is never buffered.
 func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, error) {
 	if err := checkRev("diff", "from", from); err != nil {
 		return nil, err
@@ -1063,7 +1064,7 @@ func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, erro
 	if err != nil {
 		return nil, err
 	}
-	s := newNameStatusCollector("diff", c.listingLimit())
+	s := newNameStatusCollector("diff", c.diffBounds())
 	if err := c.runListing(ctx, "diff", s, unterminatedDiff,
 		"diff", "--name-status", "-z", "--ignore-submodules=none", "--end-of-options", fromRev, toRev, "--"); err != nil {
 		return nil, err
@@ -1113,7 +1114,7 @@ func (c *CLIClient) CountChangedPaths(ctx context.Context, from, to string) (int
 	if err != nil {
 		return 0, err
 	}
-	s := &pathCounter{op: op}
+	s := &pathCounter{op: op, maxRecords: c.diffRecordCeiling()}
 	if err := c.runListing(ctx, op, s, unterminatedCount,
 		"diff", "--name-only", "-z", "--no-renames", "--ignore-submodules=none", "--end-of-options", fromRev, toRev, "--"); err != nil {
 		return 0, err
@@ -1681,16 +1682,17 @@ func (c *CLIClient) WriteAndStageFile(ctx context.Context, path, content string)
 // The listing is parsed as git writes it and the pattern applied while it
 // streams (INIT-024 TASK-004, review finding N-6; listing.go): what
 // ListFiles holds is the paths it returns, within the listing limit
-// (listingLimit) and each within MaxListingPathBytes, and a path the
-// pattern drops costs no memory. Past either bound it is the permanent
-// ErrOutputTooLarge refusal it always was; the raw size of the listing is
-// no longer a limit. ListFilesFunc takes a predicate instead of a pattern.
+// (listingLimit), and a path the pattern drops costs no memory. Past it,
+// or past the record ceiling (recordCeiling, kept and dropped records
+// alike), it is the permanent ErrOutputTooLarge refusal it always was; the
+// raw size of the listing is no longer a limit. ListFilesFunc takes a
+// predicate instead of a pattern, ListFilesUnder a directory as well.
 func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]string, error) {
 	var keep func(string) bool
 	if pattern != "" {
 		keep = func(p string) bool { return matchSimpleGlob(pattern, p) }
 	}
-	return c.listFiles(ctx, ref, keep)
+	return c.listFiles(ctx, ref, "", keep)
 }
 
 // ListFilesFunc is ListFiles with a predicate: it returns, in git's
@@ -1699,10 +1701,40 @@ func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]strin
 // path as git lists it, so the listing limit bounds only the paths it
 // keeps: a tree with a huge listing and a few wanted paths lists them.
 func (c *CLIClient) ListFilesFunc(ctx context.Context, ref string, keep func(path string) bool) ([]string, error) {
-	return c.listFiles(ctx, ref, keep)
+	return c.listFiles(ctx, ref, "", keep)
 }
 
-func (c *CLIClient) listFiles(ctx context.Context, ref string, keep func(string) bool) ([]string, error) {
+// ListFilesUnder is ListFilesFunc for the paths under one directory of
+// the tree (PathFilterLister, INIT-024 TASK-004 review round 1): dir is
+// repository-relative ("" or "." is the whole tree; a trailing "/" is
+// dropped), and only paths beginning "<dir>/" that keep accepts are
+// returned. dir reaches git as a literal pathspec
+// (`--literal-pathspecs ls-tree -r --name-only -z --full-tree [eoo] <ref'>
+// <dir>`), so git walks that subtree alone and the rest of the tree costs
+// nothing; a dir that is not a clean relative path (absolute, "..", empty
+// components) is never passed to git — the whole tree is listed and
+// filtered instead, with the same result.
+func (c *CLIClient) ListFilesUnder(ctx context.Context, ref, dir string, keep func(path string) bool) ([]string, error) {
+	return c.listFiles(ctx, ref, dir, keep)
+}
+
+// listingDir splits a ListFilesUnder directory into the prefix every
+// returned path must have ("" for the whole tree) and the pathspec git is
+// given ("" when there is none: the whole tree, or a dir no literal
+// pathspec names safely).
+func listingDir(dir string) (prefix, pathspec string) {
+	d := strings.TrimSuffix(dir, "/")
+	if d == "" || d == "." {
+		return "", ""
+	}
+	if pathpkg.IsAbs(d) || pathpkg.Clean(d) != d || d == ".." || strings.HasPrefix(d, "../") ||
+		strings.HasPrefix(d, "-") || strings.ContainsRune(d, 0) {
+		return d + "/", ""
+	}
+	return d + "/", d
+}
+
+func (c *CLIClient) listFiles(ctx context.Context, ref, dir string, keep func(string) bool) ([]string, error) {
 	if err := checkRev("list_files", "ref", ref); err != nil {
 		return nil, err
 	}
@@ -1710,9 +1742,17 @@ func (c *CLIClient) listFiles(ctx context.Context, ref string, keep func(string)
 	if err != nil {
 		return nil, err
 	}
-	s := newPathCollector("list_files", c.listingLimit(), keep)
-	if err := c.runListing(ctx, "list_files", s, unterminatedListing,
-		"ls-tree", "-r", "--name-only", "-z", "--end-of-options", rev); err != nil {
+	prefix, pathspec := listingDir(dir)
+	if prefix != "" {
+		inner := keep
+		keep = func(p string) bool { return strings.HasPrefix(p, prefix) && (inner == nil || inner(p)) }
+	}
+	args := []string{"ls-tree", "-r", "--name-only", "-z", "--end-of-options", rev}
+	if pathspec != "" {
+		args = []string{"--literal-pathspecs", "ls-tree", "-r", "--name-only", "-z", "--full-tree", "--end-of-options", rev, pathspec}
+	}
+	s := newPathCollector("list_files", c.listingBounds(), keep)
+	if err := c.runListing(ctx, "list_files", s, unterminatedListing, args...); err != nil {
 		return nil, err
 	}
 	return s.paths, nil
