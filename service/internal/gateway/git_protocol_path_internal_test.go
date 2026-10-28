@@ -2,13 +2,11 @@ package gateway
 
 // INIT-024 TASK-004 (TASK-006 security review item 2): /git serves only the
 // exact protocol paths of the repository a request resolved to. The
-// handler's classification matched suffixes, so `/git/<ws>/spine/.git/
-// info/refs` reached git-http-backend with `.git` as the repository — the
-// primary repository is non-bare — and so would any other git directory
-// inside the tree, for a trusted peer token-less. The gateway now
-// classifies push and read on the git path it hands the handler, so the
-// two decide on the same bytes; a push still never takes the trusted
-// read bypass.
+// handler's classification matched suffixes, so a path prefix inside the
+// served (non-bare) primary repository's tree reached git-http-backend as a
+// repository, for a trusted peer token-less. The gateway now classifies
+// push and read on the git path it hands the handler, so the two decide on
+// the same bytes; a push still never takes the trusted read bypass.
 
 import (
 	"context"

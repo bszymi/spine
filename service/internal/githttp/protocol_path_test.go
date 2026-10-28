@@ -2,18 +2,15 @@ package githttp
 
 // INIT-024 TASK-004 (TASK-006 security review item 2): the handler serves
 // exactly the protocol paths of the repository it was handed. The
-// classification used to match path SUFFIXES (".../info/refs", any GET),
-// and git-http-backend takes everything in PATH_INFO before the protocol
-// part as a directory under GIT_PROJECT_ROOT and serves it as a
-// repository: in the primary (non-bare) repository "/.git/info/refs"
-// reached git-http-backend as the repository's own git directory, and any
-// other git directory inside the tree (a submodule's under .git/modules,
-// a nested clone) was reachable the same way — with a trusted peer's
-// token-less read, too. Dot segments reached git-http-backend, whose alias
-// check refused them with a 500 (TASK-006's residual). Now only the paths
-// git-http-backend serves at the repository root are reads or pushes;
-// every other path — a prefix, a dot segment, a doubled or trailing slash —
-// is neither, and ServeHTTP refuses it (403) before CGI.
+// classification used to match path SUFFIXES (any GET was a read), and
+// git-http-backend serves the directory a path names before its protocol
+// part, under GIT_PROJECT_ROOT, as a repository: a path prefix inside the
+// served tree reached git-http-backend as a repository (another git
+// directory inside the working tree), for a trusted peer token-less too.
+// Dot segments reached git-http-backend, whose alias check refused them
+// with a 500 (TASK-006's residual). Now only the paths git-http-backend
+// serves at the repository root are reads or pushes; every other path is
+// neither, and ServeHTTP refuses it (403) before CGI.
 
 import (
 	"context"

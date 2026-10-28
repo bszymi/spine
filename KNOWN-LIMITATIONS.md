@@ -953,17 +953,19 @@ The following limitations have been resolved:
   (TASK-006 owner question 2).
 - **Only the served repository's protocol paths reach `git-http-backend`** (INIT-024 TASK-004,
   from TASK-006's security review). The handler's read and push classification used to match path
-  suffixes, and `git-http-backend` serves whatever directory precedes the protocol part of the path
-  as a repository: `/git/<ws>/spine/.git/info/refs` reached it with the primary (non-bare)
-  repository's `.git` as the repository, and any other git directory inside the tree (a
-  submodule's under `.git/modules`, a nested clone) was reachable the same way, also token-less for
-  a trusted peer — within the bound workspace only. Now a read or a push is exactly one of the
-  paths `git-http-backend` serves at the repository root (`/info/refs`, `/git-upload-pack`,
-  `/git-receive-pack`, `/HEAD`, `/objects/info/{packs,alternates,http-alternates}`, a loose object
-  or a pack/idx by its full id), and the gateway classifies on the same path it hands the handler.
-  Any other path — a prefix, a `.` or `..` segment, a doubled or trailing slash — is refused with
-  `403` before `git-http-backend` runs; TASK-006's `..` residual (refused only by
-  `git-http-backend`'s own alias check, with a `500`) is closed with it.
+  suffixes, and `git-http-backend` serves the directory a request path names before its protocol
+  part as a repository: a path prefix inside the served tree reached it as a repository — another
+  git directory inside the working tree — also token-less for a trusted peer, within the bound
+  workspace only. Now a read or a push is exactly one of the paths `git-http-backend` serves at the
+  repository root (`/info/refs`, `/git-upload-pack`, `/git-receive-pack`, `/HEAD`,
+  `/objects/info/{packs,alternates,http-alternates}`, a loose object or a pack/idx by its full id),
+  relative to the repository the gateway resolved, and the gateway classifies push and read on the
+  same path it hands the handler. Any other git path — a prefix, a `.` or `..` segment, a doubled
+  or trailing slash inside it — is refused with `403` before `git-http-backend` runs; TASK-006's
+  `..` residual (refused only by `git-http-backend`'s own alias check, with a `500`) is closed with
+  it. Through the gateway an empty path segment where the repository segment goes (a doubled slash
+  right after the workspace) is an empty repository id, which names the primary repository as it
+  always has, so that request is the primary's own protocol path.
 - **Residual: `SPINE_GIT_HTTP_DEV_NO_AUTH` is not workspace-scoped.** The development flag (accepted
   only with `SPINE_ENV=development`) lets every client read every workspace, in every mode.
 - **Residual: a single-mode server without an auth service tells workspaces apart.** The one
@@ -1238,34 +1240,43 @@ The following limitations have been resolved:
 - **Listings bound the paths they keep** (INIT-024 TASK-004; review finding N-6). A listing keeps
   the paths its caller asked for — `ListFiles`' pattern, or `ListFilesFunc`'s predicate, applied
   while git lists — and drops the rest as they arrive; `Diff` keeps every path it returns. What is
-  kept (each path plus its NUL) is held to the listing limit: `git.WithMaxOutputBytes` when the
-  embedder sets it, else `git.DefaultMaxListingBytes` (~17.2 MiB: the checkout budget's default
-  16 MiB of path bytes, one byte per default entry and 1 MiB of margin), and on a client that
-  carries a checkout budget never less than that budget's path bytes + entries + 1 MiB — so a tree
-  any budgeted merge admits always lists in full. A kept path longer than 4,096 bytes
-  (`git.MaxListingPathBytes`, Linux's `PATH_MAX`) refuses the listing; a dropped one never does.
-  Past either bound the listing fails closed with the same permanent `git.ErrOutputTooLarge`
-  (`OutputTooLargeError.PerPath` for the path bound). Artifact and workflow discovery
-  (`FullRebuild`), the first sync's workflow-row sweep, the branch-protection lookup and `NextID`
-  keep only the paths they use, through the optional `git.PathFilterLister` capability
-  (`git.ListFilesKeeping` falls back to `ListFiles` for a client without it), so a commit whose
-  listing is huge but which holds few governed files projects normally. Before, a merged commit
-  whose `ls-tree -r` printed more than 16 MiB (about 160k files, or a few thousand deep paths — a
-  few KB as a pack) failed every rebuild and every sync's sweep until it was reverted.
-- **Residual — a sync window whose changed paths alone exceed the listing limit fails closed.**
+  kept (each path plus its NUL) is held to a limit: `git.WithMaxOutputBytes` when the embedder sets
+  it; otherwise, for a tree listing, `git.DefaultMaxListingBytes` (~17.2 MiB: the checkout budget's
+  default 16 MiB of path bytes, one byte per default entry and 1 MiB of margin), and for a diff,
+  which holds both trees' paths, `git.DefaultMaxDiffBytes` (~33.4 MiB: twice that, plus the
+  margin); on a client that carries a checkout budget never less than what that budget admits —
+  so a tree any budgeted merge admits always lists in full, and one merge's diff always fits. No
+  single path has a length limit of its own (review round 1: a per-path cap let one long governed
+  path refuse every listing of its tree); one unfinished record is held only up to the room the
+  listing has left (at least 4 KiB). Past the limit the listing fails closed with the same
+  permanent `git.ErrOutputTooLarge`. Artifact and workflow discovery (`FullRebuild`), the first
+  sync's workflow-row sweep and `NextID` keep only the paths they use, through the optional
+  `git.PathFilterLister` capability (`git.ListFilesKeeping` falls back to `ListFiles` for a client
+  without it), and the branch-protection lookup by its `ListFiles` pattern, so a commit whose listing is huge but which holds few
+  governed files projects normally. Before, a merged commit whose `ls-tree -r` printed more than
+  16 MiB (about 160k files, or a few thousand deep paths — a few KB as a pack) failed every rebuild
+  and every sync's sweep until it was reverted.
+- **Listings stop at a record ceiling** (INIT-024 TASK-004 review round 1). With no bound on the
+  raw output, a tree of a few small objects whose shared subtrees expand to millions of listed
+  paths would cost one parse per path. So a tree listing fails closed (`git.ErrOutputTooLarge`,
+  `OutputTooLargeError.Records`) past 4 times the checkout budget's entry count — the client's
+  budget, else the default's: 800,000 records — and a diff or the evidence count past twice that,
+  whether the records are kept or dropped. The budget counts directories too, so only a tree no
+  budgeted checkout would admit reaches it. Callers that want one directory name it
+  (`ListFilesUnder`: discovery with an artifacts directory, workflow discovery, `NextID`), and git
+  then walks only that subtree; a repository-root discovery lists the whole tree under the ceiling.
+- **Residual — a sync window whose changed paths alone exceed the diff limit fails closed.**
   `IncrementalSync` diffs the last synced commit against head, and `Diff` keeps every path, so a
   window that adds or removes more than the limit's worth of paths leaves the sync state `error`
   at the previous commit; every later tick fails the same way. An operator rebuild
   (`POST /api/v1/system/rebuild`, or `FullRebuild`) recovers it — it lists only the governed paths
-  — and later windows sync normally. With a checkout budget (`spine serve`) one merge's diff is at
-  most its two trees' path bytes, so a window over the default limit takes a near-budget tree
-  replaced wholesale, or many merges between two syncs. Falling back to a rebuild automatically is
-  a follow-up.
-- **Residual — more governed candidates than the limit, or one over 4,096 bytes.** A tree whose
-  `.md` and workflow paths alone exceed the listing limit, or which holds a governed path longer
-  than 4,096 bytes, still fails `FullRebuild` closed. Neither can come in through a governed merge
-  in standalone: the merge's governance guard runs `Diff`, which refuses the same path, and the
-  budget bounds the bytes.
+  — and later windows sync normally. With a checkout budget (`spine serve`) one merge's diff always
+  fits the default limit, so a window over it takes many large merges between two syncs, or an
+  embedder whose explicit `WithMaxOutputBytes` is smaller. Falling back to a rebuild automatically
+  is a follow-up (INIT-024 TASK-010).
+- **Residual — more governed candidates than the limit.** A tree whose `.md` and workflow paths
+  alone exceed the listing limit (or the record ceiling) still fails `FullRebuild` closed. In
+  standalone no governed merge can bring one in: the budget bounds both.
 - **`diff` runs without `GIT_ALLOC_LIMIT`.** Rename detection loads both blobs of a candidate
   pair, and a legitimate large rename on `main` must not fail `Diff`; so a large blob already on
   the diff base can still be inflated in the git child while its rename is detected (its

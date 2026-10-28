@@ -6,15 +6,13 @@ import "regexp"
 // TASK-006's security review). git-http-backend matches its routes
 // (http-backend.c services[]) against the END of PATH_INFO and serves
 // everything before the match as a directory under GIT_PROJECT_ROOT —
-// whatever is there. This package used to match path suffixes too, so
-// "/.git/info/refs" reached git-http-backend with the primary (non-bare)
-// repository's own git directory as the repository, and any other git
-// directory inside the tree — a submodule's under .git/modules, a nested
-// clone — was reachable the same way, token-less for a trusted peer;
-// dot segments reached it as well and were refused only by its alias
-// check (a 500). The classification now accepts exactly the routes git
-// serves at the repository root, so the directory git-http-backend
-// serves is GIT_PROJECT_ROOT itself:
+// whatever is there. This package used to match path suffixes too, so a
+// path prefix inside the served tree reached git-http-backend as a
+// repository (another git directory inside the working tree), token-less
+// for a trusted peer; dot segments reached it as well and were refused
+// only by its alias check (a 500). The classification now accepts exactly
+// the routes git serves at the repository root, so the directory
+// git-http-backend serves is GIT_PROJECT_ROOT itself:
 //
 //   - "/info/refs" (GET; the query decides read or push, infoRefsServiceOf);
 //   - "/git-upload-pack" (POST, a read) and "/git-receive-pack" (POST, a
