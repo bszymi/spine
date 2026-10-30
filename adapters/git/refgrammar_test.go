@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -21,8 +22,30 @@ import (
 const (
 	sha1Hex   = "0123456789abcdef0123456789abcdef01234567"
 	sha256Hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	logFormat = "--format=%H%n%an%n%ae%n%aI%n%B%n---END---"
+	// logFormat is Log's --format with its per-call record boundary
+	// (INIT-024 TASK-004) replaced by logBoundaryPlaceholder
+	// (normaliseLogBoundary).
+	logFormat              = "--format=" + logBoundaryPlaceholder + "%n%H%n%an%n%ae%n%aI%n%B"
+	logBoundaryPlaceholder = "<boundary>"
 )
+
+// logBoundaryArg matches Log's --format argument with a fresh boundary.
+var logBoundaryArg = regexp.MustCompile(`^--format=(spine-log-[0-9a-f]{32})(%n%H%n%an%n%ae%n%aI%n%B)$`)
+
+// normaliseLogBoundary replaces the random boundary of every `git log`
+// --format argument with logBoundaryPlaceholder and returns the
+// boundaries it replaced.
+func normaliseLogBoundary(calls [][]string) (boundaries []string) {
+	for _, call := range calls {
+		if len(call) > 1 && call[0] == "log" {
+			if m := logBoundaryArg.FindStringSubmatch(call[1]); m != nil {
+				boundaries = append(boundaries, m[1])
+				call[1] = "--format=" + logBoundaryPlaceholder + m[2]
+			}
+		}
+	}
+	return boundaries
+}
 
 // grammarRepo builds a hermetic repository with main, a branch "feat"
 // one commit ahead, a lightweight tag "t1" and a bare origin, and
@@ -364,9 +387,9 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 		{"DeleteBranch", func() error { return c.DeleteBranch(ctx, "n1") },
 			[][]string{{"branch", "-D", "--end-of-options", "n1"}}},
 		{"Diff branches", func() error { _, err := c.Diff(ctx, "main", "feat"); return err },
-			[][]string{lookup("main"), lookup("feat"), {"diff", "--name-status", "-z", "--end-of-options", mainOID, featOID, "--"}}},
+			[][]string{lookup("main"), lookup("feat"), {"diff", "--name-status", "-z", "--ignore-submodules=none", "--end-of-options", mainOID, featOID, "--"}}},
 		{"Diff pass-through refs", func() error { _, err := c.Diff(ctx, "refs/tags/t1", "HEAD"); return err },
-			[][]string{{"diff", "--name-status", "-z", "--end-of-options", "refs/tags/t1", "HEAD", "--"}}},
+			[][]string{{"diff", "--name-status", "-z", "--ignore-submodules=none", "--end-of-options", "refs/tags/t1", "HEAD", "--"}}},
 		{"Log since+path", func() error { _, err := c.Log(ctx, git.LogOpts{Limit: 2, Since: "main", Path: "f.txt"}); return err },
 			[][]string{lookup("main"), {"log", logFormat, "-n2", "--end-of-options", mainOID + "..HEAD", "--", "f.txt"}}},
 		{"Log plain", func() error { _, err := c.Log(ctx, git.LogOpts{}); return err },
@@ -401,6 +424,10 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 			[][]string{entry("refs/remotes/origin/tracked"), objType(featBlob), blob(featBlob)}},
 		{"ListFiles branch", func() error { _, err := c.ListFiles(ctx, "feat", ""); return err },
 			[][]string{lookup("feat"), {"ls-tree", "-r", "--name-only", "-z", "--end-of-options", featOID}}},
+		{"ListFilesUnder branch", func() error { _, err := c.ListFilesUnder(ctx, "feat", "docs/", nil); return err },
+			[][]string{lookup("feat"), {"--literal-pathspecs", "ls-tree", "-r", "--name-only", "-z", "--full-tree", "--end-of-options", featOID, "docs"}}},
+		{"ListFilesUnder unclean dir", func() error { _, err := c.ListFilesUnder(ctx, "feat", "../docs", nil); return err },
+			[][]string{lookup("feat"), {"ls-tree", "-r", "--name-only", "-z", "--end-of-options", featOID}}},
 		{"RefSHA branch", func() error { _, err := c.RefSHA(ctx, "feat"); return err },
 			[][]string{lookup("feat")}},
 		{"RefSHA HEAD", func() error { _, err := c.RefSHA(ctx, "HEAD"); return err },
@@ -430,16 +457,23 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 		}, [][]string{{"merge", "--abort"}}},
 	}
 	var all [][]string
+	var logBoundaries []string
 	for _, st := range steps {
 		rec.Reset(t)
 		if err := st.run(); err != nil {
 			t.Errorf("%s: %v", st.name, err)
 		}
 		got := rec.Calls(t)
+		logBoundaries = append(logBoundaries, normaliseLogBoundary(got)...)
 		all = append(all, got...)
 		if !reflect.DeepEqual(got, st.want) {
 			t.Errorf("%s argv:\n got  %q\n want %q", st.name, got, st.want)
 		}
+	}
+
+	// Each Log call drew its own record boundary.
+	if len(logBoundaries) != 2 || logBoundaries[0] == logBoundaries[1] {
+		t.Errorf("Log record boundaries %q, want two distinct ones", logBoundaries)
 	}
 
 	// EnterBranch: exact lookup, detached add of the object id, switch,

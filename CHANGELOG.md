@@ -6,6 +6,94 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-002 TASK-004: read-path robustness)
+
+Closes review findings N-6, N-10, N-11 and N-12 (P3), plus two carried items: `Diff` now reports
+gitlink changes that a repository's submodule ignore settings hid, and the git HTTP endpoint now
+serves only the exact protocol paths of the repository it resolved. No runtime schema change.
+
+### Security
+
+- **Listings bound the paths they keep, not what git prints (N-6).** `ListFiles` and `Diff` parse
+  git's NUL-delimited output as it streams. A listing keeps only the paths its caller wants
+  (`ListFiles`' pattern, the new `ListFilesFunc` predicate, `ListFilesUnder`'s directory) and drops
+  the rest as they arrive; what it keeps is held to a limit in total, and past it the listing fails
+  closed with `ErrOutputTooLarge` as before. A listing also stops, failing closed, past a record
+  ceiling (4 times the checkout budget's entries; twice that for a diff), so a small tree whose
+  shared subtrees expand to millions of paths is a bounded walk. Artifact and workflow discovery,
+  the first sync's workflow-row sweep, the branch-protection lookup and `NextID` keep only the
+  paths they use (and scope git to a directory where they have one), so a merged commit with a
+  huge path listing but few governed files no longer fails every rebuild and every sync until it is
+  reverted. A sync window whose own changed paths exceed the diff limit still fails closed; an
+  operator rebuild recovers it (KNOWN-LIMITATIONS, "Git Read Bounds").
+- **No DWIM fallback for a missing reserved or home branch (N-10).** A bare revision in the
+  reserved `spine` namespace (the push-admission rule, case-fold spellings included) or naming
+  the tree's home branch, with no `refs/heads/<n>`, is `not_found`. A same-named tag or
+  `refs/<n>` used to answer for a deleted run branch in every read of it — `ReadFile`, `RefSHA`,
+  `Diff`, `ListFiles`, `TreeEntryType`, `MergeBase`, `Log{Since}`, `MeasureTree` — including the
+  evidence querier's reads of terminal runs. Every other bare name resolves as before.
+- **History records cannot be forged by a commit message (N-11).** `Log` and
+  `HasCommitWithTrailer` delimit records with a per-call random boundary (128 bits) and require
+  every record to start with a full object id; anything else fails the call. A message holding the
+  old fixed `---END---` separator and a record-shaped tail used to become another
+  `GET /api/v1/query/history` entry with an id, author, date and trailers of its choosing.
+- **The output-evidence diff loads no blob (N-12).** The changed-path count of a submit — whose
+  commit pair the run-branch author chooses — now runs `git diff --name-only -z --no-renames`
+  as a read command (`CLIClient.CountChangedPaths`: `GIT_ALLOC_LIMIT`, the pinned delta-base
+  cache) instead of the rename-detecting, allocation-unlimited `Diff`.
+- **`Diff` reports every gitlink change.** In a non-bare tree a `submodule.<name>.ignore = all` in
+  the checked-out `.gitmodules`, or `diff.ignoreSubmodules = all` in any git config, hid a gitlink
+  change from `git diff` — and so from the governance guard, the projection and the status
+  cascade. `Diff`, `CountChangedPaths` and the shared tree's untracked-obstruction check pass
+  `--ignore-submodules=none`.
+- **Git HTTP: only the served repository's protocol paths reach `git-http-backend`**
+  (standalone). Read and push are now exactly the paths `git-http-backend` serves at the
+  repository root; any other git path is refused with `403` before `git-http-backend` runs. A path
+  prefix inside the served tree used to reach it as a repository (another git directory inside the
+  working tree), within the bound workspace.
+
+### Changed (operators)
+
+- `spine serve`'s listings keep up to `git.DefaultMaxListingBytes` (~17.2 MiB) of paths and its
+  diffs up to `git.DefaultMaxDiffBytes` (~33.4 MiB), both raised with the `SPINE_GIT_TREE_*`
+  checkout budget: a tree the budget admits always lists in full, and one merge's diff fits. A
+  listing stops past 4 times `SPINE_GIT_TREE_MAX_ENTRIES` records (a diff past 8 times).
+- The step-output evidence (`branch_change.changed_paths`) counts a rename as two paths (a delete
+  and an add); it counted one.
+- A request to `/git/<ws>/...` for a path that is not one of the git protocol's own (`/info/refs`,
+  `/git-upload-pack`, `/git-receive-pack`, `/HEAD`, `/objects/...` by full id) answers `403`
+  "unsupported git operation" where it used to reach `git-http-backend` (`404`/`500`, or a
+  sub-directory served as a repository).
+- Reading a deleted run branch's name (`?ref=spine/run/...`) is `404` even when a tag of that name
+  exists; read the tag as `?ref=refs/tags/spine/run/...`.
+
+### Changed (embedders)
+
+- **Shared at the bump** (initiative §7b Rule 4): listings refuse less — what failed on its raw
+  size may now succeed, and a large kept set still fails; no listing or diff has a per-path length
+  limit (a path of any length is listed, kept or dropped, and diffed; only the total binds — review
+  round 1 dropped a 4 KiB per-path cap that let one long governed path, which an embedder's own
+  merges can admit, wedge the projection); a listing fails closed past its record ceiling; a bare
+  reserved-namespace (or home-branch) name with no branch is `ErrKindNotFound`; `Diff` reports
+  gitlink changes the repository's submodule ignore settings hid; `Log` and `HasCommitWithTrailer`
+  fail with a permanent "unparseable log output" error on output that does not split into records
+  (none that git itself prints).
+- New API (adapters/git): `PathFilterLister` (optional capability: `ListFilesFunc(ctx, ref,
+  keep)`, `ListFilesUnder(ctx, ref, dir, keep)`), `CLIClient.ListFilesFunc`,
+  `CLIClient.ListFilesUnder`, `ListFilesKeeping(ctx, lister, ref, dir, keep)` (the capability or a
+  filtered `ListFiles`), `FileLister`, `CLIClient.CountChangedPaths(ctx, from, to)`,
+  `DefaultMaxListingBytes`, `DefaultMaxDiffBytes`, `OutputTooLargeError.Records`. core/engine:
+  `ChangedPathCounter` (optional; `*git.CLIClient` implements it). No existing interface gains a
+  method.
+- The listing and diff limits of a client built with `WithMaxOutputBytes(n)` are `n` (as the
+  per-command limit was); without it, `DefaultMaxListingBytes` / `DefaultMaxDiffBytes`; with a
+  checkout budget, never below what the budget admits (twice that for a diff). SMP's
+  `gitread.NewClient` passes `SMP_GIT_MAX_OUTPUT_BYTES`, so SMP's limits are that value.
+- An operator without `ChangedPathCounter` (SMP's `RealGitOperator`) keeps counting the evidence
+  through `Diff`, unchanged (owner question 2 default).
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-002 TASK-003: checkout and merge amplification budget)
 
 Closes review finding N-1 (P2): a push of a few KB could check out or merge into terabytes on the

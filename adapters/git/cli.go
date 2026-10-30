@@ -2,6 +2,8 @@ package git
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -35,8 +37,9 @@ import (
 //	                                                   only); otherwise Branch        as its exact object id; as a
 //	                                                                                  CreateBranch base, with ^{commit}
 //	Rev     ReadFile/ListFiles/RefSHA/TreeEntryType    non-empty and ValidateRef      branch-first: an existing branch
-//	        ref; Diff from/to; MergeBase a/b;                                         as its exact object id, anything
-//	        LogOpts.Since                                                             else unchanged (see resolveRev)
+//	        ref; Diff from/to; MergeBase a/b;                                         as its exact object id; a missing
+//	        LogOpts.Since; CountChangedPaths                                          reserved or home branch NotFound;
+//	        from/to                                                                   anything else unchanged (resolveRev)
 //	Remote  remote of Push, PushBranch,                ^[A-Za-z0-9][A-Za-z0-9._-]*    unchanged
 //	        DeleteRemoteBranch                         (/[A-Za-z0-9._-]+)*, no ".."
 //
@@ -68,11 +71,13 @@ import (
 //	Merge (abort)       merge --abort                     (Strategy "abort" or Source "--abort", nothing else)
 //	CreateBranch        branch [eoo] <n> <HEAD | oid>^{commit}   (git branch re-DWIMs a bare start point)
 //	DeleteBranch        branch -D [eoo] <n>
-//	Diff                diff --name-status -z [eoo] <from'> <to'> --
+//	Diff                diff --name-status -z --ignore-submodules=none [eoo] <from'> <to'> --
+//	CountChangedPaths   diff --name-only -z --no-renames --ignore-submodules=none [eoo] <from'> <to'> --
 //	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
 //	ReadFile            --literal-pathspecs ls-tree -l -z --full-tree [eoo] <ref'> <path>, then cat-file -t <oid>, cat-file blob <oid>
 //	                    (rev-parse --verify --quiet [eoo] <ref'>^{tree} only after a failed ls-tree)
 //	ListFiles           ls-tree -r --name-only -z [eoo] <ref'>
+//	ListFilesUnder      --literal-pathspecs ls-tree -r --name-only -z --full-tree [eoo] <ref'> <dir>   (whole-tree argv for "" or an unclean dir)
 //	TreeEntryType       --literal-pathspecs ls-tree -z --full-tree [eoo] <ref'> <path>   (no "--": after eoo it is a pathspec)
 //	RefSHA              rev-parse --verify [eoo] <ref'>   (no call at all for an existing branch)
 //	MergeBase           merge-base [eoo] <a'> <b'>
@@ -105,7 +110,10 @@ import (
 // gitlink unread, and a file entry that records a tag, a tree or a commit
 // (NotBlobError, ErrNotBlob; wave 4 follow-up); every
 // other read command fails past the per-command stdout limit
-// (OutputTooLargeError, ErrOutputTooLarge), and mutating
+// (OutputTooLargeError, ErrOutputTooLarge) — except the listings
+// (ListFiles, ListFilesFunc, Diff, CountChangedPaths), which parse git's
+// output as it streams and are bounded by the paths they keep (INIT-024
+// TASK-004, listing.go) — and mutating
 // commands drain their stdout instead of failing on its size. git's own
 // memory on read commands is bounded per allocation (GIT_ALLOC_LIMIT)
 // and its delta-base cache is pinned, which leaves about three times the
@@ -137,6 +145,7 @@ type CLIClient struct {
 	// CLIClient not built by NewCLIClient is bounded.
 	maxBlobBytes     int64 // one ReadFile (WithMaxBlobBytes)
 	maxOutputBytes   int64 // stdout of every other command (WithMaxOutputBytes)
+	outputLimitSet   bool  // WithMaxOutputBytes was given: it is the listing limit too (listingLimit)
 	maxGitAllocBytes int64 // GIT_ALLOC_LIMIT on read commands (WithMaxGitAllocBytes)
 	// blobSize, when set, replaces the size ReadFile's entry probe
 	// reported for a blob (it is given the blob's object id). It is a
@@ -158,6 +167,9 @@ type CLIClient struct {
 	mutateTimeout   time.Duration
 	measureHook     func(MeasureTrace)
 	mergeResultHook func(tree string) // test hook: the merge result tree measured
+	// envHook is a test hook (SetEnvHookForTest): called with the op and
+	// the environment of every streamed listing command (listing.go).
+	envHook func(op string, env []string)
 }
 
 // CLIOption configures a CLIClient.
@@ -1022,8 +1034,21 @@ func (c *CLIClient) DeleteBranch(ctx context.Context, name string) error {
 // non-ASCII directory (artifact.Slugify keeps every Unicode letter) was
 // never projected, never status-cascaded, and NextID allocated its ID a
 // second time. Rename detection still follows diff.renames (porcelain
-// `git diff`). The parser is strict (parseNameStatusZ): a malformed or
+// `git diff`). The parser is strict (nameStatusCollector): a malformed or
 // truncated stream is an error, never a partial list.
+//
+// --ignore-submodules=none (INIT-024 TASK-004): in a non-bare tree `git
+// diff <a> <b>` honours submodule.<name>.ignore from the checked-out
+// .gitmodules and diff.ignoreSubmodules from any config, so `ignore =
+// all` made a gitlink change invisible to every caller — the governance
+// guard, the projection, the status cascade. Every gitlink change is now
+// reported ("modified"), whatever the repository says.
+//
+// The output is parsed as git writes it (INIT-024 TASK-004, review
+// finding N-6; listing.go): what Diff holds is the paths it returns, held
+// to the diff limit (diffLimit: both trees' worth of paths) and the
+// diff's record ceiling; past either it is the permanent ErrOutputTooLarge
+// refusal it always was, and the raw output is never buffered.
 func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, error) {
 	if err := checkRev("diff", "from", from); err != nil {
 		return nil, err
@@ -1039,24 +1064,76 @@ func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, erro
 	if err != nil {
 		return nil, err
 	}
-	output, err := c.run(ctx, "diff", "diff", "--name-status", "-z", "--end-of-options", fromRev, toRev, "--")
-	if err != nil {
+	s := newNameStatusCollector("diff", c.diffBounds())
+	if err := c.runListing(ctx, "diff", s, unterminatedDiff,
+		"diff", "--name-status", "-z", "--ignore-submodules=none", "--end-of-options", fromRev, toRev, "--"); err != nil {
 		return nil, err
 	}
-	diffs, err := parseNameStatusZ(output)
-	if err != nil {
-		return nil, &GitError{Kind: ErrKindPermanent, Op: "diff", Message: "unparseable diff output", Err: err}
+	if err := s.finish(); err != nil {
+		return nil, err
 	}
-	return diffs, nil
+	return s.diffs, nil
 }
 
-// errMalformedDiff is parseNameStatusZ's error. It never echoes a path:
-// paths are committed, attacker-chosen text.
-var errMalformedDiff = errors.New("malformed `git diff --name-status -z` output")
+// unterminatedDiff is Diff's refusal of output that does not end in NUL:
+// a truncated stream.
+func unterminatedDiff() *GitError {
+	return &GitError{Kind: ErrKindPermanent, Op: "diff", Message: "unparseable diff output",
+		Err: fmt.Errorf("%w: unterminated record", errMalformedDiff)}
+}
 
-// parseNameStatusZ parses `git diff --name-status -z` output: records of
-// "<status>\0<path>\0", or "<status>\0<src>\0<dst>\0" for a status
-// starting with R (rename) or C (copy). Mapping:
+// CountChangedPaths returns how many paths differ between from and to
+// (both Rev class, validated and resolved as Diff's) without loading a
+// blob: `git diff --name-only -z --no-renames --ignore-submodules=none
+// [eoo] <from'> <to'> --`, run as a read command (INIT-024 TASK-004,
+// review finding N-12; core/engine.ChangedPathCounter).
+//
+// It is what step-output evidence counts with. The commit pair there is
+// chosen by the run-branch author, and Diff detects renames — loading both
+// blobs of every candidate pair, outside GIT_ALLOC_LIMIT (opDiff) — so the
+// author decided how much memory the git child used. Without rename
+// detection a tree diff compares object ids and reads no blob, and as a
+// read command it runs under GIT_ALLOC_LIMIT and the pinned delta-base
+// cache anyway. A rename therefore counts as two paths (a delete and an
+// add). The listing is counted as it streams and keeps no path
+// (pathCounter, listing.go), so its size is no limit; output that does
+// not parse is a permanent error.
+func (c *CLIClient) CountChangedPaths(ctx context.Context, from, to string) (int, error) {
+	const op = "count_changed_paths"
+	if err := checkRev(op, "from", from); err != nil {
+		return 0, err
+	}
+	if err := checkRev(op, "to", to); err != nil {
+		return 0, err
+	}
+	fromRev, err := c.resolveRev(ctx, op, "from", c.homeRev(from))
+	if err != nil {
+		return 0, err
+	}
+	toRev, err := c.resolveRev(ctx, op, "to", c.homeRev(to))
+	if err != nil {
+		return 0, err
+	}
+	s := &pathCounter{op: op, maxRecords: c.diffRecordCeiling()}
+	if err := c.runListing(ctx, op, s, unterminatedCount,
+		"diff", "--name-only", "-z", "--no-renames", "--ignore-submodules=none", "--end-of-options", fromRev, toRev, "--"); err != nil {
+		return 0, err
+	}
+	return s.n, nil
+}
+
+// unterminatedCount is CountChangedPaths' refusal of output that does not
+// end in NUL.
+func unterminatedCount() *GitError {
+	return &GitError{Kind: ErrKindPermanent, Op: "count_changed_paths", Message: "unterminated `git diff -z` output"}
+}
+
+// errMalformedDiff is the cause of Diff's unparseable-output error. It
+// never echoes a path: paths are committed, attacker-chosen text.
+//
+// `git diff --name-status -z` prints records of "<status>\0<path>\0", or
+// "<status>\0<src>\0<dst>\0" for a status starting with R (rename) or C
+// (copy). Mapping (nameStatusCollector, listing.go):
 //
 //	A        added
 //	D        deleted
@@ -1071,64 +1148,7 @@ var errMalformedDiff = errors.New("malformed `git diff --name-status -z` output"
 // or path, a missing second path) returns an error and no records: one
 // mis-split would shift every later record onto the wrong path. Empty
 // output is (nil, nil).
-func parseNameStatusZ(out string) ([]FileDiff, error) {
-	if out == "" {
-		return nil, nil
-	}
-	if !strings.HasSuffix(out, "\x00") {
-		return nil, fmt.Errorf("%w: unterminated record", errMalformedDiff)
-	}
-	// Scanned field by field, not split: the paths are substrings of the
-	// one output buffer, and no intermediate slice of every field is
-	// built. out ends in NUL, so every field is NUL-terminated and rest is
-	// empty exactly when the stream is exhausted.
-	rest := out
-	field := func() (string, bool) {
-		if rest == "" {
-			return "", false
-		}
-		f, tail, _ := strings.Cut(rest, "\x00")
-		rest = tail
-		return f, true
-	}
-	var diffs []FileDiff
-	for rest != "" {
-		status, _ := field()
-		if !validDiffStatus(status) {
-			return nil, fmt.Errorf("%w: unexpected status field at record %d", errMalformedDiff, len(diffs)+1)
-		}
-		paths := 1
-		if status[0] == 'R' || status[0] == 'C' {
-			paths = 2
-		}
-		p1, ok := field()
-		p2 := ""
-		if ok && paths == 2 {
-			p2, ok = field()
-		}
-		if !ok {
-			return nil, fmt.Errorf("%w: record %d is missing a path", errMalformedDiff, len(diffs)+1)
-		}
-		if p1 == "" || (paths == 2 && p2 == "") {
-			return nil, fmt.Errorf("%w: record %d has an empty path", errMalformedDiff, len(diffs)+1)
-		}
-		var fd FileDiff
-		switch status[0] {
-		case 'A':
-			fd = FileDiff{Path: p1, Status: "added"}
-		case 'D':
-			fd = FileDiff{Path: p1, Status: "deleted"}
-		case 'R':
-			fd = FileDiff{OldPath: p1, Path: p2, Status: "renamed"}
-		case 'C':
-			fd = FileDiff{Path: p2, Status: "added"}
-		default: // M, T and anything else git may print for one path
-			fd = FileDiff{Path: p1, Status: "modified"}
-		}
-		diffs = append(diffs, fd)
-	}
-	return diffs, nil
-}
+var errMalformedDiff = errors.New("malformed `git diff --name-status -z` output")
 
 // validDiffStatus accepts git's name-status field: one upper-case letter
 // optionally followed by a decimal score ("R100", "C075").
@@ -1147,6 +1167,16 @@ func validDiffStatus(s string) bool {
 // Log returns commit history. A non-empty Since is Rev class; Path
 // always follows the `--`.
 //
+// Each record follows a boundary drawn for this call (newLogBoundary: 128
+// bits from crypto/rand) and parseLogOutput requires every record to
+// start with a full object id (INIT-024 TASK-004, review finding N-11).
+// The boundary used to be the fixed text "---END---", which a commit
+// message could hold: a message with it and lines shaped like a record
+// after it became a second entry, with whatever id, author, date and
+// trailers the message chose, in GET /query/history. A record that does
+// not parse fails the call (permanent, "unparseable log output"); it is
+// never skipped.
+//
 // The history ends at HEAD — on a tree with a home branch (INIT-023
 // TASK-012 §2.9) at refs/heads/<home>, looked up exactly: both the
 // implicit default revision and the `<since>..HEAD` range name the home
@@ -1158,7 +1188,11 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 			return nil, err
 		}
 	}
-	args := []string{"log", "--format=%H%n%an%n%ae%n%aI%n%B%n---END---"}
+	boundary, err := newLogBoundary()
+	if err != nil {
+		return nil, &GitError{Kind: ErrKindTransient, Op: "log", Message: "no log record boundary", Err: err}
+	}
+	args := []string{"log", "--format=" + boundary + "%n%H%n%an%n%ae%n%aI%n%B"}
 
 	if opts.Limit > 0 {
 		args = append(args, fmt.Sprintf("-n%d", opts.Limit))
@@ -1190,8 +1224,57 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 	if err != nil {
 		return nil, err
 	}
+	commits, err := parseLogOutput(output, boundary)
+	if err != nil {
+		return nil, unparseableLog(err)
+	}
+	return commits, nil
+}
 
-	return parseLogOutput(output), nil
+// logBoundaryPrefix starts every log record boundary; 32 hex digits from
+// crypto/rand follow it (newLogBoundary).
+const logBoundaryPrefix = "spine-log-"
+
+// newLogBoundary returns a record boundary for one `git log --format`
+// call. It is unpredictable, so no commit message can hold it: messages
+// are fixed before the call draws it.
+func newLogBoundary() (string, error) {
+	var b [16]byte // 128 bits
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return logBoundaryPrefix + hex.EncodeToString(b[:]), nil
+}
+
+// unparseableLog is the refusal of log output that does not split into
+// well-formed records.
+func unparseableLog(err error) *GitError {
+	return &GitError{Kind: ErrKindPermanent, Op: "log", Message: "unparseable log output", Err: err}
+}
+
+// errMalformedLog is the cause of every unparseable-log refusal. It never
+// echoes the output: messages are committed, attacker-chosen text.
+var errMalformedLog = errors.New("malformed `git log` output")
+
+// logRecords splits `git log --format=<boundary>%n…` output into the text
+// of each record (what follows its boundary line). The output must start
+// with the boundary; empty output is no records.
+func logRecords(output, boundary string) ([]string, error) {
+	if output == "" {
+		return nil, nil
+	}
+	parts := strings.Split(output, boundary)
+	if parts[0] != "" {
+		return nil, fmt.Errorf("%w: output before the first record", errMalformedLog)
+	}
+	recs := parts[1:]
+	for i, r := range recs {
+		var ok bool
+		if recs[i], ok = strings.CutPrefix(r, "\n"); !ok {
+			return nil, fmt.Errorf("%w: record %d does not start on its own line", errMalformedLog, i+1)
+		}
+	}
+	return recs, nil
 }
 
 // ReadFile reads a file at a specific Git ref (Rev class). An empty ref
@@ -1595,7 +1678,63 @@ func (c *CLIClient) WriteAndStageFile(ctx context.Context, path, content string)
 // and strings.TrimSpace mangled a leading or trailing space in the first
 // or last path. Only the empty element after the final NUL is dropped;
 // output that does not end in NUL is a truncated listing and an error.
+//
+// The listing is parsed as git writes it and the pattern applied while it
+// streams (INIT-024 TASK-004, review finding N-6; listing.go): what
+// ListFiles holds is the paths it returns, within the listing limit
+// (listingLimit), and a path the pattern drops costs no memory. Past it,
+// or past the record ceiling (recordCeiling, kept and dropped records
+// alike), it is the permanent ErrOutputTooLarge refusal it always was; the
+// raw size of the listing is no longer a limit. ListFilesFunc takes a
+// predicate instead of a pattern, ListFilesUnder a directory as well.
 func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]string, error) {
+	var keep func(string) bool
+	if pattern != "" {
+		keep = func(p string) bool { return matchSimpleGlob(pattern, p) }
+	}
+	return c.listFiles(ctx, ref, "", keep)
+}
+
+// ListFilesFunc is ListFiles with a predicate: it returns, in git's
+// order, the paths at ref (Rev class) that keep accepts, every path when
+// keep is nil (PathFilterLister, INIT-024 TASK-004). keep runs on each
+// path as git lists it, so the listing limit bounds only the paths it
+// keeps: a tree with a huge listing and a few wanted paths lists them.
+func (c *CLIClient) ListFilesFunc(ctx context.Context, ref string, keep func(path string) bool) ([]string, error) {
+	return c.listFiles(ctx, ref, "", keep)
+}
+
+// ListFilesUnder is ListFilesFunc for the paths under one directory of
+// the tree (PathFilterLister, INIT-024 TASK-004 review round 1): dir is
+// repository-relative ("" or "." is the whole tree; a trailing "/" is
+// dropped), and only paths beginning "<dir>/" that keep accepts are
+// returned. dir reaches git as a literal pathspec
+// (`--literal-pathspecs ls-tree -r --name-only -z --full-tree [eoo] <ref'>
+// <dir>`), so git walks that subtree alone and the rest of the tree costs
+// nothing; a dir that is not a clean relative path (absolute, "..", empty
+// components) is never passed to git — the whole tree is listed and
+// filtered instead, with the same result.
+func (c *CLIClient) ListFilesUnder(ctx context.Context, ref, dir string, keep func(path string) bool) ([]string, error) {
+	return c.listFiles(ctx, ref, dir, keep)
+}
+
+// listingDir splits a ListFilesUnder directory into the prefix every
+// returned path must have ("" for the whole tree) and the pathspec git is
+// given ("" when there is none: the whole tree, or a dir no literal
+// pathspec names safely).
+func listingDir(dir string) (prefix, pathspec string) {
+	d := strings.TrimSuffix(dir, "/")
+	if d == "" || d == "." {
+		return "", ""
+	}
+	if pathpkg.IsAbs(d) || pathpkg.Clean(d) != d || d == ".." || strings.HasPrefix(d, "../") ||
+		strings.HasPrefix(d, "-") || strings.ContainsRune(d, 0) {
+		return d + "/", ""
+	}
+	return d + "/", d
+}
+
+func (c *CLIClient) listFiles(ctx context.Context, ref, dir string, keep func(string) bool) ([]string, error) {
 	if err := checkRev("list_files", "ref", ref); err != nil {
 		return nil, err
 	}
@@ -1603,31 +1742,26 @@ func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]strin
 	if err != nil {
 		return nil, err
 	}
-	output, err := c.run(ctx, "list_files", "ls-tree", "-r", "--name-only", "-z", "--end-of-options", rev)
-	if err != nil {
+	prefix, pathspec := listingDir(dir)
+	if prefix != "" {
+		inner := keep
+		keep = func(p string) bool { return strings.HasPrefix(p, prefix) && (inner == nil || inner(p)) }
+	}
+	args := []string{"ls-tree", "-r", "--name-only", "-z", "--end-of-options", rev}
+	if pathspec != "" {
+		args = []string{"--literal-pathspecs", "ls-tree", "-r", "--name-only", "-z", "--full-tree", "--end-of-options", rev, pathspec}
+	}
+	s := newPathCollector("list_files", c.listingBounds(), keep)
+	if err := c.runListing(ctx, "list_files", s, unterminatedListing, args...); err != nil {
 		return nil, err
 	}
-	if output == "" {
-		return nil, nil
-	}
-	if !strings.HasSuffix(output, "\x00") {
-		return nil, &GitError{Kind: ErrKindPermanent, Op: "list_files", Message: "unterminated `git ls-tree -z` output"}
-	}
+	return s.paths, nil
+}
 
-	// Scanned, not split: the paths are substrings of the one output
-	// buffer, and no intermediate slice of every field is built.
-	var files []string
-	for rest := output; rest != ""; {
-		var p string
-		p, rest, _ = strings.Cut(rest, "\x00")
-		if p == "" {
-			return nil, &GitError{Kind: ErrKindPermanent, Op: "list_files", Message: "empty path in `git ls-tree -z` output"}
-		}
-		if pattern == "" || matchSimpleGlob(pattern, p) {
-			files = append(files, p)
-		}
-	}
-	return files, nil
+// unterminatedListing is ListFiles' refusal of output that does not end
+// in NUL: a truncated listing.
+func unterminatedListing() *GitError {
+	return &GitError{Kind: ErrKindPermanent, Op: "list_files", Message: "unterminated `git ls-tree -z` output"}
 }
 
 // Head returns the current HEAD commit SHA. On a tree with a home branch
@@ -1702,20 +1836,31 @@ func (c *CLIClient) MergeBase(ctx context.Context, a, b string) (string, error) 
 
 // HasCommitWithTrailer checks if a commit with the given trailer value exists.
 // Used for idempotent commit detection per Git Integration §5.6.
+//
+// Its records are delimited like Log's (INIT-024 TASK-004, review
+// finding N-11): a per-call random boundary, and each record's first line
+// must be a full object id, so a message cannot make another commit id —
+// or one that names no commit — the answer.
 func (c *CLIClient) HasCommitWithTrailer(ctx context.Context, key, value string) (string, bool, error) {
-	output, err := c.run(ctx, "log", "log", "--all", "--format=%H %B---END---")
+	boundary, err := newLogBoundary()
+	if err != nil {
+		return "", false, &GitError{Kind: ErrKindTransient, Op: "log", Message: "no log record boundary", Err: err}
+	}
+	output, err := c.run(ctx, "log", "log", "--all", "--format="+boundary+"%n%H%n%B")
 	if err != nil {
 		return "", false, err
 	}
-
+	recs, err := logRecords(output, boundary)
+	if err != nil {
+		return "", false, unparseableLog(err)
+	}
 	trailer := fmt.Sprintf("%s: %s", key, value)
-	for _, entry := range strings.Split(output, "---END---") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
+	for i, rec := range recs {
+		sha, body, _ := strings.Cut(rec, "\n")
+		if !IsFullObjectName(sha) {
+			return "", false, unparseableLog(fmt.Errorf("%w: record %d does not start with an object id", errMalformedLog, i+1))
 		}
-		if strings.Contains(entry, trailer) {
-			sha := strings.SplitN(entry, " ", 2)[0]
+		if strings.Contains(body, trailer) {
 			return sha, true, nil
 		}
 	}
@@ -1830,6 +1975,9 @@ var opClasses = map[string]opClass{
 	"branch":       opMutate,
 	"config":       opMutate,
 	"push":         opMutate,
+	// count_changed_paths: output evidence's counter (INIT-024 TASK-004)
+	// is a read, so GIT_ALLOC_LIMIT applies.
+	"count_changed_paths": opRead,
 }
 
 func classOf(op string) opClass {
@@ -2063,52 +2211,54 @@ func buildCommitMessage(opts CommitOpts) string {
 	return b.String()
 }
 
-// parseLogOutput parses the custom-formatted git log output.
-func parseLogOutput(output string) []CommitInfo {
-	var commits []CommitInfo
-
-	entries := strings.Split(output, "---END---")
-	for _, entry := range entries {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
+// parseLogOutput parses Log's output: each record is boundary (the
+// call's newLogBoundary), then "%H\n%an\n%ae\n%aI\n%B" and git's record
+// terminator. Every record must have the five fields and start with a
+// full object id; any that does not fails the whole parse (no record is
+// skipped), so no message text can add, drop or reshape an entry. The
+// fields are read as before: trimmed, the message trimmed, and its
+// trailers taken from the allow-list below.
+func parseLogOutput(output, boundary string) ([]CommitInfo, error) {
+	recs, err := logRecords(output, boundary)
+	if err != nil {
+		return nil, err
+	}
+	commits := make([]CommitInfo, 0, len(recs))
+	for i, rec := range recs {
+		lines := strings.SplitN(rec, "\n", 5)
+		if len(lines) < 5 {
+			return nil, fmt.Errorf("%w: record %d has %d of 5 fields", errMalformedLog, i+1, len(lines))
 		}
-
-		lines := strings.SplitN(entry, "\n", 5)
-		if len(lines) < 4 {
-			continue
+		if !IsFullObjectName(lines[0]) {
+			return nil, fmt.Errorf("%w: record %d does not start with an object id", errMalformedLog, i+1)
 		}
 
 		ts, _ := time.Parse(time.RFC3339, strings.TrimSpace(lines[3]))
 
 		ci := CommitInfo{
-			SHA:       strings.TrimSpace(lines[0]),
+			SHA:       lines[0],
 			Author:    Author{Name: strings.TrimSpace(lines[1]), Email: strings.TrimSpace(lines[2])},
+			Message:   strings.TrimSpace(lines[4]),
 			Timestamp: ts,
 			Trailers:  make(map[string]string),
 		}
-
-		if len(lines) > 4 {
-			ci.Message = strings.TrimSpace(lines[4])
-			// Extract trailers from message. Whitelist kept in sync with
-			// TrailerOrder (branchwrite.go) so trailers the producer side
-			// can write are also surfaced through this parser.
-			for _, msgLine := range strings.Split(lines[4], "\n") {
-				msgLine = strings.TrimSpace(msgLine)
-				if idx := strings.Index(msgLine, ": "); idx > 0 {
-					key := msgLine[:idx]
-					switch key {
-					case "Trace-ID", "Actor-ID", "Run-ID", "Operation",
-						"Workflow-Bypass", "Branch-Protection-Override":
-						ci.Trailers[key] = msgLine[idx+2:]
-					}
+		// Extract trailers from message. Whitelist kept in sync with
+		// TrailerOrder (branchwrite.go) so trailers the producer side
+		// can write are also surfaced through this parser.
+		for _, msgLine := range strings.Split(lines[4], "\n") {
+			msgLine = strings.TrimSpace(msgLine)
+			if idx := strings.Index(msgLine, ": "); idx > 0 {
+				key := msgLine[:idx]
+				switch key {
+				case "Trace-ID", "Actor-ID", "Run-ID", "Operation",
+					"Workflow-Bypass", "Branch-Protection-Override":
+					ci.Trailers[key] = msgLine[idx+2:]
 				}
 			}
 		}
-
 		commits = append(commits, ci)
 	}
-	return commits
+	return commits, nil
 }
 
 // matchSimpleGlob provides basic glob matching (supports * and ** prefix/suffix).

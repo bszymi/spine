@@ -877,7 +877,8 @@ func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) 
 	return nil
 }
 
-// isReadOnly returns true if the request is a read-only git operation.
+// isReadOnly returns true if the request is a read-only git operation:
+// one of the read routes, exactly (protocol_path.go).
 func isReadOnly(r *http.Request) bool {
 	path := r.URL.Path
 
@@ -895,18 +896,13 @@ func isReadOnly(r *http.Request) bool {
 	}
 
 	// POST /git-upload-pack — pack data for clone/fetch
-	if r.Method == http.MethodPost && strings.HasSuffix(path, "/git-upload-pack") {
+	if r.Method == http.MethodPost && path == uploadPackPath {
 		return true
 	}
 
-	// GET for dumb HTTP protocol files (HEAD, objects/*, etc.)
-	// Excludes info/refs?service=git-receive-pack which falls through the
-	// query-string check above (returns false there).
-	if r.Method == http.MethodGet {
-		return true
-	}
-
-	return false
+	// GET of a dumb-protocol file (HEAD, objects/...). info/refs is
+	// decided above, whatever its query.
+	return r.Method == http.MethodGet && dumbProtocolPath.MatchString(path)
 }
 
 // IsReceivePack returns true if the request is a git push (receive-pack)
@@ -917,7 +913,10 @@ func isReadOnly(r *http.Request) bool {
 // Exported so the gateway's auth middleware can distinguish push from
 // read: trusted-CIDR bypass applies to clone/fetch but not to push, so
 // every push has an actor identity attached for branch-protection and
-// audit.
+// audit. Like isReadOnly it matches the exact git path ServeHTTP is
+// handed (relative to the repository; protocol_path.go), so the
+// gateway classifies the request with that path, not the /git/<ws>/...
+// URL (INIT-024 TASK-004).
 func IsReceivePack(r *http.Request) bool {
 	path := r.URL.Path
 
@@ -932,10 +931,7 @@ func IsReceivePack(r *http.Request) bool {
 			return false
 		}
 	}
-	if r.Method == http.MethodPost && strings.HasSuffix(path, "/git-receive-pack") {
-		return true
-	}
-	return false
+	return r.Method == http.MethodPost && path == receivePackPath
 }
 
 // IsNonCanonicalInfoRefs reports whether r is a GET .../info/refs whose
@@ -954,9 +950,10 @@ func IsNonCanonicalInfoRefs(r *http.Request) bool {
 // only git-http-backend route that reads the query string (its
 // get_info_refs reads `service`; every other route ignores the query).
 // HEAD, which git-http-backend serves as GET, is neither a read nor a
-// push here, so ServeHTTP refuses it before CGI.
+// push here, so ServeHTTP refuses it before CGI. The path is exactly
+// "/info/refs": the repository root's (INIT-024 TASK-004).
 func isInfoRefs(r *http.Request) bool {
-	return r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/info/refs")
+	return r.Method == http.MethodGet && r.URL.Path == infoRefsPath
 }
 
 // infoRefsService is the advertisement a GET .../info/refs query asks

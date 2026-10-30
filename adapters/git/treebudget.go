@@ -461,7 +461,7 @@ func (c *CLIClient) measureStoredTree(ctx context.Context, rev string, b TreeBud
 	const op = measureOp
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	sink := &treeListingSink{budget: b, stop: cancel}
+	sink := newTreeListingSink(b, cancel)
 	// -r recurses, -t lists each directory too (an inode the checkout
 	// creates, and the record that makes a deep tree's path bytes grow
 	// quadratically), -l adds each blob's size from its object header,
@@ -500,7 +500,7 @@ func (c *CLIClient) measureStoredTree(ctx context.Context, rev string, b TreeBud
 		gitErr.Err = runErr
 		return sink.stats, gitErr
 	}
-	if len(sink.carry) > 0 {
+	if sink.unterminated() {
 		return sink.stats, &GitError{Kind: ErrKindPermanent, Op: op, Message: "unterminated `git ls-tree -z` output"}
 	}
 	sink.stats.Complete = true
@@ -530,54 +530,35 @@ const (
 )
 
 // treeListingSink parses `git ls-tree -r -t -l -z` output as git writes
-// it. Like stdoutSink it implements only io.Writer: os/exec copies into
-// it, and the Write that crosses a limit (or meets a malformed record)
-// returns an error, which stops the copy and closes the pipe; stop
-// cancels the command's context as well, so git is SIGTERMed at once.
+// it, on the streamed record reader the listings share (nulRecords,
+// listing.go): os/exec copies into it, and the Write that crosses a limit
+// (or meets a malformed record) returns an error, which stops the copy and
+// closes the pipe; stop cancels the command's context as well, so git is
+// SIGTERMed at once. It keeps running totals only, never a path.
 type treeListingSink struct {
-	budget    TreeBudget
-	stop      context.CancelFunc
-	stats     TreeStats
-	carry     []byte // the record being read, when it spans writes
-	delivered int64
-	over      *TreeTooLargeError
-	parseErr  error
+	nulRecords
+	budget   TreeBudget
+	stats    TreeStats
+	over     *TreeTooLargeError
+	parseErr error
 }
 
-var errStopListing = errors.New("git: tree listing stopped")
+func newTreeListingSink(b TreeBudget, stop context.CancelFunc) *treeListingSink {
+	s := &treeListingSink{budget: b}
+	s.nulRecords = nulRecords{pending: s.pendingRecord, record: s.record, stop: stop}
+	return s
+}
 
-func (s *treeListingSink) Write(p []byte) (int, error) {
-	if s.over != nil || s.parseErr != nil {
-		return 0, errStopListing
+// pendingRecord bounds a record that does not end in the current write:
+// its path alone may not exceed what is left of the path budget, so the
+// carried bytes are bounded by MaxPathBytesTotal.
+func (s *treeListingSink) pendingRecord(n int64) error {
+	if n > s.budget.MaxPathBytesTotal-s.stats.PathBytes+maxRecordMetaBytes {
+		s.cross(&TreeTooLargeError{Limit: TreeLimitPathBytes, Max: s.budget.MaxPathBytesTotal,
+			Seen: s.stats.PathBytes + n - maxRecordMetaBytes})
+		return errStopListing
 	}
-	n := len(p)
-	s.delivered += int64(n)
-	for len(p) > 0 {
-		i := bytes.IndexByte(p, 0)
-		if i < 0 {
-			// A record that does not end in this write. Its path alone
-			// may not exceed what is left of the path budget, so the
-			// carried bytes are bounded by MaxPathBytesTotal.
-			if int64(len(s.carry)+len(p)) > s.budget.MaxPathBytesTotal-s.stats.PathBytes+maxRecordMetaBytes {
-				s.cross(&TreeTooLargeError{Limit: TreeLimitPathBytes, Max: s.budget.MaxPathBytesTotal,
-					Seen: s.stats.PathBytes + int64(len(s.carry)+len(p)) - maxRecordMetaBytes})
-				return 0, errStopListing
-			}
-			s.carry = append(s.carry, p...)
-			return n, nil
-		}
-		rec := p[:i]
-		if len(s.carry) > 0 {
-			s.carry = append(s.carry, rec...)
-			rec = s.carry
-		}
-		if err := s.record(rec); err != nil {
-			return 0, err
-		}
-		s.carry = s.carry[:0]
-		p = p[i+1:]
-	}
-	return n, nil
+	return nil
 }
 
 func (s *treeListingSink) cross(e *TreeTooLargeError) {
