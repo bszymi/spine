@@ -707,8 +707,14 @@ func (c *CLIClient) realChanges(ctx context.Context, op, dir string) ([]string, 
 // looked conversion-only after the line and was rewritten). Another work
 // tree is not held: it is read with --no-optional-locks (its index is never
 // written) and its index's time is put back. Renames are not paired (each
-// side is its own entry) and submodules are not compared. The output is
-// bounded by statusLimit, not by the per-command read limit.
+// side is its own entry) and submodules are not compared.
+//
+// The output is streamed through the record reader the listings share
+// (listing.go; INIT-024 integration A, phase 5) and held to the same
+// bounds as a tree listing (listingBounds): the paths it keeps to the
+// listing limit (the budget's path bytes, one NUL per entry and a margin)
+// and its records to the record ceiling. Every tracked path of a tree the
+// budget admits therefore fits; a status past either fails closed.
 func (c *CLIClient) contentStatus(ctx context.Context, op, dir string) ([]trackedChange, error) {
 	var pre []string
 	if dir != "" {
@@ -735,7 +741,14 @@ func (c *CLIClient) contentStatus(ctx context.Context, op, dir string) ([]tracke
 	args = append(args, pre...)
 	args = append(args, "-c", "core.fsmonitor=false",
 		"status", "--porcelain=v1", "-z", "--untracked-files=no", "--no-renames", "--ignore-submodules=all")
-	out, _, err := c.runWith(ctx, op, runOpts{limit: c.statusLimit()}, args...)
+	// The status may refresh the index (the held tree): it runs under the
+	// client's mutate deadline, as runWith's commands do.
+	runCtx, cancel := withMutateDeadline(ctx, c.CheckoutLimits().MutateTimeout)
+	defer cancel()
+	out := newStatusCollector(op, c.listingBounds())
+	err = c.runListing(runCtx, op, out, func() *GitError {
+		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "unterminated `git status -z` output"}
+	}, args...)
 	// A status that refreshed the index (the held tree, when it could take
 	// index.lock) wrote it with a fresh time and restore leaves it; one
 	// that did not (another tree, or a lock someone else held) gets its
@@ -746,26 +759,59 @@ func (c *CLIClient) contentStatus(ctx context.Context, op, dir string) ([]tracke
 	if err != nil {
 		return nil, err
 	}
-	return parseTrackedStatus(out), nil
+	return out.changes, nil
 }
 
-// statusLimit bounds contentStatus's output (review round 5, P4): every
-// tracked path once — at most MaxEntries records of "XY " and a NUL around
-// paths summing to at most MaxPathBytesTotal, for a tree the client's
-// budget (or the default one) admits — and a margin for the index entries
-// a tree has beyond HEAD (staged additions). Never below the per-command
-// read limit. A status past it fails closed (KNOWN-LIMITATIONS, "Checkout
-// Budget").
-func (c *CLIClient) statusLimit() int64 {
-	b := DefaultTreeBudget()
-	if l := c.CheckoutLimits(); l.Budget != nil {
-		b = l.Budget.Effective()
+// statusCollector parses `git status --porcelain=v1 -z --no-renames` as a
+// stream (contentStatus): records of "XY <path>", each its own NUL-ended
+// record. It keeps every record, holding the paths' bytes (plus a NUL
+// each) to the listing limit and the records to the record ceiling; a
+// record that is not "XY <path>" is malformed and fails the call.
+type statusCollector struct {
+	nulRecords
+	op      string
+	bounds  listingBounds
+	kept    int64
+	changes []trackedChange
+	err     *GitError
+}
+
+func newStatusCollector(op string, bounds listingBounds) *statusCollector {
+	s := &statusCollector{op: op, bounds: bounds}
+	s.nulRecords = nulRecords{pending: s.pendingRecord, record: s.record}
+	return s
+}
+
+// pendingRecord bounds a record git has not finished writing to the room
+// the status has left (listingBounds.carryBound), plus its "XY " prefix.
+func (s *statusCollector) pendingRecord(n int64) error {
+	if n > s.bounds.carryBound(s.kept)+3 {
+		s.err = listingTooLarge(s.op, s.bounds.bytes, false)
+		return errStopListing
 	}
-	return max(b.MaxPathBytesTotal+4*b.MaxEntries+statusLimitMargin, c.outputLimit())
+	return nil
 }
 
-// statusLimitMargin is statusLimit's allowance beyond HEAD's tree.
-const statusLimitMargin = 1 << 20
+func (s *statusCollector) record(rec []byte) error {
+	if len(rec) < 4 || rec[2] != ' ' {
+		s.err = &GitError{Kind: ErrKindPermanent, Op: s.op, Message: "unparseable `git status -z` output"}
+		return errStopListing
+	}
+	if int64(len(s.changes)) >= s.bounds.records {
+		s.err = listingTooLarge(s.op, s.bounds.records, true)
+		return errStopListing
+	}
+	path := rec[3:]
+	s.kept += int64(len(path)) + 1
+	if s.kept > s.bounds.bytes {
+		s.err = listingTooLarge(s.op, s.bounds.bytes, false)
+		return errStopListing
+	}
+	s.changes = append(s.changes, trackedChange{x: rec[0], y: rec[1], path: string(path)})
+	return nil
+}
+
+func (s *statusCollector) refusal() *GitError { return s.err }
 
 // worktreeEntry is one record of `git worktree list --porcelain -z`.
 type worktreeEntry struct {

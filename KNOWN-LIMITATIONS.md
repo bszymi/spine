@@ -1444,10 +1444,11 @@ The following limitations have been resolved:
   needs the limit raised for that call (or the tree reduced outside Spine), not a repair push or
   merge, which the missing line refuses too. A work tree with more uncommitted changes than a
   record holds (2,097,152 paths) is not given the line either (the build or push logs why). The
-  renormalisation's `git status` is bounded by what the budget admits (`SPINE_GIT_TREE_MAX_PATH_BYTES`
-  plus four bytes per `SPINE_GIT_TREE_MAX_ENTRIES` plus 1 MiB, never below the per-command read
-  limit), so every tracked path of a tree the budget admits fits. A status that is larger anyway
-  (more index entries than HEAD's tree, such as staged additions past the margin) fails closed:
+  renormalisation's `git status` is streamed and held to a tree listing's bounds ("Git Read
+  Bounds": the listing limit, `SPINE_GIT_TREE_MAX_PATH_BYTES` plus one byte per
+  `SPINE_GIT_TREE_MAX_ENTRIES` plus 1 MiB, and the record ceiling, four times the entry budget), so
+  every tracked path of a tree the budget admits fits. A status that is larger anyway (more index
+  entries than HEAD's tree, such as staged additions past the margin) fails closed:
   before the line it refuses the call (no line, until the work tree has fewer differences); past
   the line the tree stays marked, the shared workspace tree is repaired by the restore around its
   next sequence (which quarantines and resets it), and a code-repository clone of the git pool by

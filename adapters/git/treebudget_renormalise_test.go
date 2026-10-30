@@ -633,21 +633,17 @@ func TestNeutralAttributes_LinkedWorktreeIndexTimeIsPutBack(t *testing.T) {
 	}
 }
 
-// TestNeutralAttributes_StatusIsBoundedByTheBudget (review round 5, P4):
-// the renormalisation's status was bounded by the per-command read limit
-// (16 MiB by default), so a tree with enough differing paths overflowed it
-// and stayed marked for good. It is now bounded by what the budget admits
-// (path bytes, plus four bytes a record, plus a margin), never below the
-// read limit: a client whose read limit is 4 KiB still renormalises a tree
-// whose status is larger.
+// TestNeutralAttributes_StatusIsBoundedByTheBudget (review round 5, P4;
+// integration A phase 5): the renormalisation's status was bounded by the
+// per-command read limit (16 MiB by default), so a tree with enough
+// differing paths overflowed it and stayed marked for good. It is streamed
+// through the listings' record reader and held to a tree listing's bounds,
+// which follow the checkout budget: a budgeted client whose read limit is
+// 4 KiB still renormalises a tree whose status is larger.
 func TestNeutralAttributes_StatusIsBoundedByTheBudget(t *testing.T) {
-	if got, want := git.NewCLIClient(t.TempDir()).StatusLimitForTest(),
-		git.DefaultTreeMaxPathBytesTotal+4*git.DefaultTreeMaxEntries+1<<20; got != want {
-		t.Errorf("default status limit = %d; want %d", got, want)
-	}
-	big := git.NewCLIClient(t.TempDir(), git.WithTreeBudget(git.TreeBudget{MaxPathBytesTotal: 64 << 20, MaxEntries: 1 << 20}))
-	if got, want := big.StatusLimitForTest(), int64(64<<20+4<<20+1<<20); got != want {
-		t.Errorf("status limit with a larger budget = %d; want %d", got, want)
+	if got, want := git.NewCLIClient(t.TempDir(), git.WithMaxOutputBytes(4096), git.WithTreeBudget(git.TreeBudget{})).ListingLimitForTest(),
+		git.DefaultTreeMaxPathBytesTotal+git.DefaultTreeMaxEntries+1<<20; got != want {
+		t.Errorf("a budgeted client's listing limit = %d; want %d", got, want)
 	}
 	ctx := context.Background()
 	repo := rnClone(t, false)
@@ -663,7 +659,7 @@ func TestNeutralAttributes_StatusIsBoundedByTheBudget(t *testing.T) {
 		}
 	}
 	tbGit(t, repo, nil, "checkout", "--", ".")
-	c := git.NewCLIClient(repo, git.WithMaxOutputBytes(4096))
+	c := git.NewCLIClient(repo, git.WithMaxOutputBytes(4096), git.WithTreeBudget(git.TreeBudget{}))
 	if err := c.EnsureNeutralWorkTree(ctx); err != nil {
 		t.Fatalf("a status larger than the read limit: %v", err)
 	}

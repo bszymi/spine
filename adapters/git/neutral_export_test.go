@@ -47,6 +47,3 @@ func WriteRenormaliseRecordForTest(path string, changes []string) error {
 
 // MaxRenormaliseRecordEntries is the record's entry bound.
 const MaxRenormaliseRecordEntries = maxRenormaliseRecordEntries
-
-// StatusLimitForTest is the bound of the renormalisation's status output.
-func (c *CLIClient) StatusLimitForTest() int64 { return c.statusLimit() }
