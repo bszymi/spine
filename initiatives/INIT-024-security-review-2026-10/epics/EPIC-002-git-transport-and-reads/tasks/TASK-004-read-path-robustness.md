@@ -512,3 +512,62 @@ error until an operator rebuild (reviewer: yes, as a follow-up).
 **Not run (review round 1):** a third codex round (round 2 was clean; the brief caps codex at three);
 the full `make test-scenario` with a registry DB; GitHub CI; a real 10^8-path tree (the record
 ceiling is tested with a small budget, and the reviewer's probe measured the unbounded case).
+
+### Integration A (2026-10-30)
+
+Merged into `init/INIT-024-integration-a` on top of phase 4 (`d21a55e2`, marker
+`init/INIT-024-integration-a-p4`): TASK-004 `d18a9471` as `557e78cb` (no conflict: git merged
+`treebudget.go`, `treelock.go`, `CHANGELOG.md` and `KNOWN-LIMITATIONS.md` on its own; the shared
+record reader replaces TASK-003's sink loop in `measureStoredTree` as it did in `measureTree`), then
+TASK-005 `80240088` as `e1f24c05` (conflict: `CHANGELOG.md` only, TASK-005's section stacked on top;
+`githttp/handler.go` merged on its own: TASK-004's exact protocol paths in `isReadOnly`,
+`IsReceivePack` and `isInfoRefs`, TASK-005's probe/slot/re-check order in `ServeHTTP`, both kept).
+Coordination commits (prefix "INIT-024 integration A — coordination: "):
+- `649dec71`: TASK-005's push gate over TASK-003's phase-4 neutral-attributes step.
+  - One hook process measures the pushed trees, then asks for the re-check.
+  - A check that fails before the line refuses the push at the hook's install ("push gate
+    unavailable") before the re-check is armed; nothing is written
+    (`TestRecheck_NoLineRefusesThePushBeforeTheRecheck`).
+  - A renormalisation pending past the line still lets the re-check refuse a frozen push.
+    `TestRecheck_RunsWithRenormalisationPending`'s fixture now fails the rewrite with a stale
+    `index.lock`, because since phase 4 its untracked-file obstruction no longer leaves anything
+    pending.
+  - The storage probe runs before the install, so a refused repository never gets the line
+    (`TestStorageProbe_RefusedRepositoryNeverGetsTheLine`).
+  - A first push that waits for the tree's hold keeps its slot and is not cut by the command-read
+    deadline; another principal is served meanwhile; no lock-order inversion between slot, tree
+    hold and alignment lock (`TestPushSlot_TreeWaitIsNotCutByTheCommandDeadline`).
+  - Mutations of the order and of the deadline are caught.
+- `39f3d271`: the renormalisation's status is streamed through TASK-004's record reader under a tree
+  listing's bounds (listing limit, record ceiling). Phase 4's `statusLimit` and `runOpts.limit` are
+  removed, so each limit has one definition (`TestStatusCollector_ParsesAndBounds`,
+  `TestNeutralAttributes_StatusIsBoundedByTheBudget`).
+- `1ca7d63e`: git slots are keyed to the request's workspace through the shared-mode gateway
+  (TASK-004 exact paths × TASK-005 slots × TASK-006/007 gate). `TestHandleGit_SlotsAreKeyedToTheRequestsWorkspace`
+  is red when the gateway drops the workspace from the context or classifies on the URL.
+The confirming review of phase 4 (round 6: 0 P1–P3, 3 P4) was then fixed in `5bf328ec` (the held
+tree's status writes the index; the mark is cleared only on a clean second comparison; the
+quarantine's stash runs with the monitor off), `48a0621a` (a marker left without the line is
+recorded again; docs) and `fcf54411` (the over-budget logs name the variable and the restart;
+`git.MeasureStoredTree`), each with red/green tests.
+
+Gates at `fcf54411`:
+- Cheap gates: lint-boundaries, `make build`, embed-smoketest, `go vet` ×3 rc 0;
+  golangci-lint `--new-from-rev main` plain / integration / scenario and gosec 0; gofmt clean
+  except two files already unformatted on main (`core/artifact/id_allocator.go`,
+  `service/scenariotest/scenarios/planning_run_test.go`); pincheck OK; `go mod tidy -diff` clean,
+  `verify` OK.
+- `-race`: `adapters/git`, `gitpool`, `githttp`, `workspace`, `gateway`, `cmd/spine` and
+  `core/worktreefs` rc 0.
+- `go test -p 4 ./...` rc 0.
+- `-tags integration` (TASK-003/004/005 sets plus `workspace`, `projection`, `engine`) rc 0.
+- scenario-git-http: every step rc 0, 0 skips (90 / 26 / 154 / 12 / 24 / 37 + 1 / 19 + 1 / 1).
+- git-floor (git 2.39.5, Linux, the real storage probe): every step rc 0.
+- TASK-004's and TASK-005's AC tests by name: every one passes.
+- SMP (`82899ace`, 0 dirty files): build and vet ×4 rc 0; `-race` on the SMP importers of
+  `adapters/git` and `githttp` all ok; testgate Spine-runtime PASS (2447, 3 allowed skips) and
+  githttp PASS (590, 1 allowed skip); no `ws_*` or `s24ia_*` database left.
+
+Codex (`codex review --base init/INIT-024-integration-a-p4`, `gpt-6.1-sol`): round 1, session
+`01a18ee8-725f-7db2-81ac-f88c8ee60e53` on `fcf54411`: no findings. No second round was needed.
+Statuses stay as they are; nothing is pushed.

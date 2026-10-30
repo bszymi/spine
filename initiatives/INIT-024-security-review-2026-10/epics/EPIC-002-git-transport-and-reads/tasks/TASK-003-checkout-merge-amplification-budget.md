@@ -866,3 +866,44 @@ Gates at `5ae28915`:
 - SMP (`82899ace`, 0 dirty files): build and vet ×4 rc 0; `-race` on the SMP importers of
   `adapters/git` and `githttp` all ok; testgate Spine-runtime PASS (2447 passed, 3 allowed skips)
   and githttp PASS (590 passed, 1 allowed skip); no `ws_*` or `s24ia_*` database left.
+
+**Phase 5 (2026-10-30).** TASK-004 and TASK-005 merged on top (their artifacts' Integration A
+sections have the detail). Coordination touching this task: `649dec71` (the push gate over the
+phase-4 neutral-attributes step: the no-line refusal before the re-check, the probe before the line,
+the tree wait under the slot not cut by the command deadline) and `39f3d271` (the renormalisation's
+status reads through TASK-004's record reader under a tree listing's bounds; `statusLimit` and
+`runOpts.limit` removed). The confirming review of phase 4 (round 6: 0 P1–P3, 3 P4; the simpler
+shape holds, the fail-closed change is operator-only) was fixed here:
+- `5bf328ec`: the held tree's content-comparison status runs with `GIT_OPTIONAL_LOCKS=1`; the mark is
+  cleared only when a second comparison finds no unrecorded file still differing; the quarantine's
+  `stash create` runs with `core.fsmonitor` off. Tests: `TestNeutralAttributes_OptionalLocksOffStillRenormalises`
+  (the reviewer's shape; red with the fix removed: tree left converted and unmarked),
+  `TestNeutralAttributes_SkippedRewriteKeepsTheMark`, `TestNeutralAttributes_QuarantineSeesWhatAMonitorHides`.
+- `48a0621a`: a failure after the record but before the line leaves a marker without the line, which
+  the next adding call records again (KNOWN-LIMITATIONS, CHANGELOG, code comment);
+  `TestNeutralAttributes_MarkerWithoutTheLineIsRecordedAgain` (a dangling `.git/info`, refused for
+  root too).
+- `fcf54411`: `git.MeasureStoredTree`; the start-up warning measures what HEAD stores and names the
+  variable, the size to raise it above, the restart and the refused pushes; the start-up, build and
+  push refusal logs carry the same (`githttp.TreeLimitLogAttrs`). Tests red on the previous code.
+
+Gates at `fcf54411`:
+- Cheap gates: lint-boundaries, `make build`, embed-smoketest, `go vet` ×3 rc 0;
+  golangci-lint `--new-from-rev main` plain / integration / scenario and gosec 0; gofmt clean
+  except two files already unformatted on main (`core/artifact/id_allocator.go`,
+  `service/scenariotest/scenarios/planning_run_test.go`); pincheck OK; `go mod tidy -diff` clean,
+  `verify` OK.
+- `-race`: `adapters/git`, `gitpool`, `githttp`, `workspace`, `gateway`, `cmd/spine` and
+  `core/worktreefs` rc 0.
+- `go test -p 4 ./...` rc 0.
+- `-tags integration` (TASK-003/004/005 sets plus `workspace`, `projection`, `engine`) rc 0.
+- scenario-git-http: every step rc 0, 0 skips (90 / 26 / 154 / 12 / 24 / 37 + 1 / 19 + 1 / 1).
+- git-floor (git 2.39.5, Linux, the real storage probe): every step rc 0.
+- TASK-004's and TASK-005's AC tests by name: every one passes.
+- SMP (`82899ace`, 0 dirty files): build and vet ×4 rc 0; `-race` on the SMP importers of
+  `adapters/git` and `githttp` all ok; testgate Spine-runtime PASS (2447, 3 allowed skips) and
+  githttp PASS (590, 1 allowed skip); no `ws_*` or `s24ia_*` database left.
+
+Codex (`codex review --base init/INIT-024-integration-a-p4`, `gpt-6.1-sol`): round 1, session
+`01a18ee8-725f-7db2-81ac-f88c8ee60e53` on `fcf54411`: no findings. No second round was needed.
+Statuses stay as they are; nothing is pushed.
