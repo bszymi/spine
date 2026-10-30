@@ -355,8 +355,9 @@ func servedConvertedTree(t *testing.T) string {
 // retries (the install runs per receive-pack request), and once the cause
 // is gone the next push brings the tree to its stored bytes and stops
 // warning. Since phase 4 only an I/O error or a crash can leave a
-// renormalisation pending past the line — here the work tree's top
-// directory is read-only, so its converted file cannot be replaced.
+// renormalisation pending past the line — here a stale index.lock (an
+// exclusive create, which root cannot bypass either, unlike a read-only
+// directory) makes the rewrite fail; the status reads around it.
 func TestBudgetHook_PendingRenormalisationDoesNotStopThePush(t *testing.T) {
 	repo := servedConvertedTree(t)
 	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{}})
@@ -365,10 +366,10 @@ func TestBudgetHook_PendingRenormalisationDoesNotStopThePush(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	if err := os.Chmod(repo, 0o555); err != nil { //nolint:gosec // G302: the test's own temp directory, made read-only on purpose
+	lock := filepath.Join(repo, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(repo, 0o755) }) //nolint:gosec // G302: restored so the temp directory can be removed
 
 	h := budgetHandler(t, repo)
 	url := budgetServer(t, h, repo)
@@ -386,16 +387,16 @@ func TestBudgetHook_PendingRenormalisationDoesNotStopThePush(t *testing.T) {
 	if ok, err := git.HasNeutralCheckoutAttributes(context.Background(), repo); !ok || err != nil {
 		t.Fatalf("served repository lacks the neutral checkout attributes: %v %v", ok, err)
 	}
-	if err := os.Chmod(repo, 0o755); err != nil { //nolint:gosec // G302: the test's own temp directory
+	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)
 	}
 	logs.Reset()
 	nulGit(t, work, nil, "commit", "-q", "--allow-empty", "-m", "2")
 	if out, err := gitPush(t, work, url, "HEAD:refs/heads/f2"); err != nil {
-		t.Fatalf("push once the tree is writable: %v\n%s", err, out)
+		t.Fatalf("push once the lock is gone: %v\n%s", err, out)
 	}
 	if strings.Contains(logs.String(), warn) {
-		t.Fatalf("still pending once the tree is writable:\n%s", logs.String())
+		t.Fatalf("still pending once the lock is gone:\n%s", logs.String())
 	}
 	if b, err := os.ReadFile(filepath.Join(repo, "f.txt")); err != nil || string(b) != "a\nb\n" {
 		t.Fatalf("the retried renormalisation did not bring f.txt to its stored bytes: %q %v", b, err)
