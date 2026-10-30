@@ -2,12 +2,12 @@
 id: TASK-010
 type: Task
 title: "Initiative close: integration, gates, documentation and the SMP hand-off"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-005-close-out/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-10-30
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-005-close-out/epic.md
