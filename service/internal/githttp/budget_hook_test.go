@@ -349,20 +349,26 @@ func servedConvertedTree(t *testing.T) string {
 }
 
 // TestBudgetHook_PendingRenormalisationDoesNotStopThePush (codex review
-// round 3): a served work tree whose renormalisation cannot finish yet —
-// here its HEAD is over the process's budget — does not refuse pushes
-// (the hook's measure needs only the line, which is in place): each push
-// warns and retries (the install runs per receive-pack request), and
-// once HEAD fits the next push brings the tree to its stored bytes and
-// stops warning.
+// round 3; integration A phase 4): a served work tree whose
+// renormalisation cannot finish yet does not refuse pushes (the hook's
+// measure needs only the line, which is in place): each push warns and
+// retries (the install runs per receive-pack request), and once the cause
+// is gone the next push brings the tree to its stored bytes and stops
+// warning. Since phase 4 only an I/O error or a crash can leave a
+// renormalisation pending past the line — here the work tree's top
+// directory is read-only, so its converted file cannot be replaced.
 func TestBudgetHook_PendingRenormalisationDoesNotStopThePush(t *testing.T) {
 	repo := servedConvertedTree(t)
-	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{MaxEntries: 1}})
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{}})
 	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
 	var logs bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+	if err := os.Chmod(repo, 0o555); err != nil { //nolint:gosec // G302: the test's own temp directory, made read-only on purpose
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(repo, 0o755) }) //nolint:gosec // G302: restored so the temp directory can be removed
 
 	h := budgetHandler(t, repo)
 	url := budgetServer(t, h, repo)
@@ -380,17 +386,52 @@ func TestBudgetHook_PendingRenormalisationDoesNotStopThePush(t *testing.T) {
 	if ok, err := git.HasNeutralCheckoutAttributes(context.Background(), repo); !ok || err != nil {
 		t.Fatalf("served repository lacks the neutral checkout attributes: %v %v", ok, err)
 	}
-	git.SetDefaultCheckoutLimits(git.CheckoutLimits{})
+	if err := os.Chmod(repo, 0o755); err != nil { //nolint:gosec // G302: the test's own temp directory
+		t.Fatal(err)
+	}
 	logs.Reset()
 	nulGit(t, work, nil, "commit", "-q", "--allow-empty", "-m", "2")
 	if out, err := gitPush(t, work, url, "HEAD:refs/heads/f2"); err != nil {
-		t.Fatalf("push once HEAD fits: %v\n%s", err, out)
+		t.Fatalf("push once the tree is writable: %v\n%s", err, out)
 	}
 	if strings.Contains(logs.String(), warn) {
-		t.Fatalf("still pending once HEAD fits:\n%s", logs.String())
+		t.Fatalf("still pending once the tree is writable:\n%s", logs.String())
 	}
 	if b, err := os.ReadFile(filepath.Join(repo, "f.txt")); err != nil || string(b) != "a\nb\n" {
 		t.Fatalf("the retried renormalisation did not bring f.txt to its stored bytes: %q %v", b, err)
+	}
+}
+
+// TestBudgetHook_HEADOverTheBudgetBeforeTheLineRefusesThePush
+// (integration A phase 4): a served repository whose HEAD is over the
+// budget when the line would first be added is not given the line (every
+// check that can fail runs before it), and the push gate, which needs the
+// line, refuses the push; nothing is written to the tree. Raising the
+// limit lets the next push add the line, renormalise and land
+// (KNOWN-LIMITATIONS, "Checkout Budget").
+func TestBudgetHook_HEADOverTheBudgetBeforeTheLineRefusesThePush(t *testing.T) {
+	repo := servedConvertedTree(t)
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{MaxEntries: 1}})
+	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
+	h := budgetHandler(t, repo)
+	url := budgetServer(t, h, repo)
+	work := budgetClone(t, url)
+	nulGit(t, work, nil, "commit", "-q", "--allow-empty", "-m", "0")
+	if out, err := gitPush(t, work, url, "HEAD:refs/heads/f0"); err == nil {
+		t.Fatalf("push over a HEAD past the budget landed:\n%s", out)
+	}
+	if ok, _ := git.HasNeutralCheckoutAttributes(context.Background(), repo); ok {
+		t.Fatal("the refused check wrote the line")
+	}
+	if _, err := os.Lstat(filepath.Join(repo, ".git", "spine-renormalise-pending")); err == nil {
+		t.Fatal("the refused check left a marker")
+	}
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{}})
+	if out, err := gitPush(t, work, url, "HEAD:refs/heads/f0"); err != nil {
+		t.Fatalf("push once the limit is raised: %v\n%s", err, out)
+	}
+	if b, err := os.ReadFile(filepath.Join(repo, "f.txt")); err != nil || string(b) != "a\nb\n" {
+		t.Fatalf("f.txt after the push = %q %v; want its stored bytes", b, err)
 	}
 }
 

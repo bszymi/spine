@@ -237,7 +237,9 @@ func (h *Handler) installBudgetHook(ctx context.Context, repoPath string) (strin
 	// checkout of what it admits. A work tree still waiting for its
 	// renormalisation does not stop the push — the measure needs only the
 	// line — and is retried by the next push; the tree's own operations
-	// report it.
+	// report it. A check that fails before the line (HEAD over the budget,
+	// a torn HEAD: TASK-003 integration A phase 4) leaves no line, so the
+	// push is refused (fail closed) until a call succeeds.
 	if err := git.NewCLIClient(repoPath).EnsureNeutralWorkTree(ctx); err != nil {
 		if !errors.Is(err, git.ErrRenormalisePending) {
 			return "", fmt.Errorf("neutral checkout attributes: %w", err)

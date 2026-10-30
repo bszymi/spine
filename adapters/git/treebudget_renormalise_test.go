@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -236,66 +237,88 @@ func TestNeutralAttributes_MarkerWithoutARecordQuarantinesFirst(t *testing.T) {
 	}
 }
 
-// TestNeutralAttributes_TornHEADKeepsTheMark (review round 4, P3): any
-// failure to read HEAD was taken for an unborn HEAD and cleared the
-// marker for good. A torn branch ref now returns the error and keeps the
-// mark; once the ref is repaired the next call renormalises.
+// TestNeutralAttributes_TornHEADKeepsTheMark (review round 4, P3;
+// integration A phase 4): a torn branch ref must never be taken for an
+// unborn HEAD. Before the line (phase 4: the HEAD probe runs first) it
+// refuses the call with nothing written — no line, no marker; once the ref
+// is repaired the next call renormalises. On a retry after a failure past
+// the line it returns the error and keeps the mark; once repaired, the
+// retry renormalises (quarantining first).
 func TestNeutralAttributes_TornHEADKeepsTheMark(t *testing.T) {
 	for _, tc := range []struct{ name, content string }{
 		{"names no object", strings.Repeat("0", 39) + "1\n"},
 		{"garbage", "garbage\n"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			repo := rnClone(t, false)
-			tight := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{MaxEntries: 1}))
-			if err := tight.EnsureNeutralWorkTree(ctx); !errors.Is(err, git.ErrRenormalisePending) {
-				t.Fatalf("first call (HEAD over the budget): %v", err)
-			}
-			ref := filepath.Join(repo, ".git", "refs", "heads", "main")
-			head, err := os.ReadFile(ref)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(ref, []byte(tc.content), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			c := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{}))
-			if err := c.EnsureNeutralWorkTree(ctx); !errors.Is(err, git.ErrRenormalisePending) {
-				t.Fatalf("torn HEAD: want ErrRenormalisePending, got %v", err)
-			}
-			if !rnMarked(t, repo) {
-				t.Fatal("a torn HEAD cleared the mark")
-			}
-			if err := os.WriteFile(ref, head, 0o644); err != nil { //nolint:gosec // G703: the test's own temp repository
-				t.Fatal(err)
-			}
-			if err := c.EnsureNeutralWorkTree(ctx); err != nil {
-				t.Fatalf("after the repair: %v", err)
-			}
-			rnStored(t, repo)
-			if rnMarked(t, repo) {
-				t.Error("still marked after the repair")
-			}
-		})
+		for _, afterLine := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/after-the-line=%v", tc.name, afterLine), func(t *testing.T) {
+				ctx := context.Background()
+				repo := rnClone(t, false)
+				c := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{}))
+				if afterLine {
+					git.SetRenormaliseAfterLineHookForTest(func() error { return errors.New("simulated I/O error") })
+					err := c.EnsureNeutralWorkTree(ctx)
+					git.SetRenormaliseAfterLineHookForTest(nil)
+					if !errors.Is(err, git.ErrRenormalisePending) {
+						t.Fatalf("first call: %v; want ErrRenormalisePending", err)
+					}
+				}
+				ref := filepath.Join(repo, ".git", "refs", "heads", "main")
+				head, err := os.ReadFile(ref)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(ref, []byte(tc.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				err = c.EnsureNeutralWorkTree(ctx)
+				if err == nil {
+					t.Fatal("a torn HEAD was taken for an unborn one")
+				}
+				if afterLine {
+					if !errors.Is(err, git.ErrRenormalisePending) || !rnMarked(t, repo) {
+						t.Fatalf("torn HEAD on the retry: %v, marked=%v; want ErrRenormalisePending and the mark kept", err, rnMarked(t, repo))
+					}
+				} else {
+					if errors.Is(err, git.ErrRenormalisePending) || rnMarked(t, repo) {
+						t.Fatalf("torn HEAD before the line: %v, marked=%v; want a plain refusal and no marker", err, rnMarked(t, repo))
+					}
+					if has, _ := git.HasNeutralCheckoutAttributes(ctx, repo); has {
+						t.Fatal("torn HEAD before the line: the line was written")
+					}
+				}
+				if err := os.WriteFile(ref, head, 0o644); err != nil { //nolint:gosec // G703: the test's own temp repository
+					t.Fatal(err)
+				}
+				if err := c.EnsureNeutralWorkTree(ctx); err != nil {
+					t.Fatalf("after the repair: %v", err)
+				}
+				rnStored(t, repo)
+				if rnMarked(t, repo) {
+					t.Error("still marked after the repair")
+				}
+			})
+		}
 	}
 }
 
 // TestNeutralAttributes_CancelledHEADProbeKeepsTheMark (review round 4,
-// P3): a request cancelled while renormalise looks at HEAD is not an
-// unborn HEAD: the error is returned, the mark kept, the next call
-// renormalises.
+// P3; integration A phase 4): a request cancelled while the call looks at
+// HEAD is not an unborn HEAD. The probe now runs before the line, so the
+// error is returned with nothing written; the next call renormalises.
 func TestNeutralAttributes_CancelledHEADProbeKeepsTheMark(t *testing.T) {
 	repo := rnClone(t, false)
 	ctx, cancel := context.WithCancel(context.Background())
 	git.SetRenormaliseHeadProbeHookForTest(cancel)
 	t.Cleanup(func() { git.SetRenormaliseHeadProbeHookForTest(nil) })
 	err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx)
-	if !errors.Is(err, git.ErrRenormalisePending) || !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled at the HEAD probe: want ErrRenormalisePending and context.Canceled, got %v", err)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, git.ErrRenormalisePending) {
+		t.Fatalf("cancelled at the HEAD probe: want context.Canceled before the line, got %v", err)
 	}
-	if !rnMarked(t, repo) {
-		t.Fatal("a cancelled request cleared the mark")
+	if rnMarked(t, repo) {
+		t.Fatal("a cancelled request left a marker")
+	}
+	if has, _ := git.HasNeutralCheckoutAttributes(context.Background(), repo); has {
+		t.Fatal("a cancelled request wrote the line")
 	}
 	git.SetRenormaliseHeadProbeHookForTest(nil)
 	if err := git.NewCLIClient(repo).EnsureNeutralWorkTree(context.Background()); err != nil {
@@ -424,30 +447,34 @@ func TestNeutralAttributes_LineWaitsForTheTreesHolder(t *testing.T) {
 }
 
 // TestNeutralAttributes_EditAfterTheRecordIsKept (codex review round 4,
-// P1): the record holds the real changes as they were when the line was
-// added; a renormalisation that failed then (HEAD over the budget) and
-// is retried later must not take an edit made in between for a
-// conversion. Both an edit to a file that was clean then and an edit to
-// a converted file survive the retry byte for byte; the untouched
-// converted file goes to its stored bytes.
+// P1; integration A phase 4): an edit made after the record must never be
+// taken for a conversion and rewritten without a quarantine. Since phase 4
+// only an I/O error or a crash can stop a renormalisation past the line,
+// and the retry after one quarantines the tracked state first (the
+// fingerprints that let round 4 keep such an edit in the tree are gone, on
+// the reviewer's recommendation): both an edit to a file that was clean
+// then and an edit to a converted file are in the quarantine commit, the
+// recorded real change stays in the tree, and the tree is at its stored
+// bytes.
 func TestNeutralAttributes_EditAfterTheRecordIsKept(t *testing.T) {
 	ctx := context.Background()
 	repo := rnClone(t, false)
 	logs := rnLogs(t)
-	tight := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{MaxEntries: 1}))
-	if err := tight.EnsureNeutralWorkTree(ctx); !errors.Is(err, git.ErrRenormalisePending) {
-		t.Fatalf("first call (HEAD over the budget): %v", err)
+	testutil.WriteFile(t, repo, "real.txt", "one\nREAL EDIT\n")
+	c := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{}))
+	git.SetRenormaliseAfterLineHookForTest(func() error { return errors.New("simulated crash after the line") })
+	err := c.EnsureNeutralWorkTree(ctx)
+	git.SetRenormaliseAfterLineHookForTest(nil)
+	if !errors.Is(err, git.ErrRenormalisePending) {
+		t.Fatalf("first call: %v; want ErrRenormalisePending", err)
 	}
 	testutil.WriteFile(t, repo, "plain.bin", "abc edited later")
 	testutil.WriteFile(t, repo, "f.txt", "a\r\nb\r\nedited later\r\n")
-	if err := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{})).EnsureNeutralWorkTree(ctx); err != nil {
+	if err := c.EnsureNeutralWorkTree(ctx); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	if b := rnRead(t, repo, "plain.bin"); b != "abc edited later" {
-		t.Errorf("plain.bin = %q, want the later edit kept", b)
-	}
-	if b := rnRead(t, repo, "f.txt"); b != "a\r\nb\r\nedited later\r\n" {
-		t.Errorf("f.txt = %q, want the later edit kept", b)
+	if b := rnRead(t, repo, "real.txt"); b != "one\nREAL EDIT\n" {
+		t.Errorf("real.txt = %q, want the recorded edit kept", b)
 	}
 	if b := rnRead(t, repo, "g.md"); b != "$Id$\nx\n" {
 		t.Errorf("g.md = %q, want its stored bytes", b)
@@ -455,10 +482,195 @@ func TestNeutralAttributes_EditAfterTheRecordIsKept(t *testing.T) {
 	if rnMarked(t, repo) {
 		t.Error("still marked")
 	}
-	if !strings.Contains(logs.String(), "changed_since_recorded=2") {
-		t.Errorf("want the two later edits counted:\n%s", logs.String())
+	i := strings.Index(logs.String(), "quarantine_sha=")
+	if i < 0 {
+		t.Fatalf("the retry did not quarantine:\n%s", logs.String())
 	}
-	if strings.Contains(logs.String(), "quarantine_sha=") {
-		t.Errorf("a proven retry quarantined:\n%s", logs.String())
+	sha := strings.Fields(logs.String()[i+len("quarantine_sha="):])[0]
+	for name, want := range map[string]string{"plain.bin": "abc edited later", "f.txt": "a\r\nb\r\nedited later\r\n"} {
+		if got := tbGit(t, repo, nil, "cat-file", "blob", sha+":"+name); got != strings.TrimSpace(want) {
+			t.Errorf("quarantine %s holds %s = %q, want the later edit %q", sha, name, got, want)
+		}
+	}
+}
+
+// TestNeutralAttributes_FsmonitorCannotHideARealEdit (review round 5, P3):
+// the record was a plain status under the old attributes, which trusts
+// core.fsmonitor and stat data; the decision after the line compares by
+// content with the monitor off. So an edit a stale monitor did not report
+// was missing from the record, looked conversion-only, and was rewritten
+// with no quarantine. The record is now taken by content with the monitor
+// off: the edit is recorded and kept.
+func TestNeutralAttributes_FsmonitorCannotHideARealEdit(t *testing.T) {
+	ctx := context.Background()
+	repo := rnClone(t, true)
+	hook := filepath.Join(t.TempDir(), "fsmonitor")
+	// A version-2 hook that always answers "token, nothing changed".
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf 'tok\\0'\n"), 0o755); err != nil { //nolint:gosec // G306: the hook must be executable
+		t.Fatal(err)
+	}
+	tbGit(t, repo, nil, "config", "core.fsmonitor", hook)
+	tbGit(t, repo, nil, "config", "core.fsmonitorHookVersion", "2")
+	tbGit(t, repo, nil, "status") // establish the token
+	tbGit(t, repo, nil, "status")
+	time.Sleep(1100 * time.Millisecond)
+	testutil.WriteFile(t, repo, "real.txt", "one\nREAL EDIT HIDDEN BY FSMONITOR\n")
+	if st := tbGit(t, repo, nil, "status", "--porcelain", "--untracked-files=no"); st != "" {
+		t.Fatalf("fixture: the monitor does not hide the edit: %q", st)
+	}
+	if err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b := rnRead(t, repo, "real.txt"); b != "one\nREAL EDIT HIDDEN BY FSMONITOR\n" {
+		t.Errorf("real.txt = %q; want the edit the monitor hid kept", b)
+	}
+	rnStored(t, repo)
+	if rnMarked(t, repo) {
+		t.Error("still marked")
+	}
+}
+
+// TestNeutralAttributes_StatDataCannotHideARealEdit (review round 5, P3):
+// git trusts an entry whose stat data matches, so a same-size edit whose
+// time is the old one (core.checkStat=minimal, core.trustctime=false, or an
+// edit within the clock's granularity) was missing from a plain status's
+// record and rewritten as a conversion. The record compares by content.
+func TestNeutralAttributes_StatDataCannotHideARealEdit(t *testing.T) {
+	ctx := context.Background()
+	repo := rnClone(t, true)
+	tbGit(t, repo, nil, "config", "core.checkStat", "minimal")
+	tbGit(t, repo, nil, "config", "core.trustctime", "false")
+	path := filepath.Join(repo, "real.txt")
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := rnRead(t, repo, "real.txt"); b != "one\r\n" {
+		t.Fatalf("fixture: real.txt = %q", b)
+	}
+	testutil.WriteFile(t, repo, "real.txt", "ONE\r\n") // same size
+	if err := os.Chtimes(path, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if st := tbGit(t, repo, nil, "status", "--porcelain", "--untracked-files=no"); st != "" {
+		t.Fatalf("fixture: the stat data does not hide the edit: %q", st)
+	}
+	if err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b := rnRead(t, repo, "real.txt"); b != "ONE\r\n" {
+		t.Errorf("real.txt = %q; want the edit the stat data hid kept", b)
+	}
+	rnStored(t, repo)
+	if rnMarked(t, repo) {
+		t.Error("still marked")
+	}
+}
+
+// TestNeutralAttributes_CrashAfterTheLineIsQuarantinedOnRetry
+// (integration A phase 4): a failure past the line — here a simulated
+// crash — leaves the line and the marker; the next call did not record
+// the tree itself, so it quarantines the tracked state before rewriting,
+// keeps the recorded real change and clears the marker.
+func TestNeutralAttributes_CrashAfterTheLineIsQuarantinedOnRetry(t *testing.T) {
+	ctx := context.Background()
+	repo := rnClone(t, false)
+	logs := rnLogs(t)
+	testutil.WriteFile(t, repo, "real.txt", "one\nREAL EDIT\n")
+	git.SetRenormaliseAfterLineHookForTest(func() error { return errors.New("simulated crash after the line") })
+	err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx)
+	git.SetRenormaliseAfterLineHookForTest(nil)
+	if !errors.Is(err, git.ErrRenormalisePending) {
+		t.Fatalf("first call: %v; want ErrRenormalisePending", err)
+	}
+	if has, _ := git.HasNeutralCheckoutAttributes(ctx, repo); !has || !rnMarked(t, repo) {
+		t.Fatalf("after the crash: line=%v marked=%v; want both", has, rnMarked(t, repo))
+	}
+	if err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	rnStored(t, repo)
+	if b := rnRead(t, repo, "real.txt"); b != "one\nREAL EDIT\n" {
+		t.Errorf("real.txt = %q, want the recorded edit kept", b)
+	}
+	if rnMarked(t, repo) {
+		t.Error("still marked")
+	}
+	if !strings.Contains(logs.String(), "quarantined first") || !strings.Contains(logs.String(), "quarantine_sha=") {
+		t.Errorf("the retry did not quarantine:\n%s", logs.String())
+	}
+}
+
+// TestNeutralAttributes_LinkedWorktreeIndexTimeIsPutBack (review round 5):
+// another worktree's record is taken by content too — its index's time is
+// set back for the comparison — but that worktree is not held and is read
+// with --no-optional-locks, so its index's own time is put back.
+func TestNeutralAttributes_LinkedWorktreeIndexTimeIsPutBack(t *testing.T) {
+	ctx := context.Background()
+	repo := rnClone(t, false)
+	wt := filepath.Join(t.TempDir(), "wt")
+	tbGit(t, repo, nil, "worktree", "add", "-q", "-b", "side", wt)
+	index := filepath.Join(tbGit(t, wt, nil, "rev-parse", "--absolute-git-dir"), "index")
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(index, old, old); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, wt, "real.txt", "one\nlinked\n")
+	if err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.ModTime().Equal(old) {
+		t.Errorf("the linked worktree's index time = %v; want it put back to %v", fi.ModTime(), old)
+	}
+	gd := tbGit(t, wt, nil, "rev-parse", "--absolute-git-dir")
+	changes, ok, err := git.ReadRenormaliseRecordForTest(filepath.Join(gd, git.RenormaliseMarkerName))
+	if err != nil || !ok || len(changes) != 1 || changes[0] != "real.txt" {
+		t.Errorf("the linked worktree's record = %q (ok=%v err=%v); want [real.txt]", changes, ok, err)
+	}
+}
+
+// TestNeutralAttributes_StatusIsBoundedByTheBudget (review round 5, P4):
+// the renormalisation's status was bounded by the per-command read limit
+// (16 MiB by default), so a tree with enough differing paths overflowed it
+// and stayed marked for good. It is now bounded by what the budget admits
+// (path bytes, plus four bytes a record, plus a margin), never below the
+// read limit: a client whose read limit is 4 KiB still renormalises a tree
+// whose status is larger.
+func TestNeutralAttributes_StatusIsBoundedByTheBudget(t *testing.T) {
+	if got, want := git.NewCLIClient(t.TempDir()).StatusLimitForTest(),
+		git.DefaultTreeMaxPathBytesTotal+4*git.DefaultTreeMaxEntries+1<<20; got != want {
+		t.Errorf("default status limit = %d; want %d", got, want)
+	}
+	big := git.NewCLIClient(t.TempDir(), git.WithTreeBudget(git.TreeBudget{MaxPathBytesTotal: 64 << 20, MaxEntries: 1 << 20}))
+	if got, want := big.StatusLimitForTest(), int64(64<<20+4<<20+1<<20); got != want {
+		t.Errorf("status limit with a larger budget = %d; want %d", got, want)
+	}
+	ctx := context.Background()
+	repo := rnClone(t, false)
+	long := strings.Repeat("d", 150)
+	for i := 0; i < 60; i++ {
+		testutil.WriteFile(t, repo, fmt.Sprintf("%s%03d.txt", long, i), "x\ny\n")
+	}
+	tbGit(t, repo, nil, "add", "-A")
+	tbGit(t, repo, nil, "commit", "-q", "-m", "many")
+	for i := 0; i < 60; i++ {
+		if err := os.Remove(filepath.Join(repo, fmt.Sprintf("%s%03d.txt", long, i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tbGit(t, repo, nil, "checkout", "--", ".")
+	c := git.NewCLIClient(repo, git.WithMaxOutputBytes(4096))
+	if err := c.EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatalf("a status larger than the read limit: %v", err)
+	}
+	if b := rnRead(t, repo, fmt.Sprintf("%s%03d.txt", long, 59)); b != "x\ny\n" {
+		t.Errorf("a converted file = %q; want its stored bytes", b)
+	}
+	if rnMarked(t, repo) {
+		t.Error("still marked")
 	}
 }

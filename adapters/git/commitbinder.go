@@ -66,6 +66,10 @@ func checkObjectName(op, what, sha string) error {
 type runOpts struct {
 	env   []string
 	stdin io.Reader
+	// limit, when positive, replaces the per-command stdout limit
+	// (outputLimit) for a command whose output a caller bounds itself
+	// (contentStatus's statusLimit).
+	limit int64
 }
 
 // runWith executes git in the repository with extra env and stdin, and
@@ -116,6 +120,9 @@ func (c *CLIClient) runWith(ctx context.Context, op string, o runOpts, args ...s
 		cmd.Stdin = o.stdin
 	}
 	limit := c.outputLimit()
+	if o.limit > 0 {
+		limit = o.limit
+	}
 	stdout := newStdoutSink(limit, 0, true, true)
 	stderr := &stderrSink{}
 	cmd.Stdout = stdout

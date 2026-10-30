@@ -1311,19 +1311,32 @@ The following limitations have been resolved:
     quarantines the tracked state first (`git stash create`, SHA at Warn) before rewriting the
     unrecorded differences — an edit made there after the line is in the quarantine, not in the
     tree; a worktree that cannot be marked is logged at Warn and left as it is;
-  - a retried renormalisation (the first failed: HEAD over the budget, a torn ref, a cancelled
-    request) rewrites only the files whose fingerprint still matches the one taken before the
-    first attempt's rewrite; a file edited since is left as it is;
+  - a renormalisation stopped past the line (an I/O error or a crash: every other failure is
+    checked before the line) is retried by the next call, which quarantines the tracked state
+    first (`git stash create`, SHA at Warn) and then rewrites the unrecorded differences — an edit
+    made between the two calls is in the quarantine, not in the tree;
   - a tree whose marker has no record (an earlier build of this change wrote it, or it cannot be
-    read: damaged, torn, or past its bounds — the marker is untrusted input), or whose record
-    was never fingerprinted (a crash right after the line): its tracked state is quarantined
+    read: damaged, torn, or past its bounds — the marker is untrusted input): the same quarantine
     first, then every unrecorded unstaged difference is rewritten; staged changes are still never
     rewritten;
   - only the calling tree's hold is taken while the line is added; a sequence running in another
     worktree of the same repository at that moment runs on under the new attributes (one-time).
-  A tree whose renormalisation fails stays marked and is retried by the next call. A work tree
-  with more uncommitted changes than a record holds (2,097,152 paths) is not given the line (the
-  build or push logs why), so its budgeted measures keep refusing until it has fewer. A path marked
+  A check that fails before the line — HEAD over the budget, a torn or unreadable HEAD, a cancelled
+  request — leaves no line and no marker, so the repository's budgeted checkouts, merges and pushes
+  keep refusing (`ErrNeutralAttributesMissing`; the git endpoint answers `500 push gate
+  unavailable`) until a call succeeds: a tree already over the budget when the line is first added
+  needs the limit raised for that call (or the tree reduced outside Spine), not a repair push or
+  merge, which the missing line refuses too. A work tree with more uncommitted changes than a
+  record holds (2,097,152 paths) is not given the line either (the build or push logs why). The
+  renormalisation's `git status` is bounded by what the budget admits (`SPINE_GIT_TREE_MAX_PATH_BYTES`
+  plus four bytes per `SPINE_GIT_TREE_MAX_ENTRIES` plus 1 MiB, never below the per-command read
+  limit), so every tracked path of a tree the budget admits fits. A status that is larger anyway
+  (more index entries than HEAD's tree, such as staged additions past the margin) fails closed:
+  before the line it refuses the call (no line, until the work tree has fewer differences); past
+  the line the tree stays marked, the shared workspace tree is repaired by the restore around its
+  next sequence (which quarantines and resets it), and a code-repository clone of the git pool by
+  deleting the clone, so the pool clones it again (a budgeted clone gets the line before its
+  checkout). A path marked
   assume-unchanged or skip-worktree is trusted as git trusts it: not compared, not rewritten. A
   shared-mode workspace build waits for the tree's hold (to add the line, or to renormalise a
   marked tree) at most its init deadline (`SPINE_WS_POOL_INIT_TIMEOUT`; "Shared Working Tree",

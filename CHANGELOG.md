@@ -73,26 +73,30 @@ change.
   code-repository clone, and on every push the git endpoint serves — handles it:
   - it takes the calling tree's hold before it adds the line, so a sequence holding the tree never
     runs on under changed attributes;
-  - under the old attributes it records each work tree's real changes (every tracked path that
-    differs from HEAD or the index, staged or not) into a marker in that work tree's git
-    directory — the calling tree's and every linked worktree's — and only then writes the line;
-  - it renormalises the calling tree under its hold: git compares every tracked file's content
-    (not its stat data, which would call a long-lived converted tree clean), and only the files
-    whose content differs, whose index entry matches HEAD and that are not in the record are
-    rewritten from the index (HEAD's tree is measured first). Recorded paths, staged changes and
-    untracked files are left exactly as they are, and one Warn gives their count; a recorded path
-    keeps the bytes it was checked out with until it is committed or discarded. Before rewriting,
-    the call adds a fingerprint of each such file to the marker, so a retry (after HEAD over the
-    budget, a torn ref, a cancelled request) rewrites only files still exactly as they were and
-    leaves a file edited since as it is. A marker without a record (written by an earlier build of
-    this change, or damaged), or with a record no call has fingerprinted (a linked worktree's, or a
-    crash right after the line), falls back to quarantining the tracked state first (`git stash
-    create`, the SHA logged at Warn) and then rewriting every unstaged difference not recorded;
-  - the mark is cleared only then. An unborn HEAD is identified positively; a renormalisation that
-    fails or is interrupted (HEAD over the budget, a torn ref, a cancelled request, a workspace
-    build's init deadline, a crash) is retried by the next call and returns its error meanwhile (matching
-    `git.ErrRenormalisePending`). A push is not refused for it (its measure needs only the line);
-    it logs a Warn and the next push retries. A linked worktree is renormalised by a call on it.
+  - still under the old attributes it runs every check that can fail: an unborn HEAD is identified
+    positively (nothing to renormalise), a torn HEAD is refused, and HEAD's tree is measured against
+    the budget from the stored objects. Any failure — HEAD over the budget, a torn ref, a cancelled
+    request, a workspace build's init deadline — is returned with nothing written: no line, no
+    marker, the tree as it was (fail closed: the repository's budgeted checkouts, merges and pushes
+    keep refusing until the next call succeeds);
+  - it records each work tree's real changes by content (git compares every tracked file, not its
+    stat data, with `core.fsmonitor` off: every tracked path that differs from HEAD or the index,
+    staged or not) into a marker in that work tree's git directory — the calling tree's and every
+    linked worktree's, the latter read without taking their index lock and with their index's time
+    put back — and only then writes the line;
+  - it compares the calling tree by content again under the line and rewrites from the index every
+    file whose content differs, whose index entry matches HEAD and that is not in the record.
+    Recorded paths, staged changes and untracked files are left exactly as they are, and one Warn
+    gives their count; a recorded path keeps the bytes it was checked out with until it is committed
+    or discarded. The mark is then cleared;
+  - past the line only an I/O error or a crash can stop it; the error is returned meanwhile
+    (matching `git.ErrRenormalisePending`) and the mark kept. The next call did not take that
+    record itself, so — like a call on a linked worktree, or on a marker without a readable record
+    (written by an earlier build of this change, damaged, or past its bounds: the marker is
+    untrusted input) — it checks HEAD again, quarantines the tracked state first (`git stash
+    create`, the SHA logged at Warn) and then rewrites every unrecorded unstaged difference. A push
+    is not refused for a pending renormalisation (its measure needs only the line); it logs a Warn
+    and the next push retries. A linked worktree is renormalised by a call on it.
   A tree whose file already ends in the line, with no mark, is not touched again.
 - Not neutralised (operator configuration): a host `merge.<name>.driver` and `pull.twohead`.
 - With the deadline on, `EnterBranch` adds its worktree `--no-checkout` and fills it with

@@ -32,9 +32,11 @@ import (
 )
 
 func TestPreauth_PendingRenormalisationIsInvisibleBeforeAuthentication(t *testing.T) {
-	// A budget the converted tree's HEAD (two entries) is over, so the
-	// build's renormalisation is refused and stays pending.
-	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{MaxEntries: 1}})
+	// The build's renormalisation stops past the line and stays pending:
+	// since TASK-003's integration A phase 4 only an I/O error or a crash
+	// can do that, so the work tree's top directory is made read-only and
+	// its converted file cannot be replaced.
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{}})
 	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
 
 	repo := testutil.NewTempRepo(t)
@@ -57,6 +59,10 @@ func TestPreauth_PendingRenormalisationIsInvisibleBeforeAuthentication(t *testin
 	}
 	run("checkout", "--", "a.txt")
 	marker := filepath.Join(repo, ".git", "spine-renormalise-pending")
+	if err := os.Chmod(repo, 0o555); err != nil { //nolint:gosec // G302: the test's own temp directory, made read-only on purpose
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(repo, 0o755) }) //nolint:gosec // G302: restored so the temp directory can be removed
 	hook := filepath.Join(repo, ".git", "hooks", "pre-receive")
 
 	fs := newFakeStore()

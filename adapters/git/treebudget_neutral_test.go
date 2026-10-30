@@ -479,26 +479,32 @@ func TestNeutralAttributes_EnsureNeutralWorkTreeRenormalises(t *testing.T) {
 }
 
 // TestNeutralAttributes_FailedRenormalisationIsRetried (codex review
-// round 3): a renormalisation that fails after the line is written —
-// here HEAD's tree is over the first client's budget — must not leave the
-// tree converted under a file that already ends in the line. The next
-// call, once the budget allows HEAD, still brings the tree to the stored
-// bytes and the merge succeeds; after that, no call touches the tree
-// again, whatever its budget.
+// round 3; integration A phase 4): a tree whose HEAD is over the client's
+// budget used to get the line and a pending renormalisation. Since phase 4
+// every check that can fail runs before the line: the call is refused
+// with nothing written — no line, no marker, the tree as it was — and so
+// is a second one. Once the budget allows HEAD the next call brings the
+// tree to the stored bytes and the merge succeeds; after that, no call
+// touches the tree again, whatever its budget.
 func TestNeutralAttributes_FailedRenormalisationIsRetried(t *testing.T) {
 	ctx := context.Background()
 	repo := ntConvertedClone(t, "* text eol=crlf\n", false)
 	tight := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{MaxEntries: 1}))
-	err := tight.EnsureNeutralWorkTree(ctx)
-	var tooLarge *git.TreeTooLargeError
-	if !errors.As(err, &tooLarge) || !errors.Is(err, git.ErrRenormalisePending) {
-		t.Fatalf("first call: want the HEAD-over-budget refusal as ErrRenormalisePending, got %v", err)
-	}
-	if has, herr := git.HasNeutralCheckoutAttributes(ctx, repo); herr != nil || !has {
-		t.Fatalf("fixture: the line was not written by the failed call (%v, %v)", has, herr)
-	}
-	if err := tight.EnsureNeutralWorkTree(ctx); !errors.As(err, &tooLarge) {
-		t.Fatalf("a retry while HEAD is still over the budget: want the refusal again, got %v", err)
+	for i := 0; i < 2; i++ {
+		err := tight.EnsureNeutralWorkTree(ctx)
+		var tooLarge *git.TreeTooLargeError
+		if !errors.As(err, &tooLarge) || errors.Is(err, git.ErrRenormalisePending) {
+			t.Fatalf("call %d: want the HEAD-over-budget refusal before the line (not ErrRenormalisePending), got %v", i, err)
+		}
+		if has, herr := git.HasNeutralCheckoutAttributes(ctx, repo); herr != nil || has {
+			t.Fatalf("call %d: the refused call wrote the line (%v, %v)", i, has, herr)
+		}
+		if _, err := os.Lstat(filepath.Join(repo, ".git", git.RenormaliseMarkerName)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("call %d: the refused call left a marker (%v)", i, err)
+		}
+		if b, _ := os.ReadFile(filepath.Join(repo, "a.txt")); !strings.Contains(string(b), "\r\n") {
+			t.Fatalf("call %d: the refused call rewrote a.txt: %q", i, b)
+		}
 	}
 	c := git.NewCLIClient(repo, git.WithTreeBudget(git.TreeBudget{}))
 	if err := c.EnsureNeutralWorkTree(ctx); err != nil {

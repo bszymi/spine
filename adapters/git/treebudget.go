@@ -424,16 +424,41 @@ func relabel(err error, op string) error {
 // opClasses) and of the errors it returns; checkTrees relabels them.
 const measureOp = "measure_tree"
 
-// measureTree runs the streamed listing of rev and, when the tree has
-// .gitattributes, their scan. b must be effective.
+// checkStoredTrees is checkTrees without the neutral-line precondition:
+// it measures what the trees STORE (`ls-tree -l` sizes, which no attribute
+// changes), not what a checkout under the repository's attributes would
+// write. It is for the checks EnsureNeutralWorkTree runs before it adds
+// the line (INIT-024 integration A phase 4); a checkout is never admitted
+// on it.
+func (c *CLIClient) checkStoredTrees(ctx context.Context, op string, revs ...string) error {
+	l := c.CheckoutLimits()
+	if l.Budget == nil {
+		return nil
+	}
+	b := l.Budget.Effective()
+	for _, rev := range revs {
+		if _, err := c.measureStoredTree(ctx, rev, b); err != nil {
+			return relabel(err, op)
+		}
+	}
+	return nil
+}
+
+// measureTree runs the streamed listing of rev. b must be effective.
 func (c *CLIClient) measureTree(ctx context.Context, rev string, b TreeBudget) (TreeStats, error) {
-	const op = measureOp
 	// The budget's premise: checkouts in this repository write stored
 	// bytes. Without the neutral attributes line nothing the listing sums
 	// bounds what they write, so the measure refuses (fail closed).
-	if err := c.requireNeutralCheckoutAttributes(ctx, op); err != nil {
+	if err := c.requireNeutralCheckoutAttributes(ctx, measureOp); err != nil {
 		return TreeStats{}, err
 	}
+	return c.measureStoredTree(ctx, rev, b)
+}
+
+// measureStoredTree is the streamed listing of rev against b: the stored
+// sizes, entries and path bytes. b must be effective.
+func (c *CLIClient) measureStoredTree(ctx context.Context, rev string, b TreeBudget) (TreeStats, error) {
+	const op = measureOp
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	sink := &treeListingSink{budget: b, stop: cancel}
