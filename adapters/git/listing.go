@@ -403,13 +403,19 @@ func (s *pathCounter) unterminated() bool               { return s.partial }
 // (commandEnv): the pinned delta-base cache and the C locale, and for a
 // read command GIT_ALLOC_LIMIT.
 func (c *CLIClient) runListing(ctx context.Context, op string, out recordStream, unterminated func() *GitError, args ...string) error {
+	return c.runListingEnv(ctx, op, nil, out, unterminated, args...)
+}
+
+// runListingEnv is runListing with extra environment entries, appended
+// after the class's (so they win).
+func (c *CLIClient) runListingEnv(ctx context.Context, op string, env []string, out recordStream, unterminated func() *GitError, args ...string) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	out.bindStop(cancel)
 	class := classOf(op)
 	cmd := newGitCmd(runCtx, args...)
 	cmd.Dir = c.repoPath
-	cmd.Env = c.commandEnv(class)
+	cmd.Env = append(c.commandEnv(class), env...)
 	if c.envHook != nil {
 		c.envHook(op, cmd.Env)
 	}

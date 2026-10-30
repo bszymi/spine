@@ -716,10 +716,18 @@ func (c *CLIClient) realChanges(ctx context.Context, op, dir string) ([]string, 
 // and its records to the record ceiling. Every tracked path of a tree the
 // budget admits therefore fits; a status past either fails closed.
 func (c *CLIClient) contentStatus(ctx context.Context, op, dir string) ([]trackedChange, error) {
-	var pre []string
+	var pre, env []string
 	if dir != "" {
 		// Another tree, not held: read only, never rewrite its index.
 		pre = []string{"--no-optional-locks", "-C", dir}
+	} else {
+		// The held tree's status must write the index (review round 6):
+		// the refresh records each racily clean entry whose content
+		// differs as modified, so the rewrite that follows sees it. With
+		// GIT_OPTIONAL_LOCKS=0 inherited from the server's environment it
+		// would not, the index time would be put back, and checkout-index
+		// would skip every entry whose stat data still matches.
+		env = []string{"GIT_OPTIONAL_LOCKS=1"}
 	}
 	index, _, err := c.runWith(ctx, op, runOpts{}, append(pre, "rev-parse", "--git-path", "index")...)
 	if err != nil {
@@ -742,11 +750,12 @@ func (c *CLIClient) contentStatus(ctx context.Context, op, dir string) ([]tracke
 	args = append(args, "-c", "core.fsmonitor=false",
 		"status", "--porcelain=v1", "-z", "--untracked-files=no", "--no-renames", "--ignore-submodules=all")
 	// The status may refresh the index (the held tree): it runs under the
-	// client's mutate deadline, as runWith's commands do.
+	// client's mutate deadline, as runWith's commands do, in the C locale
+	// runListing gives every listing.
 	runCtx, cancel := withMutateDeadline(ctx, c.CheckoutLimits().MutateTimeout)
 	defer cancel()
 	out := newStatusCollector(op, c.listingBounds())
-	err = c.runListing(runCtx, op, out, func() *GitError {
+	err = c.runListingEnv(runCtx, op, env, out, func() *GitError {
 		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "unterminated `git status -z` output"}
 	}, args...)
 	// A status that refreshed the index (the held tree, when it could take
@@ -924,14 +933,23 @@ func (c *CLIClient) renormalise(ctx context.Context, op, marker string, recorded
 			return err
 		}
 	}
-	var in strings.Builder
-	for _, p := range rewrite {
-		in.WriteString(p)
-		in.WriteByte(0)
-	}
-	if _, _, err := c.runWith(ctx, op, runOpts{stdin: strings.NewReader(in.String())},
-		"checkout-index", "-f", "-u", "-z", "--stdin"); err != nil {
+	if err := c.rewriteFromIndex(ctx, op, rewrite); err != nil {
 		return err
+	}
+	// The mark is cleared only once the tree is seen at its stored bytes
+	// (review round 6): compared by content again, no unrecorded file whose
+	// index entry matches HEAD may still differ. A rewrite git skipped (an
+	// entry it took for up to date) keeps the mark, so the next call
+	// retries, quarantining first.
+	after, err := c.contentStatus(ctx, op, "")
+	if err != nil {
+		return err
+	}
+	for _, ch := range after {
+		if ch.x == ' ' && ch.y == 'M' && !keep[ch.path] {
+			return &GitError{Kind: ErrKindPermanent, Op: op,
+				Message: fmt.Sprintf("the work tree still differs from its stored bytes after the rewrite (%q and others); the mark is kept", ch.path)}
+		}
 	}
 	switch {
 	case quarantine:
@@ -942,6 +960,26 @@ func (c *CLIClient) renormalise(ctx context.Context, op, marker string, recorded
 			"repo_path", c.repoPath, "rewritten", len(rewrite), "left_as_they_were", len(rec.changes))
 	}
 	return done()
+}
+
+// renormaliseRewriteHook, when set (tests only), replaces the rewrite's
+// checkout-index.
+var renormaliseRewriteHook func(paths []string) error
+
+// rewriteFromIndex writes paths from the index (`checkout-index -f -u`,
+// NUL-separated on stdin).
+func (c *CLIClient) rewriteFromIndex(ctx context.Context, op string, paths []string) error {
+	if renormaliseRewriteHook != nil {
+		return renormaliseRewriteHook(paths)
+	}
+	var in strings.Builder
+	for _, p := range paths {
+		in.WriteString(p)
+		in.WriteByte(0)
+	}
+	_, _, err := c.runWith(ctx, op, runOpts{stdin: strings.NewReader(in.String())},
+		"checkout-index", "-f", "-u", "-z", "--stdin")
+	return err
 }
 
 // headUnborn reports whether HEAD is unborn, identified positively

@@ -670,3 +670,81 @@ func TestNeutralAttributes_StatusIsBoundedByTheBudget(t *testing.T) {
 		t.Error("still marked")
 	}
 }
+
+// TestNeutralAttributes_OptionalLocksOffStillRenormalises (review round 6,
+// P4): with GIT_OPTIONAL_LOCKS=0 in the server's environment the content
+// comparison could not write the index, so checkout-index took the
+// converted files for up to date and rewrote nothing — and the marker was
+// cleared over a tree still converted. The held tree's status now writes
+// the index, and the mark is cleared only once the tree is seen at its
+// stored bytes.
+func TestNeutralAttributes_OptionalLocksOffStillRenormalises(t *testing.T) {
+	t.Setenv("GIT_OPTIONAL_LOCKS", "0")
+	repo := rnClone(t, true)
+	if err := git.NewCLIClient(repo).EnsureNeutralWorkTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rnStored(t, repo)
+	if rnMarked(t, repo) {
+		t.Error("still marked")
+	}
+}
+
+// TestNeutralAttributes_SkippedRewriteKeepsTheMark (review round 6, P4):
+// a rewrite that leaves a conversion-only file as it was — whatever the
+// reason git skipped it — must not clear the mark: the call returns
+// ErrRenormalisePending, and the next one renormalises (quarantining
+// first).
+func TestNeutralAttributes_SkippedRewriteKeepsTheMark(t *testing.T) {
+	ctx := context.Background()
+	repo := rnClone(t, false)
+	git.SetRenormaliseRewriteHookForTest(func([]string) error { return nil })
+	err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx)
+	git.SetRenormaliseRewriteHookForTest(nil)
+	if !errors.Is(err, git.ErrRenormalisePending) || !rnMarked(t, repo) {
+		t.Fatalf("a rewrite that changed nothing: %v, marked=%v; want ErrRenormalisePending and the mark kept", err, rnMarked(t, repo))
+	}
+	if err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatalf("the next call: %v", err)
+	}
+	rnStored(t, repo)
+	if rnMarked(t, repo) {
+		t.Error("still marked")
+	}
+}
+
+// TestNeutralAttributes_QuarantineSeesWhatAMonitorHides (review round 6,
+// P4): the quarantine before a retry's rewrite ran `git stash create` with
+// the repository's core.fsmonitor, so an edit a stale monitor did not
+// report — in an index whose entries the monitor had marked valid — was
+// left out of it, and the rewrite that followed lost it. The stash is
+// taken with the monitor off: the edit is in it. (Through
+// EnsureNeutralWorkTree the content comparison already rewrites the index
+// without the monitor's marks; the quarantine must not depend on that.)
+func TestNeutralAttributes_QuarantineSeesWhatAMonitorHides(t *testing.T) {
+	ctx := context.Background()
+	repo := rnClone(t, true)
+	hook := filepath.Join(t.TempDir(), "fsmonitor")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf 'tok\\0'\n"), 0o755); err != nil { //nolint:gosec // G306: the hook must be executable
+		t.Fatal(err)
+	}
+	tbGit(t, repo, nil, "config", "core.fsmonitor", hook)
+	tbGit(t, repo, nil, "config", "core.fsmonitorHookVersion", "2")
+	tbGit(t, repo, nil, "status")
+	tbGit(t, repo, nil, "status")
+	time.Sleep(1100 * time.Millisecond)
+	testutil.WriteFile(t, repo, "real.txt", "one\nEDIT A MONITOR HIDES\n")
+	if st := tbGit(t, repo, nil, "status", "--porcelain", "--untracked-files=no"); st != "" {
+		t.Fatalf("fixture: the monitor does not hide the edit: %q", st)
+	}
+	sha, err := git.NewCLIClient(repo).QuarantineTrackedForTest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha == "" {
+		t.Fatal("the quarantine saved nothing: the monitor hid the edit from it")
+	}
+	if got := tbGit(t, repo, nil, "cat-file", "blob", sha+":real.txt"); got != "one\nEDIT A MONITOR HIDES" {
+		t.Errorf("quarantine %s holds real.txt = %q; want the edit the monitor hid", sha, got)
+	}
+}

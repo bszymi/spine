@@ -886,8 +886,11 @@ func (c *CLIClient) quarantineTracked(ctx context.Context, op string) (string, e
 		"GIT_AUTHOR_NAME=Spine", "GIT_AUTHOR_EMAIL=spine@spine.local",
 		"GIT_COMMITTER_NAME=Spine", "GIT_COMMITTER_EMAIL=spine@spine.local",
 	}
+	// core.fsmonitor off (review round 6): a stale monitor would keep a
+	// modified file out of the quarantine, and a renormalisation that
+	// quarantines before it rewrites would then lose it.
 	out, _, err := c.runWith(ctx, op, runOpts{env: env},
-		"stash", "create", "spine: quarantined working-tree state")
+		"-c", "core.fsmonitor=false", "stash", "create", "spine: quarantined working-tree state")
 	if err != nil {
 		return "", err
 	}

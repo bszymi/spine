@@ -1,5 +1,7 @@
 package git
 
+import "context"
+
 // Test seams for the neutral attributes' renormalisation (INIT-024
 // TASK-003 review round 4; integration A phases 3-4).
 
@@ -47,3 +49,15 @@ func WriteRenormaliseRecordForTest(path string, changes []string) error {
 
 // MaxRenormaliseRecordEntries is the record's entry bound.
 const MaxRenormaliseRecordEntries = maxRenormaliseRecordEntries
+
+// SetRenormaliseRewriteHookForTest replaces the renormalisation's
+// checkout-index (nil restores it).
+func SetRenormaliseRewriteHookForTest(fn func(paths []string) error) {
+	renormaliseRewriteHook = fn
+}
+
+// QuarantineTrackedForTest is quarantineTracked (`git stash create` of the
+// tracked state): the quarantine commit's id, "" when git saved nothing.
+func (c *CLIClient) QuarantineTrackedForTest(ctx context.Context) (string, error) {
+	return c.quarantineTracked(ctx, "neutral_attributes")
+}
