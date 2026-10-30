@@ -256,27 +256,20 @@ func TestRecheck_UnannouncedUpdateIsRefused(t *testing.T) {
 // served work tree whose renormalisation is still pending lets a push
 // through with a Warn — and the apply-time re-check still runs: the held
 // push whose step became a review step is refused, the one whose step
-// did not lands.
+// did not lands. (INIT-024 integration A: since TASK-003's phase 4 every
+// check that can fail runs before the line, so only an I/O error or a
+// crash leaves a renormalisation pending past it — here a stale
+// index.lock, which the rewrite cannot take and the status reads around.
+// The untracked file over a tracked directory this test used no longer
+// leaves anything pending: real changes are recorded, not reset.)
 func TestRecheck_RunsWithRenormalisationPending(t *testing.T) {
 	setup := func(t *testing.T) *pgrRunFixture {
-		repo := t.TempDir()
-		nulGit(t, repo, nil, "init", "-q", "-b", "main")
-		if err := os.MkdirAll(filepath.Join(repo, "d"), 0o750); err != nil {
+		repo := convertedServedTree(t)
+		f := pgrRunSetup(t, repo)
+		if err := os.WriteFile(filepath.Join(repo, ".git", "index.lock"), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(repo, "d", "x"), []byte("x\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		nulGit(t, repo, nil, "add", "-A")
-		nulGit(t, repo, nil, "commit", "-q", "-m", "base")
-		nulGit(t, repo, nil, "branch", pgrRun)
-		if err := os.RemoveAll(filepath.Join(repo, "d")); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(repo, "d"), []byte("in the way\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return pgrRunSetup(t, repo)
+		return f
 	}
 	var logs bytes.Buffer
 	var logMu sync.Mutex

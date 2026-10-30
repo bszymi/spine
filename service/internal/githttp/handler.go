@@ -475,7 +475,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// below. A push that cannot have it is refused (fail closed). A
 		// work tree whose renormalisation is still pending does not stop
 		// the push (installBudgetHook warns and goes on), and the
-		// admission re-check below is armed all the same.
+		// admission re-check below is armed all the same. A check that
+		// fails before the neutral line is added (HEAD over the budget or
+		// unreadable: TASK-003, integration A phase 4) leaves no line, so
+		// the push is refused here, before the re-check is armed. The
+		// install runs after admission, under this push's slot: a first
+		// push that waits for the work tree's hold keeps its slot, and the
+		// command-read deadline, which bounds only the command section,
+		// does not apply to that wait.
 		dir, err := h.installBudgetHook(r.Context(), repoPath)
 		if err != nil {
 			log.Error("checkout-budget pre-receive hook not installed; push refused", "error", err, "repo_path", repoPath)
