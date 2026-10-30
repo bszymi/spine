@@ -748,3 +748,45 @@ func TestNeutralAttributes_QuarantineSeesWhatAMonitorHides(t *testing.T) {
 		t.Errorf("quarantine %s holds real.txt = %q; want the edit the monitor hid", sha, got)
 	}
 }
+
+// TestNeutralAttributes_MarkerWithoutTheLineIsRecordedAgain (review round
+// 6, P4): a failure after the work tree's record but before the line is in
+// place — here the info/attributes write, with .git/info a dangling link
+// (refused for root too) — leaves a marker and no line. The next call that
+// adds the line records the tree again, by content, so an edit made in
+// between is recorded and kept, and the tree is renormalised.
+func TestNeutralAttributes_MarkerWithoutTheLineIsRecordedAgain(t *testing.T) {
+	ctx := context.Background()
+	repo := rnClone(t, false)
+	info := filepath.Join(repo, ".git", "info")
+	if err := os.RemoveAll(info); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), info); err != nil {
+		t.Fatal(err)
+	}
+	err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx)
+	if err == nil || errors.Is(err, git.ErrRenormalisePending) {
+		t.Fatalf("a failed info/attributes write: %v; want its error, before the line", err)
+	}
+	if !rnMarked(t, repo) {
+		t.Fatal("fixture: the failure did not leave the marker")
+	}
+	if err := os.Remove(info); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, repo, "real.txt", "one\nEDIT IN BETWEEN\n")
+	if err := git.NewCLIClient(repo).EnsureNeutralWorkTree(ctx); err != nil {
+		t.Fatalf("the next call: %v", err)
+	}
+	if has, _ := git.HasNeutralCheckoutAttributes(ctx, repo); !has {
+		t.Fatal("the next call did not add the line")
+	}
+	if b := rnRead(t, repo, "real.txt"); b != "one\nEDIT IN BETWEEN\n" {
+		t.Errorf("real.txt = %q; want the edit made in between recorded and kept", b)
+	}
+	rnStored(t, repo)
+	if rnMarked(t, repo) {
+		t.Error("still marked")
+	}
+}

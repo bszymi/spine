@@ -514,14 +514,18 @@ func requireRepositoryTop(ctx context.Context, repoDir string) error {
 //     every check that can fail: HEAD unborn — identified positively —
 //     needs nothing; a torn HEAD is refused; HEAD's tree is measured
 //     against the client's budget (when it has one) from the stored
-//     objects, which do not depend on attributes. Any failure returns its
-//     error with nothing written: no line, no marker.
+//     objects, which do not depend on attributes. A failed check returns
+//     its error with nothing written: no line, no marker.
 //  2. It records each work tree's real changes BY CONTENT
 //     (forceContentCompare, core.fsmonitor off): every tracked path that
 //     differs from HEAD or the index, staged or not, into a marker in that
 //     work tree's git directory — this tree's and every linked worktree's
 //     (`git worktree list`, read with --no-optional-locks, its index's
-//     time put back). Only then is the line written.
+//     time put back). Only then is the line written. A failure after this
+//     tree's record — the worktree listing, a cancel while another tree is
+//     marked, the info/attributes write — returns with a marker and no
+//     line (review round 6); the next call that adds the line takes the
+//     record again and renormalises.
 //  3. Under the line it compares the held tree by content again and
 //     rewrites from the index (`checkout-index -f -u`) every file that
 //     differs, whose index entry matches HEAD and that is not recorded —

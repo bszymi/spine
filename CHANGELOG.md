@@ -222,7 +222,10 @@ change.
     the budget from the stored objects. Any failure — HEAD over the budget, a torn ref, a cancelled
     request, a workspace build's init deadline — is returned with nothing written: no line, no
     marker, the tree as it was (fail closed: the repository's budgeted checkouts, merges and pushes
-    keep refusing until the next call succeeds);
+    keep refusing until the next call succeeds). A failure after the tree's record but before the
+    line is in place (the worktree listing, a cancel while another worktree is marked, the
+    `info/attributes` write) leaves a marker without the line, which the next call that adds the
+    line records again;
   - it records each work tree's real changes by content (git compares every tracked file, not its
     stat data, with `core.fsmonitor` off: every tracked path that differs from HEAD or the index,
     staged or not) into a marker in that work tree's git directory — the calling tree's and every

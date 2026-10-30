@@ -1438,7 +1438,11 @@ The following limitations have been resolved:
   - only the calling tree's hold is taken while the line is added; a sequence running in another
     worktree of the same repository at that moment runs on under the new attributes (one-time).
   A check that fails before the line — HEAD over the budget, a torn or unreadable HEAD, a cancelled
-  request — leaves no line and no marker, so the repository's budgeted checkouts, merges and pushes
+  request — leaves no line and no marker. A failure after the work tree's record but before the line
+  is in place (the worktree listing failing, a cancel while another worktree is marked, the
+  `info/attributes` write failing) leaves a marker without the line; the next call that adds the
+  line records the tree again and renormalises it. Either way the repository's budgeted checkouts,
+  merges and pushes
   keep refusing (`ErrNeutralAttributesMissing`; the git endpoint answers `500 push gate
   unavailable`) until a call succeeds: a tree already over the budget when the line is first added
   needs the limit raised for that call (or the tree reduced outside Spine), not a repair push or
