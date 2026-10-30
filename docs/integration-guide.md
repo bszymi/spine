@@ -630,6 +630,7 @@ Spine ships a git smart-HTTP server so runner containers can clone workspace rep
 - **Shared mode**: `GET /git/{workspace_id}/info/refs?service=git-upload-pack`, `POST /git/{workspace_id}/git-upload-pack`
 - **Single mode**: `GET /git/info/refs?service=git-upload-pack`, `POST /git/git-upload-pack` (workspace is implicit)
 - Dumb protocol objects (`HEAD`, `objects/*`) are also served via GET
+- Only the git protocol's own paths at the root of the resolved repository reach `git-http-backend` (INIT-024 TASK-004): `/info/refs`, `/git-upload-pack`, `/git-receive-pack`, `/HEAD`, `/objects/info/{packs,alternates,http-alternates}`, and a loose object or a pack/idx by its full id. Any other path — a prefix of one, a `.` or `..` segment, a doubled or trailing slash inside it — is refused with `403` "unsupported git operation" before `git-http-backend` runs.
 - `info/refs` accepts only the queries git itself sends, byte for byte: none (dumb protocol), `service=git-upload-pack` or `service=git-receive-pack`. Any other query string (a repeated or valueless `service`, an extra parameter, an escaped value) is treated as a push — it needs a bearer, whether or not push is enabled — and is then refused with `400` "unsupported info/refs query", because git-http-backend parses query strings differently from Spine and could read a different service. Without a bearer it gets the uniform `401`, so it cannot tell an existing workspace from a missing one.
 
 ### Push (`git-receive-pack`)

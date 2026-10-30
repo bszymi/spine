@@ -1189,8 +1189,11 @@ The following limitations have been resolved:
   many files at one name resolve it once with `RefSHA` and read by object id
   (`artifact.Service.List` does; SMP's run-artifacts reader is handed off to SMP INIT-027 EPIC-004
   TASK-008).
-- **Git floor:** git 2.30 or newer (`rev-parse --end-of-options`). `spine serve` refuses to start
-  below it; embedders call `git.CheckGitVersion` at boot. Every shipped image runs 2.39.5 or later.
+- **Git floor:** git 2.30 or newer for the git client (`rev-parse --end-of-options`); embedders
+  call `git.CheckGitVersion` at boot. `spine serve` needs git 2.38 or newer and refuses to start
+  below it (INIT-024 TASK-003: a budgeted merge computes its result with `git merge-tree
+  --write-tree`; `git.CheckBudgetGitVersion`; "Checkout Budget"). Every shipped image runs 2.39.5
+  or later.
 - **No DWIM for a missing reserved or home branch** (INIT-024 TASK-004; review finding N-10). A
   bare revision in the reserved namespace (first component a case-fold spelling of `spine`, the
   rule push admission uses: run, planning and divergence branches, `spine/init`) or naming the
@@ -1310,7 +1313,8 @@ The following limitations have been resolved:
   — and later windows sync normally. With a checkout budget (`spine serve`) one merge's diff always
   fits the default limit, so a window over it takes many large merges between two syncs, or an
   embedder whose explicit `WithMaxOutputBytes` is smaller. Falling back to a rebuild automatically
-  is a follow-up (INIT-024 TASK-010).
+  is not done (INIT-024 TASK-004 owner question 1 default) and is a recorded follow-up (INIT-024
+  TASK-010's close notes).
 - **Residual — more governed candidates than the limit.** A tree whose `.md` and workflow paths
   alone exceed the listing limit (or the record ceiling) still fails `FullRebuild` closed. In
   standalone no governed merge can bring one in: the budget bounds both.
@@ -1361,9 +1365,9 @@ The following limitations have been resolved:
   read-only commands parse the commit being merged, which the merge itself then reads without an
   allocation limit.
 - **Not covered:** receive-time inflation (`index-pack` reconstructs a pushed delta to hash it;
-  `receive.maxInputSize` bounds the pack, not the object). Checkout-time inflation and wall-clock
-  deadlines on mutating commands are now bounded by the checkout budget (INIT-024 TASK-003;
-  "Checkout Budget" below).
+  `receive.maxInputSize` bounds the pack, not the object). Checkout-time inflation is now bounded
+  by the checkout budget, and local mutating commands by a wall-clock deadline (INIT-024 TASK-003:
+  both on in `spine serve`, opt-in for embedders; "Checkout Budget" below).
 - **Cost:** a `ReadFile` of a file runs three git processes — the entry probe (`ls-tree -l`), the
   object-type check (`cat-file -t`) and the read (`cat-file blob`) — where it ran one before
   TASK-003 (`show`) and two after it; a miss runs one (two when the revision names no tree). So a
@@ -1553,6 +1557,18 @@ The following limitations have been resolved:
   (retrying cannot shrink the tree); a refused branch-scoped write fails with `git_error`. One
   budget covers every client of the process, code-repository clones and merges included, so a
   code repository larger than the defaults needs the limits raised for the whole deployment.
+- **Residual — a tree on folding storage can stay marked** (INIT-024 close; follow-up). On case-
+  or normalization-insensitive storage two tracked names that differ only in case or
+  normalization share one file, so a rewrite from the index can never make both match their
+  blobs. A tree marked for renormalisation whose marker has no readable record, or whose
+  difference appeared after its record, then keeps the marker: every later call takes the tree's
+  hold, quarantines the tracked state again (an unreachable `git stash create` commit each time,
+  until git's garbage collection), rewrites and compares again; a code-repository clone in that
+  state is unavailable on every access, and a workspace build logs an Error each time. The push
+  path never reaches this (folding storage has receive-pack refused, "Git Push Gate: Served
+  Repositories Need Case- and Normalization-Sensitive Storage"). Keep work trees on case- and
+  normalization-sensitive storage; treating the paths that survive the rewrite as recorded, with
+  one Warn, is the follow-up.
 
 ### Webhook Signing Secrets: `migrate` Mode Does Not Close the Cross-Workspace Transplant
 - **What:** signing secrets are sealed in the `enc:v2` envelope, bound to the workspace and the
