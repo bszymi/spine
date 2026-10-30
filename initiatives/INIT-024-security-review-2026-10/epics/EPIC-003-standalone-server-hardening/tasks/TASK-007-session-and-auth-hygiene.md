@@ -688,3 +688,10 @@ Codex (`codex review --base main`, plain, from the integration worktree): round 
 review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
 actionable regressions were identified"). It covered every merged task and coordination commit,
 including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.
+
+**Phase 4 (2026-10-30).** TASK-003's phase-4 renormalisation leaves a renormalisation pending past
+the line only on an I/O error or a crash. `TestPreauth_PendingRenormalisationIsInvisibleBeforeAuthentication`
+(coordination `55789b28`) now makes the build's rewrite fail with a stale `index.lock`, which root
+cannot bypass either (`5ae1e563`, `5ae28915`). The property is unchanged: a pending
+renormalisation is invisible to an unauthenticated caller on `/api/v1` and `/git`. Gates: see
+TASK-003's Integration A, phase 4.

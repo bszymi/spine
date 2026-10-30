@@ -787,3 +787,82 @@ Gates at `a33e399c`:
 - SMP (`82899ace`): build and vet ×4 rc 0; `-race` on the SMP importers of `adapters/git`
   (`cmd/customer-app`, `gitread`, `projectionwriter`, `spinecore`, `spineembedded`, `workspace`)
   and `githttp` all ok; testgate Spine-runtime leg PASS (2447 passed, 3 allowed skips) and githttp leg PASS (590 passed, 1 allowed skip); no `ws_*` or `s24ia_*` database left, SMP untouched.
+
+**Phase 4 (2026-10-30): the reviewer's simpler shape, by the orchestrator's ruling.** The
+confirming review of round 4 (`02334613..693fb648`) closed the five round-3 findings. It found
+one P3 and two P4s: the record trusted stat data and `core.fsmonitor`; `--stdin-paths` dropped a
+trailing CR (already moved to argv by `ed2f3ff1`); the status was capped at 16 MiB. It
+recommended a simpler shape, which the orchestrator adopted. This **deviates from round 4's
+design**. Commit `5ae1e563`:
+- **Checks before the line.** Under the tree's hold and before the line, `checkBeforeLine` runs
+  the positive unborn rule, refuses a torn HEAD, and measures HEAD against the budget from the
+  stored objects. The new `checkStoredTrees`/`measureStoredTree` path needs no line, because the
+  `ls-tree -l` sizes do not depend on attributes. Any failure returns with no line and no marker.
+- **Record by content.** The record uses `contentStatus` (forceContentCompare,
+  `-c core.fsmonitor=false`). Other worktrees are read with `--no-optional-locks`, and their
+  index's time is put back.
+- **Then:** record and marker, line, the forced compare, every unrecorded ` M` path whose index
+  entry matches HEAD rewritten (`checkout-index -z --stdin`), marker cleared.
+- **No fingerprints.** The fingerprint proof is gone, and with it every `hash-object` call, the
+  argv form of `ed2f3ff1` and the Windows batch bound of `a33e399c`. Past the line only an I/O
+  error or a crash remains. The retry, a linked worktree's mark and an unreadable record check
+  HEAD again and quarantine first.
+- **Parser.** `d200cec3`'s untrusted-input parser stays, for the single section the record still
+  holds. An earlier build's proof section now counts as "no record".
+- **Status bound.** The status is bounded by `statusLimit`: MaxPathBytesTotal + 4·MaxEntries +
+  1 MiB, never below the read limit (`runOpts.limit`). `listing.go` (TASK-004) is not on this
+  branch.
+- **Behaviour change.** A served repository whose HEAD is over the budget when the line would
+  first be added now gets no line, so its pushes are refused (`500 push gate unavailable`) until
+  the limit is raised. Under round 4 such a push landed and the renormalisation stayed pending.
+  KNOWN-LIMITATIONS, the CHANGELOG and the git-push guide say so, together with the status
+  residual and the re-clone remedy for a git-pool code repository.
+
+Tests:
+- New:
+  - `TestNeutralAttributes_FsmonitorCannotHideARealEdit` and
+    `TestNeutralAttributes_StatDataCannotHideARealEdit` (P3), red at `8be9ae16`: the edit was
+    rewritten.
+  - `TestNeutralAttributes_StatusIsBoundedByTheBudget` (P4; a 4 KiB read limit), red at
+    `8be9ae16`: stayed pending.
+  - The rewritten `TestNeutralAttributes_FailedRenormalisationIsRetried` (a pre-line budget
+    failure leaves no line and no marker), red at `8be9ae16`.
+  - `TestNeutralAttributes_CrashAfterTheLineIsQuarantinedOnRetry` (after-line hook).
+  - `TestNeutralAttributes_LinkedWorktreeIndexTimeIsPutBack`.
+  - `TestNeutralAttributes_EveryPathShapeSurvivesTheRenormalisation`: 8 shapes, in one call and in
+    a quarantined retry. The record names exactly the edited file, and no `hash-object` runs (git
+    recorder).
+- Rewritten to the new shape with the same property:
+  - torn and cancelled HEAD, before the line and on a retry past it;
+  - the codex-round-4 "edit after the record": the edit is now in the quarantine, not overwritten
+    without one;
+  - the githttp "pending does not stop the push" test, plus a new
+    `TestBudgetHook_HEADOverTheBudgetBeforeTheLineRefusesThePush`;
+  - the gateway pending-renormalisation preauth test. Both of these now fail the rewrite with a
+    stale `index.lock`; see codex below.
+- Mutations: eight, one per new check — pre-line budget, pre-line HEAD probe, content compare,
+  content record, fsmonitor off, index-time restore, quarantine on retry, status bound. Each is
+  caught.
+
+Codex (`--base init/INIT-024-integration-a-p3`, `gpt-6.1-sol`):
+- Round 1, session `01a18d73-7a52-7922-b6cf-d477612679d9` on `5ae1e563`: P2. The two pending
+  fixtures used a read-only directory, which root (`make docker-test`) ignores. Fixed in
+  `5ae28915` with a stale `index.lock`, an exclusive create that root cannot bypass. Run as root in
+  `golang:1.26-bookworm`, the old fixtures fail and the new ones pass.
+- Round 2, session `01a18db4-450d-7f10-a951-ac48a81871d6` on `5ae28915`: no findings.
+
+Gates at `5ae28915`:
+- Cheap gates: lint-boundaries, `make build`, embed-smoketest, `go vet` ×3 rc 0;
+  golangci-lint `--new-from-rev main` plain / integration / scenario and gosec 0; gofmt clean
+  (except the pre-existing `planning_run_test.go`); pincheck OK; `go mod tidy -diff` clean,
+  `verify` OK.
+- `-race`: `adapters/git`, `gitpool`, `githttp`, `workspace`, `gateway`, `cmd/spine` and
+  `core/worktreefs` rc 0.
+- `go test -p 4 ./...` rc 0.
+- `-tags integration`: this task's set plus `workspace` rc 0.
+- scenario-git-http: every step rc 0, 0 skips (90 / 26 / 154 / 12 / 24 / 37 + 1 / 19 + 1 / 1).
+- git-floor (git 2.39.5, Linux): STEP1 / STEP2 / EXTRA / EXTRA2 rc 0; every
+  `TestNeutralAttributes_` test passes, including both not-UTF-8 shapes.
+- SMP (`82899ace`, 0 dirty files): build and vet ×4 rc 0; `-race` on the SMP importers of
+  `adapters/git` and `githttp` all ok; testgate Spine-runtime PASS (2447 passed, 3 allowed skips)
+  and githttp PASS (590 passed, 1 allowed skip); no `ws_*` or `s24ia_*` database left.
