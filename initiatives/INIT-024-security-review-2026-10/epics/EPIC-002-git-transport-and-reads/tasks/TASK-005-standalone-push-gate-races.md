@@ -183,8 +183,12 @@ branch.)*
 
 ### Rulings and owner-question defaults (recorded, pending the owner)
 
-- **OQ1 — default taken:** 2 per (workspace, principal), 4 per workspace, 8 process-wide
-  (`githttp.DefaultMaxConcurrent*`). `spine serve`: `SPINE_GIT_HTTP_MAX_CONCURRENT`,
+- **OQ1 — default taken, refined for single mode (review round 1, P3-2 ruling):** in shared mode 2
+  per (workspace, principal), 4 per workspace, 8 process-wide (`githttp.DefaultMaxConcurrent*`); on
+  a single-workspace server (no per-workspace pool) the per-workspace and per-actor caps default to
+  the process-wide cap (8), so its capacity never drops below the base's 5 and follows
+  `SPINE_GIT_HTTP_MAX_CONCURRENT` (`gitHTTPLimits.effective(shared)`; a ceiling set above an
+  explicit per-workspace cap in single mode logs a startup Warn naming the binding cap). `spine serve`: `SPINE_GIT_HTTP_MAX_CONCURRENT`,
   `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_WORKSPACE`, `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_ACTOR` (a whole
   number 1–1024) and `SPINE_GIT_COMMAND_READ_TIMEOUT` (default `10s`, a positive Go duration); unset
   or blank is the default, anything else refuses to start (INIT-024 OQ3 standalone rule). A cap set
@@ -209,7 +213,10 @@ branch.)*
 | `c6ad616d` | Docs: `KNOWN-LIMITATIONS.md` (storage requirement "enforced"; run-branch admission re-checked at apply time; git capacity shared fairly, with residuals; the SoD note), `docs/integration-guide.md` §7 (re-check, storage probe, slot keying under Authentication, Limits, four env rows), `CHANGELOG.md`, `docs/git-push-guide.md`, `architecture/security-model.md`, `architecture/docker-runtime.md` §9.2, `docker-compose.override.yaml.example`. |
 | `c9a6969b` | The probe names as Go escapes (as literal characters a normalising editor would merge the NFC/NFD pair); AC-test seams for the red runs. |
 | `a1b6965b` | Codex round 1 (P2): the re-check decision is bounded by its connection's deadline and cancelled by `close`. |
-| (this commit) | Implementation Notes. |
+| `f4baae12` | Implementation Notes. |
+| `604a47c7` | Review round 1 fixes (below). |
+| `e91b1a8f` | Review round 1 docs. |
+| (this commit) | Implementation Notes: review round 1. |
 
 ### N-13 keying (carried handoff 4)
 
@@ -426,4 +433,54 @@ is internal to Spine), so it needs its own:
   (ensure/probe, storage refusal, `prereceive`, slot, hook, re-check, CGI env) and `prereceive`'s
   head and tail. A conflict there is resolved by keeping this task's order.
 - **SMP bump**: inert — no embedded package changed.
+
+### Review round 1 (2026-10-28; security + correctness review of `f4baae12`: 0 P1/P2, 2 P3, P4s)
+
+Report: SMP repo `tmp/init027-orchestration/i24/t005-reviews/REVIEW.md`; the reviewer's probes and
+mutants `i24/t005-rev/`. Rulings by the coordinator. Red runs at `f4baae12`: `go test -overlay`
+mapping the five githttp source files and the seams file to their `f4baae12` content (plus a
+no-op `pgrSetProbeRetry`), the round-1 internals-only test file removed (`rr1/overlay-f4ba.json`,
+log `rr1/red-f4ba.log`). Mutations: `mut2/` (summary `mut2/summary.txt`).
+
+| Finding | Ruling | What was done | Tests (red / mutation) |
+|---|---|---|---|
+| **P3-1** pre-admission work uncapped: pushes sit in their command read and admission before any slot, so one member could run unbounded concurrent admissions (the reviewer's R3: 40/40 inside, no 503) | Non-blocking admission counter per principal and per workspace before `readCommandSections`, released when `prereceive` returns; 503 + `Retry-After`; 2x the per-actor and per-workspace caps; no new knob; no ref-count cap, the 1 MiB command section is the residual | `Handler.admissions` (a second `gitSlots`: `admissionFactor`=2 x per-actor, 2 x per-workspace, no global cap), taken in `ServeHTTP` for `POST git-receive-pack` before `prereceive`, released right after it; "too many concurrent git pushes being admitted" 503. It holds no git slot. Single-mode caps follow P3-2 (16/16 by default). KNOWN-LIMITATIONS N-13 names the residual (each push in admission may buffer the 1 MiB command section and evaluates admission and branch protection per ref). No new variable. | `TestGitHTTP_PreAdmissionWorkIsBounded` (R3's shape: 10 stalled pushes of one principal → 4 inside, 6 x 503; a second member fills ws-1 to 8; a third gets 503 x 3; another workspace is unaffected; no slot held; released when the pushes end) — **red at `f4baae12`**: "alice of ws-1: 0 of 10 pushes answered, want 6"; MA1 (no counter), MA2 (no per-workspace bound) killed |
+| **P3-2** single mode had 4 slots (base 5), shared-token runners 2, and raising `SPINE_GIT_HTTP_MAX_CONCURRENT` did nothing | Single mode: per-workspace and per-actor default to the global cap (8); shared keeps 2/4/8; warn when the ceiling is set above an explicit per-workspace cap in single mode | `gitHTTPLimits.effective(shared)`; `buildGitHTTPHandler` hands githttp the mode's values; `logGitHTTPLimits(log, l, shared)` logs `mode=` and the single-mode warning. CHANGELOG, integration guide (Limits, env table), KNOWN-LIMITATIONS, the OQ1 note above. | `TestGitHTTPLimits_EffectiveCapsByMode` (7 rows, both modes), `TestLogGitHTTPLimits` (both modes, the warning in single mode only), `TestBuildGitHTTPHandler_SlotDefaultsFollowTheMode`; MS1 (single mode with the shared defaults) killed |
+| **P4-3** the body-close fallback cannot interrupt a real net/http body | Call it best-effort in the comment and docs; a gateway-level AC5 test through the full middleware chain | `readCommandSections` doc; KNOWN-LIMITATIONS and integration guide. | `TestGitHTTP_GatewayCutsStalledCommandSection` (`gateway.NewServer(...).Handler()`: recovery, security headers, rate limit, CORS, trace, logging; an authenticated push stalled in a pkt-line is answered at the 300 ms deadline with no server ReadTimeout; one slot in all, the actor's clone is served meanwhile); MG1 (`statusWriter` without `Unwrap`) killed: "not cut through the gateway within 3s" |
+| **P4-4** mutants MR2 (prefix token compare) and MR5 (reader goroutine not joined) survived; the channel test leaked its socket dir on failure | Empty and truncated token rows; a body recording reads after ServeHTTP returns; `t.Cleanup` | Channel test: empty, 32-hex, 63-hex and extended tokens get no answer; every session closed by `t.Cleanup`. | MR2 killed ("a empty token got an answer"); `TestPrereceive_CommandReaderEndsBeforeServeHTTPReturns` (a body whose reads return 50 ms late, through the fallback path) — MR5 killed ("1 read(s) of the request body returned after ServeHTTP had returned"). Both pass at `f4baae12` (they pin the existing behaviour). |
+| **P4-5** the probe override was callable from any service code | Refuse unless `testing.Testing()`; test the refusal if possible in one binary | `FakeCaseSensitiveStorageOnFoldingHostForTests` returns `errNotATestBinary` and changes nothing unless `isTestBinary()` (= `testing.Testing`). Importing `testing` adds no flags to `spine` (`spine --help` and `spine serve --help` show none). | `TestFakeCaseSensitiveStorage_RefusedOutsideATestBinary` (swaps `isTestBinary` in-process — no second binary needed); MF1 killed |
+| **P4-6** a failing probe re-ran on every request (reads too), with two config writes under the handler-wide mutex | Re-probe only on receive-pack requests; per-repository singleflight; ~30 s negative cache | `repoAlignment` per repository path (its own mutex; `ensureMu`, `ensuredRepos`, `storageFolds` removed): with receive-pack off every request pins `false` once; with it on only push requests run `ensurePushStorage` (probe, then config to match); reads never touch the probe or the config. A failed probe's refusal is reused for `probeRetry` (30 s) and writes the config `false` best-effort. | `TestStorageProbe_ReadsNeverWaitAndPushesProbeOnce` (reads are served while a push's probe is held; 6 concurrent first pushes run 1 probe) — **red at `f4baae12`**: "a read waited on a push's probe"; the probe-failure subtest (two pushes and a read in the window run 1 probe; after the window a push probes again) — **red at `f4baae12`**: "probe ran 3 times within the retry window"; MP1 (reads probe), MP2 (no negative cache), MP3 (no per-repository lock) killed |
+| **P4-7** the re-check variables reach the repository's other hooks (undocumented); close did not close accepted connections | Doc sentence; stop listening once the token is used; close closes accepted connections; test | `admission_recheck.go` header and integration guide: the variables also reach `update`/`post-receive`-style hooks, by when the token is spent and the socket closed. The listener closes as soon as the token is accepted; `close` closes every connection it has accepted before waiting. | `TestRecheck_CloseDoesNotWaitForStalledConnections` (a same-user connection that sends nothing; and no dial succeeds after the token was used) — **red at `f4baae12`**: "close waited for a stalled connection (until its 1-minute deadline)"; MC1, MC2 killed; the channel test's second-use check now accepts the closed socket |
+| **P4-8** a stalled upload-pack body holds its slot until ReadTimeout | Keep as the documented residual | — | — |
+| **P4-9** docs: reftable refusal, the heading at `:93`, the TMPDIR cases | Fix the docs | KNOWN-LIMITATIONS: the reftable false positive, the heading "Run-Branch Admission Is Checked at Push Start and Again at Apply Time" (and its reference); integration guide: reftable, TMPDIR longer than 64 bytes → `/tmp`, a relative TMPDIR fails every push closed. | — |
+| **P4-10** the probe ran in `refs/`, the protected loose refs live in `refs/heads` | Move the dot-directory into `refs/heads`; show for-each-ref, pack-refs and a clone never see it, on both git versions | `probeRefStorage` uses `refs/heads` (`refs/` when that is not a directory — a reftable repository's placeholder file), `probeDirHookForTest`. | `TestStorageProbe_InvisibleToGit` (while the probe files exist: `for-each-ref`, `ls-remote`, `pack-refs --all` and the packed-refs it writes, a `--mirror` clone show nothing; nothing left after): git 2.54 (macOS) files and reftable; git 2.39.5 (git-floor) files (reftable needs git >= 2.45: skipped there); MR10 (probe in `refs/`) killed |
+
+**Round-0 mutations re-run on the new head** (M1, M2, M4, M10, M14, M15; the code they target
+moved): all killed. M1 now answers `500` (the folds refusal falls through to the fail-closed
+branch), still caught by the message check. **All 19 mutations killed** (`mut2/summary.txt`).
+
+**Gates after round 1** (code at `604a47c7`, docs `e91b1a8f`; heavy suites under the lock):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; embed-smoketest | rc=0; rc=0; rc=0 |
+| `go vet` plain / integration / scenario | rc=0 / 0 / 0 |
+| `go test -p 4 ./...` | rc=0 (41 ok, 3 without tests) |
+| `-race` and `-tags integration` on githttp, gateway, cmd/spine (DB `s24005_ci_rr1`, dropped) | rc=0 / rc=0 |
+| `scenario-git-http` / bootstrap-admin / workflow-lifecycle (macOS) | rc=0: 90 / 26 / 154 passes, 0 skips, 8 `TestGitHTTP_Push*` |
+| `scenario-git-http` on Linux (bookworm, git 2.39.5, real probe) | rc=0: 90 passes, 0 skips, 8 push passes, no fake |
+| `git-floor` (bookworm, git 2.39.5): CI steps, githttp/gateway/cmd/spine in full, the AC and round-1 tests verbose, the base red | STEP1 / STEP2 / EXTRA / EXTRA2 rc=0; RED rc=1 as expected |
+| golangci-lint `--new-from-rev=init/INIT-024-wave3-base` (githttp, gateway, cmd/spine); gosec-only; gofmt | 0 issues; 0 issues; clean |
+| SMP gate (82899ace) | build, vet x4 rc=0; race (§5 packages) rc=0, no failure; testgate runtime PASS (2,447, 3 allowed skips); githttp PASS (590, 1 allowed skip); no `ws_*` left; inert |
+| codex round 3 | below |
+
+**Codex round 3** (`codex review --base init/INIT-024-wave3-base`, plain, on `e91b1a8f`): session
+`01a182a2-1e92-7242-a1ae-20badc63c9e7`, model `gpt-6.1-sol` confirmed — "No actionable regressions
+were identified in the diff." Clean; the third and last round.
+
+**Deviations in round 1:** none from the rulings. Recorded choices: the admission counter reuses
+`gitSlots` with no process-wide cap (the ruling named per principal and per workspace); in single
+mode it is therefore 16/16 by default; the probe falls back to `refs/` when `refs/heads` is not a
+directory (reftable), rather than refusing outright; P4-9's TMPDIR cases are documented, not
+changed (the ruling asked for docs).
 
