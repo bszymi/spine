@@ -355,6 +355,31 @@ func MeasureTree(ctx context.Context, c *CLIClient, treeish string) (TreeStats, 
 	return b.Measure(ctx, c, treeish)
 }
 
+// MeasureStoredTree is MeasureTree without the neutral-attributes
+// precondition: it sums what the tree STORES (the `ls-tree -l` sizes, which
+// no attribute changes), not what a checkout under the repository's
+// attributes would write, so it also answers before the line is added. For
+// diagnostics (the start-up over-budget warning; INIT-024 integration A);
+// never admit a checkout on it.
+func MeasureStoredTree(ctx context.Context, c *CLIClient, treeish string) (TreeStats, error) {
+	const op = measureOp
+	if c == nil {
+		return TreeStats{}, &GitError{Kind: ErrKindPermanent, Op: op, Message: "nil client"}
+	}
+	b := DefaultTreeBudget()
+	if l := c.CheckoutLimits(); l.Budget != nil {
+		b = l.Budget.Effective()
+	}
+	if err := checkRev(op, "treeish", treeish); err != nil {
+		return TreeStats{}, err
+	}
+	rev, err := c.resolveRev(ctx, op, "treeish", c.homeRev(treeish))
+	if err != nil {
+		return TreeStats{}, err
+	}
+	return c.measureStoredTree(ctx, rev, b)
+}
+
 // Check returns nil when the tree of treeish is within b, the
 // ErrTreeTooLarge *GitError when it is not, and the measure's own error
 // (a missing object, a git failure) otherwise — never nil on a tree it

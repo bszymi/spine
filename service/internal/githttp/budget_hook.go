@@ -123,6 +123,21 @@ func EnvForTreeLimit(l git.TreeLimit) string {
 	return "SPINE_GIT_TREE_*"
 }
 
+// TreeLimitLogAttrs are the log attributes naming the limit a
+// *git.TreeTooLargeError in err's chain crossed, the variable that sets it
+// and what to do (INIT-024 integration A: an over-budget HEAD when the
+// neutral line is first added is refused, and only an operator can lift
+// it); nil when err is no budget refusal.
+func TreeLimitLogAttrs(err error) []any {
+	var tl *git.TreeTooLargeError
+	if !errors.As(err, &tl) {
+		return nil
+	}
+	env := EnvForTreeLimit(tl.Limit)
+	return []any{"limit", string(tl.Limit), "env", env, "max", tl.Max, "at_least", tl.Seen,
+		"remedy", fmt.Sprintf("raise %s above %d and restart spine serve, or reduce the tree", env, tl.Seen)}
+}
+
 const (
 	// maxHookScriptBytes bounds the read of an existing hook file.
 	maxHookScriptBytes = 64 << 10

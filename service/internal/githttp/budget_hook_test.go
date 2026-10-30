@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bszymi/spine/adapters/git"
@@ -414,6 +415,11 @@ func TestBudgetHook_HEADOverTheBudgetBeforeTheLineRefusesThePush(t *testing.T) {
 	repo := servedConvertedTree(t)
 	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{MaxEntries: 1}})
 	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
+	var logs bytes.Buffer
+	var logMu sync.Mutex
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{w: &logs, mu: &logMu}, &slog.HandlerOptions{Level: slog.LevelError})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 	h := budgetHandler(t, repo)
 	url := budgetServer(t, h, repo)
 	work := budgetClone(t, url)
@@ -426,6 +432,16 @@ func TestBudgetHook_HEADOverTheBudgetBeforeTheLineRefusesThePush(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(repo, ".git", "spine-renormalise-pending")); err == nil {
 		t.Fatal("the refused check left a marker")
+	}
+	// The refusal's log names the variable and the restart (confirming
+	// review of integration A phase 4, P4).
+	logMu.Lock()
+	got := logs.String()
+	logMu.Unlock()
+	for _, w := range []string{"push refused", "env=SPINE_GIT_TREE_MAX_ENTRIES", "raise SPINE_GIT_TREE_MAX_ENTRIES above", "restart spine serve"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("the refusal's log lacks %q:\n%s", w, got)
+		}
 	}
 	git.SetDefaultCheckoutLimits(git.CheckoutLimits{Budget: &git.TreeBudget{}})
 	if out, err := gitPush(t, work, url, "HEAD:refs/heads/f0"); err != nil {

@@ -12,6 +12,7 @@ import (
 	"github.com/bszymi/spine/core/queue"
 	"github.com/bszymi/spine/service/internal/config"
 	"github.com/bszymi/spine/service/internal/gateway"
+	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/service/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -180,7 +181,8 @@ func serveCmd() *cobra.Command {
 			// the budget.
 			if wsWiring.Pool == nil {
 				if err := gitClient.EnsureNeutralWorkTree(ctx); err != nil {
-					log.Error("neutral checkout attributes not set, or the workspace tree not yet brought to its stored bytes (retried at the next start); its checkouts and merges may be refused", "error", err)
+					log.Error("neutral checkout attributes not set, or the workspace tree not yet brought to its stored bytes (retried at the next start); its checkouts and merges may be refused",
+						append([]any{"error", err}, githttp.TreeLimitLogAttrs(err)...)...)
 				}
 				go workspace.WarnIfOverCheckoutBudget(context.WithoutCancel(ctx), gitClient, os.Getenv("SPINE_WORKSPACE_ID"), log)
 			}

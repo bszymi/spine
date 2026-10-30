@@ -485,7 +485,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// does not apply to that wait.
 		dir, err := h.installBudgetHook(r.Context(), repoPath)
 		if err != nil {
-			log.Error("checkout-budget pre-receive hook not installed; push refused", "error", err, "repo_path", repoPath)
+			log.Error("checkout-budget pre-receive hook not installed; push refused",
+				append([]any{"error", err, "repo_path", repoPath}, TreeLimitLogAttrs(err)...)...)
 			http.Error(w, "push gate unavailable", http.StatusInternalServerError)
 			return
 		}

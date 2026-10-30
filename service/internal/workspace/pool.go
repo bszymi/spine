@@ -31,6 +31,7 @@ import (
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/config"
+	"github.com/bszymi/spine/service/internal/githttp"
 )
 
 // ServiceSet holds all per-workspace service instances.
@@ -1179,7 +1180,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	if gitClient.CheckoutLimits().Budget != nil {
 		if err := gitClient.EnsureNeutralWorkTree(initCtx); err != nil {
 			observe.Logger(ctx).Error("neutral checkout attributes not set, or the workspace tree not yet brought to its stored bytes (retried at the next build); its checkouts and merges may be refused",
-				"workspace_id", cfg.ID, "error", err)
+				append([]any{"workspace_id", cfg.ID, "error", err}, githttp.TreeLimitLogAttrs(err)...)...)
 		}
 	}
 	go WarnIfOverCheckoutBudget(context.WithoutCancel(ctx), gitClient, cfg.ID, observe.Logger(ctx))
