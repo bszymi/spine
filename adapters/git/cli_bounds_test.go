@@ -697,7 +697,7 @@ func TestEveryOpHasAnOutputClass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	call := regexp.MustCompile(`\.run(?:Bounded)?\(ctx, "([^"]+)"`)
+	call := regexp.MustCompile(`\.run(?:Bounded|Listing)?\(ctx, "([^"]+)"`)
 	seen := 0
 	for _, f := range sources {
 		if strings.HasSuffix(f, "_test.go") {
@@ -725,9 +725,12 @@ func TestEveryOpHasAnOutputClass(t *testing.T) {
 	want := map[string]string{
 		"read_file": "read", "list_files": "read", "log": "read", "head": "read", "ref-sha": "read",
 		"rev-parse": "read", "merge-base": "read", "tree_entry": "read",
-		"diff":     "diff",
-		"checkout": "mutate", "merge": "mutate", "commit": "mutate", "add": "mutate", "branch": "mutate",
+		"measure_tree": "read", // INIT-024 TASK-003: the checkout budget's reads
+		"diff":         "diff",
+		"checkout":     "mutate", "merge": "mutate", "commit": "mutate", "add": "mutate", "branch": "mutate",
 		"config": "mutate", "push": "mutate",
+		// INIT-024 TASK-004: output evidence's counter is a read (N-12).
+		"count_changed_paths": "read",
 	}
 	if got := git.OpClassesForTest(); !reflect.DeepEqual(got, want) {
 		t.Errorf("op classes = %v\nwant %v", got, want)

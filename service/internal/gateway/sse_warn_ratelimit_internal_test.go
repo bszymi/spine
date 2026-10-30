@@ -41,11 +41,11 @@ func (f t015ReplayStore) ListEventsAfter(_ context.Context, _ string, _ []string
 // t015Reconnect runs one SSE request that replays from a cursor. The
 // request context is already cancelled, so the handler replays the
 // window, enters the live loop and returns at once.
-func t015Reconnect(t *testing.T, s *Server) string {
+func t015Reconnect(t *testing.T, s *Server, sa *streamAuthStore) string {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t015Ctx("", domain.RoleReader, "reader-1"))
 	cancel()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/events/stream", http.NoBody).WithContext(ctx)
+	req := sa.withStreamBearer(httptest.NewRequest(http.MethodGet, "/api/v1/events/stream", http.NoBody).WithContext(ctx), "reader-1")
 	req.Header.Set("Last-Event-ID", "evt-0")
 	w := httptest.NewRecorder()
 	s.handleEventStream(w, req)
@@ -72,11 +72,12 @@ func TestP328_UnsafeSSEFieldWarnIsRateLimited(t *testing.T) {
 			Payload:   []byte(`{}`),
 		}
 	}
-	s := &Server{store: t015ReplayStore{events: events}, eventBroadcaster: delivery.NewEventBroadcaster(), sseLimiter: newSSELimiter(10)}
+	sa, authSvc := newStreamAuth()
+	s := &Server{store: t015ReplayStore{events: events}, auth: authSvc, eventBroadcaster: delivery.NewEventBroadcaster(), sseLimiter: newSSELimiter(10)}
 
 	const reconnects = 3
 	for i := 0; i < reconnects; i++ {
-		body := t015Reconnect(t, s)
+		body := t015Reconnect(t, s, sa)
 		// The frames themselves are unchanged by the rate limit: every
 		// unsafe id:/event: line is still omitted.
 		if strings.Contains(body, "id: ") || strings.Contains(body, "event: ") || strings.Contains(body, "\ndata: {\"type\"") {
@@ -108,7 +109,7 @@ func TestP328_UnsafeSSEFieldWarnIsRateLimited(t *testing.T) {
 	// reports how many were not logged meanwhile: the first Warn covered
 	// one event of reconnects*sseReplayCap.
 	s.sseUnsafeWarnAt.Store(time.Now().Add(-2 * sseUnsafeWarnInterval).UnixNano())
-	_ = t015Reconnect(t, s)
+	_ = t015Reconnect(t, s, sa)
 	out = buf.String()
 	if n := strings.Count(out, msg); n != 2 {
 		t.Fatalf("after the interval the Warn was logged %d times in all, want 2", n)

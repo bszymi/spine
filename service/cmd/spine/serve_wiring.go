@@ -200,7 +200,7 @@ type serveDeps struct {
 	RuntimeEnv          string
 	DevMode             bool
 	TrustedProxyCIDRs   []*net.IPNet
-	TrustedGitHTTPCIDRs []string
+	TrustedGitHTTPCIDRs map[string][]string // workspace ID → CIDRs whose direct peers clone it token-less (INIT-024 TASK-006)
 	// GitHTTPDevNoAuth (SPINE_GIT_HTTP_DEV_NO_AUTH; serveCmd refuses it
 	// unless SPINE_ENV=development) lets /git clone and fetch skip the
 	// bearer. Pushes always need one. INIT-023 TASK-015.
@@ -216,6 +216,10 @@ type serveDeps struct {
 	EventRetention        time.Duration
 	SSEMaxConn            int
 	OrphanThreshold       time.Duration
+
+	// GitHTTPLimits are the git endpoint's slot caps and command-read
+	// deadline (INIT-024 TASK-005; zero fields: the defaults).
+	GitHTTPLimits gitHTTPLimits
 
 	// NotifyBridgeEnabled gates the runtime.event_log NOTIFY listener
 	// that forwards out-of-process event_log writes into the in-process
@@ -243,8 +247,12 @@ type serveDeps struct {
 // serveRuntime bundles the ServerConfig with the long-lived background
 // services the serve loop must start and stop.
 type serveRuntime struct {
-	Config         gateway.ServerConfig
-	Scheduler      *scheduler.Scheduler
+	Config    gateway.ServerConfig
+	Scheduler *scheduler.Scheduler
+	// MultiScheduler is the shared-mode (db, platform-binding) scheduler
+	// over the workspace pool (INIT-024 TASK-008); nil in single mode,
+	// which keeps Scheduler.
+	MultiScheduler *scheduler.MultiScheduler
 	ProjSync       *projection.Service
 	MultiProjSync  *workspace.MultiProjectionSync
 	DeliveryCancel context.CancelFunc
@@ -461,6 +469,13 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	if deps.Store != nil {
 		sched = buildScheduler(deps.Store, deps.Events, orch, deps.OrphanThreshold)
 	}
+	// Shared modes have no process-level store, so no scheduler above:
+	// the multi-workspace scheduler scans every workspace through the
+	// pool instead (INIT-024 TASK-008, audit P3-27; serve_scheduler.go).
+	multiSched, err := buildMultiScheduler(deps, log)
+	if err != nil {
+		return nil, err
+	}
 
 	var deliveryCancel context.CancelFunc
 	var deliverySubscriber *delivery.DeliverySubscriber
@@ -512,7 +527,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	if orch != nil {
 		gitStepDefs = orch
 	}
-	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, gitHTTPPolicy, runReaderOrNil(deps.Store), gitStepDefs, deps.WSServicePool != nil, log)
+	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, gitHTTPPolicy, runReaderOrNil(deps.Store), gitStepDefs, deps.WSServicePool != nil, deps.GitHTTPLimits, log)
 	gitPushResolver := buildGitPushResolver(deps.WSServicePool, deps.Store, deps.Events, gitStepDefs)
 
 	cfg := gateway.ServerConfig{
@@ -564,6 +579,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	return &serveRuntime{
 		Config:         cfg,
 		Scheduler:      sched,
+		MultiScheduler: multiSched,
 		ProjSync:       projSync,
 		MultiProjSync:  multiProjSync,
 		DeliveryCancel: deliveryCancel,

@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-scenario lint lint-boundaries lint-security clean docker-build docker-up docker-down docker-reset docker-test docker-lint docker-vet
+.PHONY: build test test-integration test-scenario lint lint-boundaries lint-security vuln toolchain-parity clean docker-build docker-up docker-down docker-reset docker-test docker-lint docker-vet
 
 # ── Build ──
 
@@ -37,14 +37,26 @@ lint-boundaries:
 lint-security:
 	golangci-lint run --enable-only=gosec ./...
 
+# ── Supply chain (INIT-024 TASK-009) ──
+# The same checks as the CI jobs `vuln` and `toolchain-parity`.
+GOVULNCHECK_VERSION ?= v1.9.0
+
+vuln:
+	GOFLAGS=-mod=readonly go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+toolchain-parity:
+	go run ./dev/pincheck -resolve
+
 # ── Docker Dev ──
-# Cached volumes avoid re-downloading Go modules on every run.
+# Cached volumes avoid re-downloading Go modules on every run. The image is
+# the Dockerfile's builder (same tag and digest; go.mod's toolchain) —
+# `make toolchain-parity` fails if they drift.
 
 DOCKER_GO = docker run --rm \
 	-v "$(CURDIR)":/app \
 	-v spine-gomod:/go/pkg/mod \
 	-v spine-gocache:/root/.cache/go-build \
-	-w /app golang:1.26-bookworm
+	-w /app golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af
 
 docker-test:
 	$(DOCKER_GO) go test ./...

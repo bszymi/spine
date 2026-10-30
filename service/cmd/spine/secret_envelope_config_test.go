@@ -135,7 +135,9 @@ func TestLoadSecretEnvelopeMode(t *testing.T) {
 func TestSecretsReencrypt_RequiresKeyAndTouchesNothing(t *testing.T) {
 	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", "")
 	t.Setenv("SPINE_SECRET_PREVIOUS_KEYS", "")
-	t.Setenv("SPINE_ENV", "")
+	// A known non-production environment: the command refuses an unset
+	// SPINE_ENV before it reaches the key check (INIT-024 TASK-007).
+	t.Setenv("SPINE_ENV", "development")
 	t.Setenv("WORKSPACE_RESOLVER", "")
 	t.Setenv("SPINE_DATABASE_URL", "postgres://nobody@127.0.0.1:1/none?sslmode=disable")
 	t.Setenv("SPINE_INSECURE_LOCAL", "1")
@@ -160,6 +162,7 @@ func TestSecretsReencrypt_SharedResolverNeedsAllWorkspaces(t *testing.T) {
 	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", k)
 	t.Setenv("SPINE_SECRET_PREVIOUS_KEYS", "")
 	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "migrate")
+	t.Setenv("SPINE_ENV", "development")
 	t.Setenv("WORKSPACE_RESOLVER", "db")
 	var out bytes.Buffer
 	if err := runSecretsReencrypt(context.Background(), &out, reencryptOptions{}); err == nil || !strings.Contains(err.Error(), "--all-workspaces") {
@@ -179,7 +182,9 @@ func reencryptEnv(t *testing.T) {
 	k, _ := b64Key(t)
 	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", k)
 	t.Setenv("SPINE_SECRET_PREVIOUS_KEYS", "")
-	t.Setenv("SPINE_ENV", "")
+	// Known and non-production: the command refuses an unset SPINE_ENV
+	// first (INIT-024 TASK-007).
+	t.Setenv("SPINE_ENV", "development")
 	t.Setenv("SPINE_SECRET_PROVIDER", "")
 	t.Setenv("SPINE_SECRET_FILE_ROOT", "")
 	t.Setenv("SPINE_INSECURE_LOCAL", "1")

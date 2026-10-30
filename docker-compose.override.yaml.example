@@ -19,6 +19,9 @@
 # delete that carries the ref's current object id lands on it, and once
 # the ref is packed (git gc, git pack-refs) a plain git push does too.
 # git's refusal to update the checked-out branch does not catch it.
+# Since INIT-024 TASK-005 the git endpoint detects such storage and
+# refuses pushes to the repository (clones still work), so pushes do not
+# work over this bind mount on those hosts.
 # Serve pushes only from the shipped named volume (repo:/repo) or a Linux
 # host directory. See KNOWN-LIMITATIONS.md -> Security Notes ("Git Push
 # Gate: Served Repositories Need Case- and Normalization-Sensitive
@@ -37,7 +40,8 @@ services:
 # the runners' own addresses, never a range that contains the bridge
 # gateway (x.y.z.1): Docker's userland proxy forwards connections to the
 # published port from that address, so trusting it lets any process on
-# the host clone every workspace's repository without a token.
+# the host clone, without a token, every repository the address is
+# trusted for.
 # Requests that arrive through a declared reverse proxy
 # (SPINE_TRUSTED_PROXY_CIDRS) or that carry a forwarding header
 # (X-Forwarded-For, Forwarded, X-Real-IP, ...) are never token-less
@@ -85,6 +89,32 @@ services:
 #     spine:
 #       environment:
 #         - SPINE_GIT_HTTP_TRUSTED_CIDRS=172.28.1.0/24
+#
+# Options A to C are single-workspace recipes (WORKSPACE_RESOLVER unset or
+# file): the bare list is bound to the one workspace.
+#
+# Option D (shared mode, WORKSPACE_RESOLVER=db or platform-binding): bind
+# each runner address to the workspaces it serves, entries
+# <workspace-id>=<cidr>[,<cidr>...] separated by ';' (INIT-024 TASK-006).
+# A runner reads only the workspaces it is listed under; another
+# workspace answers 401 as for any client without a token. Give each
+# tenant its own runner addresses (Option A's pinning): an address listed
+# under two workspaces reads both, and a job on that runner can read
+# either. spine serve refuses to start in shared mode with a bare list.
+#
+#   services:
+#     spine:
+#       environment:
+#         - WORKSPACE_RESOLVER=db
+#         - SPINE_GIT_HTTP_TRUSTED_CIDRS=ws-a=172.28.1.10/32;ws-b=172.28.1.11/32,172.28.1.12/32
+#     runner-ws-a:
+#       networks:
+#         spine-internal:
+#           ipv4_address: 172.28.1.10
+#     runner-ws-b:
+#       networks:
+#         spine-internal:
+#           ipv4_address: 172.28.1.11
 #
 # Local development only: SPINE_GIT_HTTP_DEV_NO_AUTH=1 lets every client
 # clone without a token, and spine serve refuses it unless

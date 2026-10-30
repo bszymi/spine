@@ -195,6 +195,9 @@ type heldTickets struct {
 
 type heldTicketsKey struct{}
 
+// Lock order with the neutral attributes' writer (INIT-024 TASK-003
+// review round 4): a tree's hold is taken BEFORE an info/attributes
+// file's mutex (neutralWriteMu), never while holding one.
 var (
 	treeMu    sync.Mutex
 	treeLocks = map[string]*treeLock{}
@@ -676,6 +679,14 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 				"nothing was reset — move it out of the working tree", p)}
 	}
 	resetHard := func() error {
+		// The checkout budget (INIT-024 TASK-003, codex round 3): `reset
+		// --hard` writes HEAD's whole tree wherever the index or the tree
+		// differs from it, and HEAD's ref can have moved under the tree
+		// (an update-ref, a push to the checked-out branch) without any
+		// measured checkout. Refused, the restore fails with nothing reset.
+		if err := c.checkTrees(ctx, op, "HEAD"); err != nil {
+			return err
+		}
 		if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
 			return err
 		} else if p != "" {
@@ -781,6 +792,11 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 	}
 
 	if rep.PreviousRef != full {
+		// The checkout budget (INIT-024 TASK-003): the home branch's tree,
+		// before the switch writes it. No budget: no process.
+		if err := c.checkBranchTree(ctx, op, "home branch", home, short); err != nil {
+			return fail(err)
+		}
 		args := []string{"switch", "--no-guess", "--no-overwrite-ignore", "--end-of-options", short}
 		if len(residual) > 0 {
 			// Phantoms make the plain switch refuse. A forced switch
@@ -870,8 +886,11 @@ func (c *CLIClient) quarantineTracked(ctx context.Context, op string) (string, e
 		"GIT_AUTHOR_NAME=Spine", "GIT_AUTHOR_EMAIL=spine@spine.local",
 		"GIT_COMMITTER_NAME=Spine", "GIT_COMMITTER_EMAIL=spine@spine.local",
 	}
+	// core.fsmonitor off (review round 6): a stale monitor would keep a
+	// modified file out of the quarantine, and a renormalisation that
+	// quarantines before it rewrites would then lose it.
 	out, _, err := c.runWith(ctx, op, runOpts{env: env},
-		"stash", "create", "spine: quarantined working-tree state")
+		"-c", "core.fsmonitor=false", "stash", "create", "spine: quarantined working-tree state")
 	if err != nil {
 		return "", err
 	}
@@ -1163,6 +1182,12 @@ func (c *CLIClient) settlePendingTakeBacks(ctx context.Context, op string) (took
 // commit, logged at Warn); then `read-tree --reset -u <to>`. A failure is
 // returned with switchErr, and ResetBranch moves the branch forward again.
 func (c *CLIClient) resetTreeOverRefusedSwitch(ctx context.Context, op, branch, to string, switchErr error) error {
+	// The checkout budget (INIT-024 TASK-003) of the `read-tree --reset -u`
+	// below, before anything is quarantined. ResetBranch measured `to`
+	// already; this keeps the reset bounded for any other caller.
+	if err := c.checkTrees(ctx, op, to); err != nil {
+		return fmt.Errorf("%w (and the reset is refused: %w)", switchErr, err)
+	}
 	if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
 		return fmt.Errorf("%w (and the obstruction check failed: %v)", switchErr, err)
 	} else if p != "" {
@@ -1200,7 +1225,10 @@ func (c *CLIClient) resetTreeOverRefusedSwitch(ctx context.Context, op, branch, 
 // contains a path the command would recreate is reported too,
 // conservatively.
 func (c *CLIClient) untrackedObstruction(ctx context.Context, op string, revs ...string) (string, error) {
-	args := append([]string{"diff", "--no-renames", "--name-only", "-z"}, revs...)
+	// --ignore-submodules=none (INIT-024 TASK-004 review round 1): a
+	// repository's submodule ignore settings must not hide a gitlink path
+	// the command rewrites.
+	args := append([]string{"diff", "--no-renames", "--name-only", "-z", "--ignore-submodules=none"}, revs...)
 	changed, _, err := c.runWith(ctx, op, runOpts{}, append(args, "--")...)
 	if err != nil {
 		return "", err

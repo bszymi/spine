@@ -1,6 +1,6 @@
 id: document-creation
 name: Document Creation
-version: "1.0"
+version: "1.1"
 status: Active
 description: >
   Governs creation of Governance, Architecture, and Product documents
@@ -53,7 +53,7 @@ steps:
         name: Validation Failed
         next_step: draft
     timeout: "5m"
-    timeout_outcome: valid
+    timeout_outcome: invalid
 
   - id: review
     name: Review Document

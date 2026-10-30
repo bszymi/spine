@@ -15,39 +15,53 @@ import (
 	"github.com/bszymi/spine/core/domain"
 )
 
-func TestIsTrustedIP(t *testing.T) {
+// INIT-024 TASK-006 (review finding N-2): trust is bound to a workspace.
+// An address is trusted for the workspaces it is listed under, matched
+// exactly, and for no other — there is no process-wide list.
+func TestIsTrustedIPForWorkspace(t *testing.T) {
 	h, err := NewHandler(Config{
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
-		TrustedCIDRs:    []string{"172.16.0.0/12", "10.0.0.0/8"},
+		TrustedCIDRsByWorkspace: map[string][]string{
+			"ws-a": {"172.16.0.0/12", "10.0.0.0/8"},
+			"ws-b": {"192.168.7.11/32", "fd00:b::/64"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	tests := []struct {
-		name       string
-		remoteAddr string
-		want       bool
+		name, workspace, remoteAddr string
+		want                        bool
 	}{
-		{"docker internal", "172.18.0.3:12345", true},
-		{"private 10.x", "10.0.0.5:80", true},
-		{"external", "203.0.113.1:80", false},
-		{"localhost", "127.0.0.1:80", false},
-		{"no port", "172.18.0.3", true},
-		{"invalid", "not-an-ip", false},
+		{"docker internal", "ws-a", "172.18.0.3:12345", true},
+		{"private 10.x", "ws-a", "10.0.0.5:80", true},
+		{"no port", "ws-a", "172.18.0.3", true},
+		{"ipv4-mapped ipv6 peer of a bound ipv4 range", "ws-a", "[::ffff:10.0.0.5]:80", true},
+		{"external", "ws-a", "203.0.113.1:80", false},
+		{"localhost", "ws-a", "127.0.0.1:80", false},
+		{"invalid", "ws-a", "not-an-ip", false},
+		{"ws-a's runner asking for ws-b", "ws-b", "10.0.0.5:80", false},
+		{"ws-b's runner asking for ws-a", "ws-a", "192.168.7.11:80", false},
+		{"ws-b's runner", "ws-b", "192.168.7.11:80", true},
+		{"ws-b's ipv6 runner", "ws-b", "[fd00:b::5]:80", true},
+		{"ws-b's ipv6 runner asking for ws-a", "ws-a", "[fd00:b::5]:80", false},
+		{"unbound workspace", "ws-c", "10.0.0.5:80", false},
+		{"empty workspace", "", "10.0.0.5:80", false},
+		{"workspace id differs in case", "WS-A", "10.0.0.5:80", false},
+		{"workspace id with a trailing space", "ws-a ", "10.0.0.5:80", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := h.IsTrustedIP(tt.remoteAddr)
-			if got != tt.want {
-				t.Errorf("IsTrustedIP(%q) = %v, want %v", tt.remoteAddr, got, tt.want)
+			if got := h.IsTrustedIPForWorkspace(tt.workspace, tt.remoteAddr); got != tt.want {
+				t.Errorf("IsTrustedIPForWorkspace(%q, %q) = %v, want %v", tt.workspace, tt.remoteAddr, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestIsTrustedIP_NoCIDRs(t *testing.T) {
+func TestIsTrustedIPForWorkspace_NoCIDRs(t *testing.T) {
 	h, err := NewHandler(Config{
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
 	})
@@ -55,18 +69,26 @@ func TestIsTrustedIP_NoCIDRs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if h.IsTrustedIP("172.18.0.3:80") {
-		t.Error("expected no IPs to be trusted when TrustedCIDRs is empty")
+	for _, ws := range []string{"", "default", "ws-a"} {
+		if h.IsTrustedIPForWorkspace(ws, "172.18.0.3:80") {
+			t.Errorf("workspace %q: expected no IPs to be trusted when TrustedCIDRsByWorkspace is empty", ws)
+		}
 	}
 }
 
 func TestNewHandler_InvalidCIDR(t *testing.T) {
-	_, err := NewHandler(Config{
-		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
-		TrustedCIDRs:    []string{"not-a-cidr"},
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid CIDR")
+	for name, cidrs := range map[string]map[string][]string{
+		"unparsable CIDR":   {"ws-a": {"not-a-cidr"}},
+		"empty workspace":   {"": {"10.0.0.0/8"}},
+		"one bad among two": {"ws-a": {"10.0.0.0/8"}, "ws-b": {"10.0.0.1"}},
+	} {
+		_, err := NewHandler(Config{
+			ResolveRepoPath:         func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
+			TrustedCIDRsByWorkspace: cidrs,
+		})
+		if err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
 	}
 }
 
@@ -78,8 +100,13 @@ func TestNewHandler_Defaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cap(h.sem) != 5 {
-		t.Errorf("expected default MaxConcurrent=5, got %d", cap(h.sem))
+	// INIT-024 TASK-005 (owner question 1): 2 per principal, 4 per
+	// workspace, 8 in all; a 10s command-read deadline.
+	if h.slots.global != 8 || h.slots.perWorkspace != 4 || h.slots.perPrincipal != 2 {
+		t.Errorf("expected default caps 2/4/8, got %d/%d/%d", h.slots.perPrincipal, h.slots.perWorkspace, h.slots.global)
+	}
+	if h.commandReadTimeout != 10*time.Second {
+		t.Errorf("expected default CommandReadTimeout=10s, got %v", h.commandReadTimeout)
 	}
 	if h.opTimeout != 30*time.Second {
 		t.Errorf("expected default OpTimeout=30s, got %v", h.opTimeout)
@@ -88,16 +115,22 @@ func TestNewHandler_Defaults(t *testing.T) {
 
 func TestNewHandler_CustomConfig(t *testing.T) {
 	h, err := NewHandler(Config{
-		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
-		MaxConcurrent:   10,
-		OpTimeout:       60 * time.Second,
+		ResolveRepoPath:           func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
+		MaxConcurrent:             10,
+		MaxConcurrentPerWorkspace: 6,
+		MaxConcurrentPerActor:     3,
+		CommandReadTimeout:        2 * time.Second,
+		OpTimeout:                 60 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if cap(h.sem) != 10 {
-		t.Errorf("expected MaxConcurrent=10, got %d", cap(h.sem))
+	if h.slots.global != 10 || h.slots.perWorkspace != 6 || h.slots.perPrincipal != 3 {
+		t.Errorf("expected caps 3/6/10, got %d/%d/%d", h.slots.perPrincipal, h.slots.perWorkspace, h.slots.global)
+	}
+	if h.commandReadTimeout != 2*time.Second {
+		t.Errorf("expected CommandReadTimeout=2s, got %v", h.commandReadTimeout)
 	}
 	if h.opTimeout != 60*time.Second {
 		t.Errorf("expected OpTimeout=60s, got %v", h.opTimeout)
@@ -117,8 +150,12 @@ func TestIsReadOnly(t *testing.T) {
 		{"info refs receive-pack", "GET", "/info/refs", "service=git-receive-pack", false},
 		{"upload-pack POST", "POST", "/git-upload-pack", "", true},
 		{"receive-pack POST", "POST", "/git-receive-pack", "", false},
-		{"GET objects", "GET", "/objects/pack/pack-abc.pack", "", true},
+		{"GET objects", "GET", "/objects/pack/pack-0123456789abcdef0123456789abcdef01234567.pack", "", true},
 		{"GET HEAD", "GET", "/HEAD", "", true},
+		// INIT-024 TASK-004: a dumb-protocol GET is a read only at one of
+		// git-http-backend's own paths (protocol_path.go).
+		{"GET objects, not a pack name", "GET", "/objects/pack/pack-abc.pack", "", false},
+		{"GET below the repository root", "GET", "/.git/HEAD", "", false},
 		{"random POST", "POST", "/something", "", false},
 		// Review round 1 (INIT-023 TASK-015): git-http-backend keeps the
 		// last of a repeated parameter, url.Values.Get the first, so a
@@ -173,7 +210,8 @@ func TestIsReceivePack(t *testing.T) {
 		{"POST receive-pack", "POST", "/git-receive-pack", "", true},
 		{"POST upload-pack", "POST", "/git-upload-pack", "", false},
 		{"GET HEAD", "GET", "/HEAD", "", false},
-		{"GET objects", "GET", "/objects/pack/pack-abc.pack", "", false},
+		{"GET objects", "GET", "/objects/pack/pack-0123456789abcdef0123456789abcdef01234567.pack", "", false},
+		{"POST receive-pack below the repository root", "POST", "/.git/git-receive-pack", "", false},
 		// Review round 1 (INIT-023 TASK-015): any receive-pack value of a
 		// repeated service makes the request a push, whichever comes last.
 		{"info refs repeated service, receive-pack last", "GET", "/info/refs", "service=git-upload-pack&service=git-receive-pack", true},
@@ -1118,11 +1156,17 @@ func TestServeHTTP_ConcurrencyLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Fill the semaphore.
-	h.sem <- struct{}{}
+	// Fill the process-wide ceiling with another principal's slot.
+	release, _ := h.slots.acquire(slotPrincipal{workspace: "ws-other", id: "someone"})
+	if release == nil {
+		t.Fatal("could not take the only slot")
+	}
+	defer release()
 
 	req := httptest.NewRequest("GET", "/info/refs?service=git-upload-pack", nil)
-	ctx := WithRepoPath(req.Context(), "/tmp/repo")
+	// The repository is aligned before a slot is taken (INIT-024
+	// TASK-005), so it must be one.
+	ctx := WithRepoPath(req.Context(), initBareIshRepo(t))
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
@@ -1131,9 +1175,9 @@ func TestServeHTTP_ConcurrencyLimit(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 when concurrency limit reached, got %d", w.Code)
 	}
-
-	// Drain the semaphore.
-	<-h.sem
+	if w.Header().Get("Retry-After") == "" {
+		t.Error("503 without Retry-After")
+	}
 }
 
 func TestWithRepoPath_RoundTrip(t *testing.T) {

@@ -128,9 +128,35 @@ var TrailerOrder = []string{
 //
 // On any failure the worktree and its parent are removed and an error is
 // returned; a missing branch is a *GitError{Kind: ErrKindNotFound}.
+//
+// It applies the process default checkout limits (SetDefaultCheckoutLimits;
+// none unless the host set them): see EnterBranchWithLimits.
 func EnterBranch(ctx context.Context, repoDir, branch string, validator func(string) error) (*WriteScope, error) {
+	return EnterBranchWithLimits(ctx, repoDir, branch, validator, CheckoutLimits{})
+}
+
+// EnterBranchWithLimits is EnterBranch held to limits over the process
+// default (CheckoutLimits.over: a limit set here replaces the default's,
+// none is removed). INIT-024 TASK-003, review finding N-1:
+//
+//   - with a budget, the branch tip's tree is measured right after the
+//     exact lookup, before the private parent directory is created; a
+//     tree over the budget returns the ErrTreeTooLarge *GitError and
+//     nothing is created or written (no temporary directory, no worktree
+//     registration). An in-place scope (empty branch) measures the home
+//     branch when its entry restore switches back to it;
+//   - with a mutate deadline, the worktree is added `--no-checkout` and
+//     filled by a `reset --hard` this process runs, so the command that
+//     writes the tree is a direct child the deadline's SIGTERM reaches;
+//     `worktree add`, the reset and `switch` all run under it.
+//
+// With neither (the zero limits and no process default) it is exactly
+// EnterBranch before this change: no extra git process, the caller's
+// context alone.
+func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validator func(string) error, limits CheckoutLimits) (*WriteScope, error) {
+	limits = limits.over(DefaultCheckoutLimits())
 	if branch == "" {
-		return enterInPlace(ctx, repoDir)
+		return enterInPlace(ctx, repoDir, limits)
 	}
 	if validator != nil {
 		if err := validator(branch); err != nil {
@@ -148,6 +174,23 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 	if !ok {
 		return nil, fmt.Errorf("add worktree for branch %s: %w", branch, branchNotFound("worktree", "branch", branch))
 	}
+	// The checkout budget, before anything exists on disk. The measure
+	// uses the same exact object id the worktree is added at.
+	if limits.Budget != nil {
+		if err := limits.Budget.checkRevs(ctx, &CLIClient{repoPath: repoDir}, "worktree", oid); err != nil {
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
+		}
+	}
+	// The mutate deadline bounds the two commands that write the tree.
+	parentCtx := ctx
+	mctx, cancelDeadline := withMutateDeadline(ctx, limits.MutateTimeout)
+	defer cancelDeadline()
+	deadlineErr := func(err error) error {
+		if mutateDeadlineHit(parentCtx, mctx, limits.MutateTimeout) {
+			return fmt.Errorf("add worktree for branch %s: %w", branch, mutateTimeout("worktree", limits.MutateTimeout, err))
+		}
+		return nil
+	}
 
 	// Allocate a private parent directory (0700, unique name) and let git
 	// create the worktree inside it. The previous pattern was
@@ -161,29 +204,53 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 	}
 	worktreeDir := filepath.Join(parent, "wt")
 
-	cmd := newGitCmd(ctx, "worktree", "add", "--detach", "--end-of-options", worktreeDir, oid)
+	// With a mutate deadline the checkout is split out of `worktree add`:
+	// worktree add writes the tree in a CHILD git (`reset --hard`), which
+	// the SIGTERM the deadline sends to worktree add never reaches — it
+	// went on writing for as long as it liked (adversarial review). So
+	// the worktree is added with --no-checkout and this process runs the
+	// `reset --hard` that populates it, as a direct, deadlined child.
+	// (The post-checkout hook worktree add would run is not run.) No
+	// deadline: the single command, as before.
+	addArgs := []string{"worktree", "add", "--detach", "--end-of-options", worktreeDir, oid}
+	if limits.MutateTimeout > 0 {
+		addArgs = []string{"worktree", "add", "--no-checkout", "--detach", "--end-of-options", worktreeDir, oid}
+	}
+	cmd := newGitCmd(mctx, addArgs...)
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
+		// A worktree add stopped half-way has registered the worktree:
+		// remove the registration as well as the directory.
+		if dErr := deadlineErr(err); dErr != nil {
+			removeAddedWorktree(repoDir, worktreeDir, parent)
+			return nil, dErr
+		}
 		os.RemoveAll(parent)
 		return nil, fmt.Errorf("add worktree for branch %s: %s", branch, strings.TrimSpace(string(out)))
 	}
 
-	// removeWorktree undoes the add on a failed attach. Like Cleanup it
-	// uses a fresh bounded context: a cancelled request must not leak the
-	// worktree registration.
-	removeWorktree := func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		rmCmd := newGitCmd(cleanupCtx, "worktree", "remove", "--force", worktreeDir)
-		rmCmd.Dir = repoDir
-		_, _ = rmCmd.CombinedOutput()
-		_ = os.RemoveAll(parent)
+	// removeWorktree undoes the add on a failed attach.
+	removeWorktree := func() { removeAddedWorktree(repoDir, worktreeDir, parent) }
+
+	if limits.MutateTimeout > 0 {
+		reset := newGitCmd(mctx, "reset", "--hard", "-q")
+		reset.Dir = worktreeDir
+		if out, err := reset.CombinedOutput(); err != nil {
+			removeWorktree()
+			if dErr := deadlineErr(err); dErr != nil {
+				return nil, dErr
+			}
+			return nil, fmt.Errorf("add worktree for branch %s: %s", branch, strings.TrimSpace(string(out)))
+		}
 	}
 
-	sw := newGitCmd(ctx, "switch", "--no-guess", "--end-of-options", short)
+	sw := newGitCmd(mctx, "switch", "--no-guess", "--end-of-options", short)
 	sw.Dir = worktreeDir
 	if out, err := sw.CombinedOutput(); err != nil {
 		removeWorktree()
+		if dErr := deadlineErr(err); dErr != nil {
+			return nil, dErr
+		}
 		return nil, fmt.Errorf("add worktree for branch %s: %s", branch, strings.TrimSpace(string(out)))
 	}
 
@@ -213,8 +280,23 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 	}, nil
 }
 
-// enterInPlace is EnterBranch with an empty branch.
-func enterInPlace(ctx context.Context, repoDir string) (*WriteScope, error) {
+// removeAddedWorktree removes a worktree EnterBranch added (its
+// registration and its directory) and the private parent. Like Cleanup it
+// uses a fresh bounded context: a cancelled request must not leak the
+// worktree registration.
+func removeAddedWorktree(repoDir, worktreeDir, parent string) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rmCmd := newGitCmd(cleanupCtx, "worktree", "remove", "--force", worktreeDir)
+	rmCmd.Dir = repoDir
+	_, _ = rmCmd.CombinedOutput()
+	_ = os.RemoveAll(parent)
+}
+
+// enterInPlace is EnterBranch with an empty branch. The tree's client
+// carries limits, so the entry restore's switch back to the home branch
+// is measured and deadlined like any other.
+func enterInPlace(ctx context.Context, repoDir string, limits CheckoutLimits) (*WriteScope, error) {
 	h, err := acquireTree(ctx, repoDir)
 	if err != nil {
 		return nil, err
@@ -224,7 +306,7 @@ func enterInPlace(ctx context.Context, repoDir string) (*WriteScope, error) {
 		scope.cleanup = func() {}
 		return scope, nil
 	}
-	c := &CLIClient{repoPath: repoDir}
+	c := &CLIClient{repoPath: repoDir, treeBudget: limits.Budget, mutateTimeout: limits.MutateTimeout}
 	if home := homeBranchOf(repoDir); home != "" {
 		if _, err := c.restoreHeld(h.ctx, home); err != nil {
 			h.release()

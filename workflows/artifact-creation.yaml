@@ -1,6 +1,6 @@
 id: artifact-creation
 name: Artifact Creation
-version: "1.0"
+version: "1.1"
 status: Active
 description: >
   Generic workflow for governed artifact creation through planning runs.
@@ -63,7 +63,7 @@ steps:
       limit: 2
       backoff: fixed
     timeout: "5m"
-    timeout_outcome: valid
+    timeout_outcome: invalid
 
   - id: review
     name: Review Artifact

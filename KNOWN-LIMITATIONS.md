@@ -90,29 +90,30 @@ This document tracks known gaps and deferred functionality.
   (`service/internal/githttp`). Spooling chunked bodies before CGI, with a size cap, is an
   INIT-023 EPIC-001 follow-up (owner: bszymi).
 
-### Git Push: Run-Branch Admission Is a Push-Start Check
+### Git Push: Run-Branch Admission Is Checked at Push Start and Again at Apply Time
 - With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, a run, planning or divergence branch is pushable only
   by the actor bound to its current step, or an operator (INIT-023 TASK-016). Three limits remain:
-  - **Admission time, not write time.** The gate decides when the push's command section arrives;
-    git writes the ref only after the pack has been received and processed. A push started while
-    bound can land after the actor submits the step. The window is the upload (at most the HTTP
-    `ReadTimeout`, 30 s in `spine serve`) **plus** git's processing of the received pack (index,
-    delta resolution, connectivity check), which nothing bounds: `net/http/cgi` ignores the request
-    context and does not bound `git-http-backend`, and the pusher influences the processing time
-    through the pack it sends. The review freeze is checked at the same moment, so a push started
-    before the step was submitted can still land during review. Binding the governed merge to the
-    reviewed commit (INIT-023 TASK-005; always on in `spine serve`) is the content control for that
-    window: a push that lands after the step's submit bound the head is not merged unless a later
+  - **Admission is decided twice; a narrow window remains.** The gate decides when the push's
+    command section arrives, and — since INIT-024 TASK-005 (review finding N-9) — the pre-receive
+    hook decides again once git has received and processed the pack, before any ref moves: it asks
+    the server over a per-push channel, and the server re-runs the same admission (the run active,
+    the latest execution of the step still the actor's and assigned or in progress, the review
+    freeze) against the store as it is then, with nothing remembered from the first decision. A push
+    whose step was submitted, reassigned or turned into a review or internal step while its pack was
+    in flight is refused (`remote: spine: push refused: ref-admission: …`, `pre-receive hook
+    declined`), and so is one the hook cannot get an answer for (fail closed). What remains is the
+    time between that answer and git's ref update (the hook's exit), and the upload and processing
+    before it, during which nothing is written. Branch-protection rules are still evaluated once, on
+    the command section. Binding the governed merge to the
+    reviewed commit (INIT-023 TASK-005; always on in `spine serve`) stays the content control:
+    a push that lands after the step's submit bound the head is not merged unless a later
     producer step binds it — an `automated` step (a validate or summarize) re-binds to whatever head
     it completes at unless its submitter sends `expected_head_sha` ("Governed Merge Binding" 2; the
     shipped `artifact-creation`, `adr-creation`, `document-creation` and `task-spike` workflows have
     such a step before their review, and no Spine client sends the assertion yet) — and an approval
     of a branch that moved since the previous binding is refused
     (`409 run_branch_moved_since_gate`); an embedder that does not enable merge binding keeps the
-    gap. A real bound needs `git-http-backend`
-    run in its own process group under a deadline (a deadline would also cut legitimate large
-    pushes and clones, which today outlive `OpTimeout`), or a post-unpack re-check; both are
-    INIT-023 EPIC-001 follow-ups.
+    remaining window. SMP's own git gateway does not have the re-check yet (SMP companion epic).
   - **Force-push by the bound actor is allowed.** Fast-forward-only cannot be enforced per actor
     before the pack is unpacked, and `receive.denyNonFastForwards` would also block operators.
   - ~~**Dev mode pushes are anonymous.**~~ Resolved by INIT-023 TASK-015: `SPINE_DEV_MODE` no
@@ -127,8 +128,8 @@ This document tracks known gaps and deferred functionality.
   executions for exploratory branches is a follow-up (TASK-016 owner question 6).
 - **Case-insensitive storage.** The admission folds the `spine` namespace with Unicode simple case
   folding, so case-variant spellings are operator-only on any filesystem. Branch-protection rule
-  matching does not fold; see "Served Repositories Need Case- and Normalization-Sensitive Storage"
-  below.
+  matching does not fold; on storage that does, receive-pack is refused (INIT-024 TASK-005; see
+  "Served Repositories Need Case- and Normalization-Sensitive Storage" below).
 
 ### Run-Branch API Writes and Workflow Governance: What INIT-023 TASK-014 Leaves Open
 - On the standalone gateway, an API write onto a run branch (`write_context` with a `run_id`,
@@ -222,8 +223,9 @@ This document tracks known gaps and deferred functionality.
     author: an operator who pushes commits to a run branch can then be bound to its review. That
     is within operator authority in standalone; where it matters, compare the run branch's commit
     authors with the reviewer before accepting.
-  - **A push admitted while bound can land after the step is submitted** (see "Run-Branch
-    Admission Is a Push-Start Check"); its actor still counts as an author, because it was bound.
+  - **A push admitted while bound counts its actor as an author** (see "Run-Branch Admission Is
+    Checked at Push Start and Again at Apply Time"): since INIT-024 TASK-005 such a push lands only if the actor is still bound
+    when git applies it, and its actor counts as an author because it was bound.
 - **Planning runs without a recorded starter are reviewable by nobody (INIT-024 TASK-001,
   Decision 2; owner question 1 default: fail closed).** Separation of duties counts the actor who
   started a planning-mode run as a run author, from the starter the engine records at start
@@ -488,9 +490,10 @@ merge publishes the commit the run's steps validated and reviewed, never the run
 
 ### Governance-Path Guard (INIT-023 TASK-006, ADR-016)
 
-The merge guard holds a governed merge that changes `.spine/`, `.spine.yaml`, `workflows/` or
-`<artifacts_dir>/workflows/` until an operator approves the bound commit; the projection guard
-refuses an unprovenanced branch-protection removal. What remains:
+The merge guard holds a governed merge that changes `.spine/`, `.spine.yaml`, `workflows/`,
+`<artifacts_dir>/workflows/` or (INIT-024 TASK-002) a YAML file directly inside any directory
+named `workflows` until an operator approves the bound commit; the projection guard refuses an
+unprovenanced branch-protection removal. What remains:
 
 1. **Opt-in for embedders.** The library's zero value is v1: until an embedder calls
    `WithGovernanceGuard` and `WithProtectionRemovalGuard` (SMP: its TASK-010), F3 stays open
@@ -650,8 +653,37 @@ refuses an unprovenanced branch-protection removal. What remains:
     on a run whose refused merge is still blocked (item 6) reports it: `GET /runs/{run_id}/governance`
     shows `blocked`, a reject is `409` until the run's own retry has taken the merge back, and an
     approve whose merge ended blocked says so in `merge_error`.
+18. **The workflow-directory backstop is broad on one side and short on the other** (INIT-024
+    TASK-002, review finding N-5). Every decision adds the orchestrator's
+    `<artifacts_dir>/workflows/` and every changed `*.yaml` / `*.yml` file that sits directly in
+    a directory named `workflows` (any depth, case-folded) to the guarded set — the files
+    themselves, not their directory — so an embedder that configured the projection's
+    `artifacts_dir` without `WorkflowDirs` or `WithArtifactsDir` still holds a new definition.
+    The cost: a YAML file directly in any `workflows` directory that is not a Spine definition
+    (`.github/workflows/ci.yml`, a documentation folder) needs an operator approval; scripts,
+    READMEs and nested files changed beside it are not held by the backstop. There is no switch
+    to turn the backstop off while the guard is on (INIT-024 TASK-002 owner question 3). The residual: a nested file (`<artifacts_dir>/workflows/steps/x.yaml`) under a
+    projection directory that neither `WorkflowDirs` nor the orchestrator names merges unheld.
+    The projection does not install nested files as definitions, but an embedder's runner may
+    read them (SMP's step profiles live under the root `workflows/steps/`, which the default
+    `workflows/` entry covers). Pass `projection.WorkflowDirs(artifactsDir)` or call
+    `WithArtifactsDir` to close it.
 
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
+- **Workspace repositories are not repaired** (INIT-024 TASK-002). A workflow file that carries a
+  second YAML document with content is refused from this release on: the first sync of each
+  process re-checks every installed row against the file at head and quarantines it (no new run
+  binds the workflow) until the second document is removed. Copies of the three shipped creation
+  workflows made before the release keep `timeout_outcome: valid` on their `validate` step until
+  an operator edits them (CHANGELOG, INIT-024 TASK-002).
+- **A run bound before the upgrade to a two-document workflow file is stranded in standalone**
+  (INIT-024 TASK-002). `spine serve` loads a run's workflow from git (`GitWorkflowLoader`),
+  re-parsing the file at the commit the run is pinned to on every action that needs it (assign,
+  claim, submit, merge), and that file is refused now. Removing the second document on `main` does
+  not change the pinned commit: cancel the run (cancelling does not load the workflow; not allowed
+  from `committing`) and start it again. Projection-backed reads are unaffected — the scheduler's
+  timeout and recovery scans, and SMP's projection workflow loader, read the stored row by path,
+  which the projection keeps (quarantined, at its old `source_commit`).
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are
   enforced (a file that fails either is not projected), but a workflow that fails the full
   `workflow.Validate` suite is still projected, with one Info log line. 6 of Spine's 8 shipped
@@ -810,6 +842,36 @@ The governed merge judges artifact-status changes against the declared lifecycle
 - **Runs in flight at the upgrade** whose branch carries status edits on artifacts they do not own
   are refused at the merge; a publish-step workflow routes them back to `execute`.
 
+### Supply Chain: What INIT-024 TASK-009 Leaves Open
+
+CI pins every action and image, scans for reachable advisories and enforces toolchain parity
+(`dev/pincheck`, CI jobs `vuln` and `toolchain-parity`). What it does not cover:
+
+- **Repository settings are owner actions** (INIT-024 §7d): a `main` ruleset (PR and CI required,
+  no force push), approval for all outside contributors, and "allowed actions: selected" with SHA
+  pinning required. Until the ruleset exists, nothing makes these CI jobs required.
+- **Dependabot does not move the toolchain.** It proposes a new golang image for the Dockerfile but
+  never edits go.mod's `toolchain` line, the `ci.yml` git-floor container, the Makefile's
+  `DOCKER_GO` or the setup-go `go-version`s. `toolchain-parity` fails that PR until all of them
+  agree, and that failure is intended. The same goes for a compose postgres bump: the `ci.yml`
+  postgres service must be moved to the same ref by hand. The govulncheck version (`ci.yml`,
+  Makefile) is also moved by hand.
+- **The scan of shell commands is best-effort.** In workflow `run:` scripts and Makefiles,
+  `dev/pincheck` reads `docker run|create|pull` (and `docker container run|create`, `docker image
+  pull`) and takes the first non-flag word as the image. An unknown boolean flag makes it read the
+  next word as the image, which is a refusal, not a pass. It does not see:
+  - images in other scripts (`dev/*.sh`, scripts a step runs from a file);
+  - commands assembled at run time (`eval`, `sh -c "$CMD"`);
+  - images pulled by other tools (`crane`, `skopeo`, `ctr`, `podman`).
+
+  An image passed through a variable defined elsewhere is refused as computed, not resolved.
+- **govulncheck scans the default build only.** Code behind the `integration` and `scenario` tags
+  and `_test.go` files is not analysed. A new upstream advisory fails every PR until it is fixed
+  or the job is changed. This is the default fail-closed policy (TASK-009 owner question 2).
+- **The runtime image's packages are not pinned.** The debian digest fixes the base, but `apt-get
+  install git ca-certificates` resolves at build time. There is no image vulnerability scan, SBOM
+  or signing: Spine has no image publishing pipeline.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:
@@ -852,11 +914,13 @@ The following limitations have been resolved:
 ### Auth Bypass in Dev Mode
 - **No auth service:** when `SPINE_DATABASE_URL` is not set the auth service is nil, and the auth
   middleware answers 503 (fail closed) — no bypass. Production deployments MUST configure a
-  database and auth.
+  database and auth. In shared mode a workspace whose ServiceSet has no auth service answers the
+  uniform `401` instead, with the cause logged (INIT-024 TASK-007; see "Session and Auth Hygiene").
 - **`SPINE_DEV_MODE` (API only).** `1`/`true` lets unauthenticated requests through `authorize()`
   on `/api/v1`. It is refused at startup only when `SPINE_ENV=production`, so it is accepted with
-  `SPINE_ENV` unset or `staging` (INIT-023 TASK-015 owner question 5: unchanged, pending the
-  owner). Since INIT-023 TASK-015 it has **no effect on `/git`**; it used to drop git
+  `SPINE_ENV=staging` (INIT-023 TASK-015 owner question 5: unchanged, pending the owner). An unset
+  or unknown `SPINE_ENV` no longer reaches this check: `spine serve` refuses to start without a
+  known value (INIT-024 TASK-007). Since INIT-023 TASK-015 it has **no effect on `/git`**; it used to drop git
   authentication for clone and push.
 - **`SPINE_GIT_HTTP_DEV_NO_AUTH` (git reads only).** `1`/`true`/`yes`/`on` lets every client clone
   and fetch over `/git` without a bearer. `spine serve` refuses to start with it unless
@@ -870,15 +934,77 @@ The following limitations have been resolved:
   sent no `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`, `X-Forwarded-Proto` or
   `Via`. No forwarded address is trusted for access (owner question 6: a runner behind a reverse
   proxy presents a token; pending the owner).
+- Since INIT-024 TASK-006 (review finding N-2) the bypass is also **bound to a workspace**: a
+  trusted address reads only the workspaces its `SPINE_GIT_HTTP_TRUSTED_CIDRS` entry names
+  (`ws-a=172.28.1.10/32;ws-b=172.28.1.11/32`), and the trust is looked up under the workspace the
+  request resolved to. In shared mode (`db`, `platform-binding`) the bare list refuses to start
+  (owner question 1 default, pending the owner); in single mode it is bound to the one workspace.
+  Any other workspace, and any workspace that does not resolve, answers the uniform `401`. CIDRs
+  bound to different workspaces that overlap are accepted (one runner may serve two workspaces)
+  with a startup warning.
+- A caller without a valid token for the workspace — none, a junk or non-bearer header, an expired
+  or revoked token, another workspace's token — gets that same uniform `401` for every `/git`
+  request, read or push, with push on or off, whatever the workspace's state (INIT-024 TASK-006;
+  with push off the `403` naming `SPINE_GIT_RECEIVE_PACK_ENABLED` is shown only to an
+  authenticated caller).
+- **Residual: the binding is per address, not per job.** A runner address bound to a workspace
+  reads that workspace's whole repository — every branch, not only the run branch of the job it is
+  executing — and any process or job on that host can do the same. Two tenants that share a runner
+  address (or a runner host) share each other's repositories. Give each tenant its own runner
+  addresses. A job-scoped clone token, after which trusted CIDRs could be dropped, is a follow-up
+  (TASK-006 owner question 2).
+- **Only the served repository's protocol paths reach `git-http-backend`** (INIT-024 TASK-004,
+  from TASK-006's security review). The handler's read and push classification used to match path
+  suffixes, and `git-http-backend` serves the directory a request path names before its protocol
+  part as a repository: a path prefix inside the served tree reached it as a repository — another
+  git directory inside the working tree — also token-less for a trusted peer, within the bound
+  workspace only. Now a read or a push is exactly one of the paths `git-http-backend` serves at the
+  repository root (`/info/refs`, `/git-upload-pack`, `/git-receive-pack`, `/HEAD`,
+  `/objects/info/{packs,alternates,http-alternates}`, a loose object or a pack/idx by its full id),
+  relative to the repository the gateway resolved, and the gateway classifies push and read on the
+  same path it hands the handler. Any other git path — a prefix, a `.` or `..` segment, a doubled
+  or trailing slash inside it — is refused with `403` before `git-http-backend` runs; TASK-006's
+  `..` residual (refused only by `git-http-backend`'s own alias check, with a `500`) is closed with
+  it. Through the gateway an empty path segment where the repository segment goes (a doubled slash
+  right after the workspace) is an empty repository id, which names the primary repository as it
+  always has, so that request is the primary's own protocol path.
+- **Residual: `SPINE_GIT_HTTP_DEV_NO_AUTH` is not workspace-scoped.** The development flag (accepted
+  only with `SPINE_ENV=development`) lets every client read every workspace, in every mode.
+- **Residual: a single-mode server without an auth service tells workspaces apart.** The one
+  known exception to the uniform `401` above, in single mode only: when the server has no auth
+  service, a resolved workspace answers `503` "authentication not configured" to a caller
+  presenting a bearer, where a missing workspace answers `401` — a misconfiguration signal kept on
+  purpose for operators. In shared mode a workspace whose ServiceSet has no auth service answers
+  the uniform `401` like every other refusal (INIT-024 TASK-007); the cause is logged at `Error`.
 - **Residual: TCP-level proxies are invisible.** A proxy that relays connections without adding a
   header — Docker's userland proxy for a published port, which connects from the bridge gateway
   (`x.y.z.1`), or an L4 load balancer — looks like a direct peer. Never put such an address in
   `SPINE_GIT_HTTP_TRUSTED_CIDRS`; the compose file no longer trusts its whole bridge subnet, and
   `docker-compose.override.yaml.example` shows runner-only recipes.
-- **Residual: process-wide git capacity.** In shared mode the git concurrency cap (5 in-flight
-  pack operations) and the per-client-IP rate limiter are process-wide: one tenant's slow clones
-  can fill every git slot and make every tenant's git requests answer `503`. They key on network
-  address and capacity, not tenant identity; a per-workspace fair share is a follow-up.
+- **Git capacity is shared fairly, within one process (INIT-024 TASK-005, review finding N-13).**
+  A git request takes one slot from three caps: its principal's — the (workspace, actor) of a token
+  request, or the (workspace, peer address) of a token-less read, never a shared empty actor — its
+  workspace's, and the process's (`SPINE_GIT_HTTP_MAX_CONCURRENT_PER_ACTOR`,
+  `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_WORKSPACE`, `SPINE_GIT_HTTP_MAX_CONCURRENT`); a full cap
+  answers `503` with `Retry-After: 5`. Defaults: in shared mode 2 / 4 / 8; on a single-workspace
+  server the per-workspace and per-actor caps default to the process-wide one (8), which is then the
+  server's capacity (it was one cap of 5) — an explicitly lower per-workspace cap binds, with a
+  startup warning when the process-wide cap is set above it. A push takes its slot only after its
+  command section has arrived (within `SPINE_GIT_COMMAND_READ_TIMEOUT`, default 10 s) and been
+  admitted, so a client that stalls there holds none; the command sections being read and admitted
+  at once are capped too, at twice the slot caps per principal and per workspace (one more push is
+  answered `503` at once). Residuals: the caps are per replica; each push in admission may buffer up
+  to the 1 MiB command-section cap and evaluates admission and branch protection for every ref it
+  names — there is no separate ref-count cap, the 1 MiB bounds it; a fetch whose request body
+  stalls, and a push whose pack stalls, hold their own principal's slot until the server's 30 s
+  `ReadTimeout`; members of two workspaces can fill the process-wide ceiling between them; in shared
+  mode runners that share one token share one actor's slots (2 by default) — raise
+  `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_ACTOR` for them; the per-client-IP rate limiter is unchanged.
+- **The command-read cut needs a ResponseWriter that reaches the connection.** A stalled command
+  section is cut by moving the connection's read deadline (`http.ResponseController`); the
+  gateway's middleware writers support it. Behind a writer that cannot, the fallback — closing the
+  request body — is best-effort: a net/http server body is then read until the server's
+  `ReadTimeout` (still without a git slot).
 
 ### SSE: An Event With an Unsafe ID Does Not Advance the Client Cursor
 - Since INIT-023 TASK-015 (audit P3-28) an event whose ID (or type) contains a control character,
@@ -890,6 +1016,50 @@ The following limitations have been resolved:
   arrive. Such IDs can come only from a workflow whose identifiers break the identifier rule, which
   the standalone API refuses (`workflow-definition-format.md` §3.6) but a git push or a governed
   merge can still land, and core validation (shared with embedders) does not apply.
+
+### Session and Auth Hygiene (INIT-024 TASK-007)
+- **SSE revalidation window (N-14).** An open `/api/v1/events/stream` re-validates its bearer —
+  revocation, expiry, actor status and the `events.read` permission — on every heartbeat, 30 s
+  (owner question 1 default, pending the owner), and closes on failure. Events broadcast between
+  the revocation and the next heartbeat are still delivered: the window is at most one interval.
+  A token-store error or timeout during the check closes the stream too (fail closed); the client
+  reconnects. Proactive close through an event bus is out of scope.
+- **Pre-authentication builds (N-15).** In shared mode an `/api/v1` request without a well-formed
+  bearer is refused before the workspace is even resolved — no registry query, no platform binding
+  fetch, no ServiceSet build — and every refusal before the bearer is validated is the same `401`.
+  A well-formed but invalid bearer still resolves the workspace and builds its services: the
+  bearer can only be checked against that workspace's own token store. That build is not cheap or
+  side-effect free — the first one opens the workspace's database pool, sweeps its subscription
+  secrets, seeds the bootstrap `smp-admin` rows when `SMP_ADMIN_TOKEN` is set and starts the
+  workspace's event delivery — and it is **not** bounded by idle eviction: every `Get`/`Release`
+  refreshes the entry's last access, so one junk bearer per workspace per idle timeout (10 min by
+  default) keeps a workspace built indefinitely. The per-IP rate limiter bounds the request rate,
+  not the number of workspaces kept warm. In `db` mode this adds little — the projection sync
+  already builds every active workspace on each poll — but in `platform-binding` mode it lets an
+  anonymous caller who knows workspace ids keep them loaded. A per-workspace build rate limit or a
+  negative cache for failed builds is a follow-up (TASK-007 review round 1, finding 3).
+- **`/git` still resolves before its gate.** `/git/{workspace}/...` resolves the workspace before
+  it looks at the bearer, because trusted-CIDR and development reads are token-less and need the
+  workspace to decide; in `platform-binding` mode a header-less request therefore still costs a
+  binding fetch for a workspace id the cache does not hold. The answers are uniform (below); the
+  fetch is not.
+- **Timing.** Response *timing* still differs between a missing workspace (no build, no query)
+  and an existing one; the refusals are not constant-time.
+- **Shared mode answers `401` for an unbuildable workspace (N-15).** A caller whose workspace's
+  services fail to build, or whose token store errors, gets the uniform `401` — even with a token
+  that is valid there — where it used to get `500`/`503`. The cause is logged at `Warn`/`Error`
+  with the workspace id; operators read outages from the logs, not from client status codes.
+- **"Verified" evidence (N-17).** `run.status` marks each repository's evidence `verified: true`
+  only when it was read from the authoritative branch, and `false` with the run branch as
+  `source_ref` otherwise; `unverified_repositories` lists the latter. "Verified" means the record
+  passed the run's governed merge, not that the server produced or signed it: a run's own evidence
+  directory is excused from the governance-path approval ("Governance-Path Guard" above), so its
+  content is still the producer's, reviewed with the run. The merge gate never read this display
+  path.
+- **`SPINE_ENV` is required (N-16).** `spine serve` and `spine secrets reencrypt` refuse to start
+  unless it is `production`, `staging` or `development` (owner question 2 default: refuse rather
+  than treat unset as production, pending the owner). `staging` and `development` still turn every
+  production gate off; choosing them is now explicit, not a fallback.
 
 ### Code Repositories Authenticate Only With `credentials_ref`
 - Since INIT-023 TASK-015 a code repository with no `credentials_ref` clones and pushes with no
@@ -979,10 +1149,25 @@ The following limitations have been resolved:
   `refs/HEADS/main` takes the non-branch allow the same way, and the aliasing is not ASCII-only
   (APFS also folds the Kelvin sign onto `k` and NFD onto NFC). `core.ignorecase` prevents none of
   this.
-- **Status:** a documented deployment requirement, not yet enforced. Fail-closed handling (a
-  per-repository case-sensitivity probe that refuses receive-pack, or fold-and-normalize rule
-  matching that also covers the `refs/heads/` prefix test) is an INIT-023 EPIC-001 follow-up,
-  paired with SMP's equivalent follow-up.
+- **Status: enforced (INIT-024 TASK-005, review finding N-8).** With receive-pack on, the git
+  endpoint probes each repository's storage on the first push request it serves for it (once per
+  repository and process lifetime; reads never run or wait on the probe): in a fresh directory under
+  `<git-common-dir>/refs/heads` — where the protected branches' loose ref files live — whose name
+  starts with `.` (git's ref iteration, `pack-refs` and the ref advertisement skip it; no ref name
+  can address it; it is removed at once), it creates three pairs of names a folding filesystem
+  identifies — ASCII case, Unicode NFC/NFD and the Kelvin sign against `k` — and reads them back. A
+  repository on storage that folds any pair has receive-pack refused: the push advertisement and the
+  push answer `403` naming this requirement before the body is read, and the repository's
+  `http.receivepack` is set to `false`. Clones and fetches are served as before (owner question 2).
+  A probe that cannot answer (an unwritable `refs/heads` directory) refuses pushes with `500 push
+  gate unavailable`; that refusal is reused for 30 seconds before a push probes again. A
+  case-sensitive APFS volume is still normalization-insensitive and is refused too. A **reftable**
+  repository (`git init --ref-format=reftable`) keeps no ref files and so cannot alias ref names,
+  but has no `refs/heads` directory: the probe runs in `refs/` and refuses it on folding storage as
+  well (a fail-closed false positive). A deployment that serves pushes from such storage today,
+  against this requirement, has them refused after the upgrade; move the repositories to a
+  case-sensitive, normalization-sensitive filesystem. SMP's own gateway has no probe yet (SMP
+  companion epic).
 
 ### Git Ref Arguments
 - **Grammar** (INIT-023 TASK-002; audit F10, P3-32, P3-36): the git client
@@ -1006,10 +1191,20 @@ The following limitations have been resolved:
   TASK-008).
 - **Git floor:** git 2.30 or newer (`rev-parse --end-of-options`). `spine serve` refuses to start
   below it; embedders call `git.CheckGitVersion` at boot. Every shipped image runs 2.39.5 or later.
-- **Residual — user `?ref=` for a non-branch name still follows DWIM.** A read with
-  `?ref=<name>` where `<name>` is not an existing branch resolves as git always has, so a pushed
-  `refs/<name>` beats `refs/tags/<name>`. Name tags in full (`?ref=refs/tags/<name>`). TASK-016
-  blocks such pushes for non-operators.
+- **No DWIM for a missing reserved or home branch** (INIT-024 TASK-004; review finding N-10). A
+  bare revision in the reserved namespace (first component a case-fold spelling of `spine`, the
+  rule push admission uses: run, planning and divergence branches, `spine/init`) or naming the
+  tree's home branch, with no `refs/heads/<n>`, is `not_found` — never resolved by git's DWIM. A
+  run branch is usually missing because cleanup deleted it, and the evidence querier still reads it
+  for terminal runs; a same-named `refs/tags/<n>` or `refs/<n>` used to answer for it in every
+  read (`ReadFile`, `RefSHA`, `Diff`, `ListFiles`, `TreeEntryType`, `MergeBase`, `Log{Since}`,
+  `MeasureTree`). Name such a tag in full (`refs/tags/spine/...`) to read it.
+- **Residual — user `?ref=` for any other non-branch name still follows DWIM.** A read with
+  `?ref=<name>` where `<name>` is not an existing branch, outside the reserved namespace and not
+  the home branch, resolves as git always has, so a pushed `refs/<name>` beats
+  `refs/tags/<name>`. Name tags in full (`?ref=refs/tags/<name>`). TASK-016 blocks such pushes for
+  non-operators. Narrowing DWIM to the reserved and home names keeps `?ref=<tag>` and abbreviated
+  ids working on the public API (TASK-004 owner question 1 default: narrow).
 - **Residual — a branch beats a same-named tag in a bare-name read.** Revisions resolve
   branch-first, so a bare `<name>` that is both `refs/heads/<name>` and `refs/tags/<name>` reads
   the branch; git itself, and Spine before INIT-023, read the tag. Branch-first is what stops a
@@ -1055,18 +1250,20 @@ The following limitations have been resolved:
   path since the wave 4 follow-up, `git cat-file -s` before) and refuses one over the per-blob
   limit before reading it (`git.DefaultMaxBlobBytes`, 4 MiB — the worktree
   read limit too; `git.WithMaxBlobBytes`), with a permanent error matching `git.ErrBlobTooLarge`
-  (API 413). Every other read command — listings, diff, log, rev-parse, merge-base — fails past
-  16 MiB of output (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`, never below 4 KiB;
-  `git.ErrOutputTooLarge`).
+  (API 413). Every other read command — log, rev-parse, merge-base — fails past 16 MiB of output
+  (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`, never below 4 KiB;
+  `git.ErrOutputTooLarge`). The listings (`ListFiles`, `ListFilesFunc`) and `Diff` are parsed as
+  git writes them (INIT-024 TASK-004) and bounded by what they **keep**, not by what git prints:
+  see "Listings bound the paths they keep" below.
   Read commands also run with `GIT_ALLOC_LIMIT` (4 x the per-blob limit, never below 1 MiB, which
   git's own fixed allocations need; `git.WithMaxGitAllocBytes`), so git refuses any single
   allocation over it — it will not inflate a small blob stored as a delta on a huge base — and
   read and diff commands pin git's delta-base
   cache to the per-blob limit (`core.deltaBaseCacheLimit`, passed in `GIT_CONFIG_PARAMETERS`
   after any inherited entries); they run in the C locale so git's refusal is recognised whatever
-  the host's language. A command's output is held once: the parsed paths and messages share its
+  the host's language. Any other command's output is held once: the parsed messages share its
   buffer, which grows in powers of two (so while it grows it is briefly held at half and full
-  size). Mutating commands (checkout, merge, commit, add, branch, config, push) keep only the
+  size); a listing holds only the paths it keeps, each copied once. Mutating commands (checkout, merge, commit, add, branch, config, push) keep only the
   first 16 MiB of their output and never fail on its size. Defaults pending the owner (task owner
   questions 1 and 4).
 - **git's memory per read is about three times the alloc limit, not one.** `GIT_ALLOC_LIMIT` is
@@ -1077,15 +1274,67 @@ The following limitations have been resolved:
   concurrent read pays it, so a replica serving N such reads at once needs about N x 50 MiB of
   headroom for git. Lowering it means lowering the alloc limit (owner question 4), which refuses
   more legitimate deltas.
-- **A read-command output over the ceiling fails closed.** A commit on `main` whose listing or
-  diff exceeds 16 MiB (roughly 50k files, or fewer with long paths) makes `IncrementalSync`,
-  `FullRebuild` and `NextID` fail for that workspace — the sync state is `error` at the previous
-  commit and nothing is written — until the content is removed or the limit raised. Reaching it
-  takes a governed merge. Before TASK-003 the same commit exhausted the process's memory instead.
+- **Listings bound the paths they keep** (INIT-024 TASK-004; review finding N-6). A listing keeps
+  the paths its caller asked for — `ListFiles`' pattern, or `ListFilesFunc`'s predicate, applied
+  while git lists — and drops the rest as they arrive; `Diff` keeps every path it returns. What is
+  kept (each path plus its NUL) is held to a limit: `git.WithMaxOutputBytes` when the embedder sets
+  it; otherwise, for a tree listing, `git.DefaultMaxListingBytes` (~17.2 MiB: the checkout budget's
+  default 16 MiB of path bytes, one byte per default entry and 1 MiB of margin), and for a diff,
+  which holds both trees' paths, `git.DefaultMaxDiffBytes` (~33.4 MiB: twice that, plus the
+  margin); on a client that carries a checkout budget never less than what that budget admits —
+  so a tree any budgeted merge admits always lists in full, and one merge's diff always fits. No
+  single path has a length limit of its own (review round 1: a per-path cap let one long governed
+  path refuse every listing of its tree); one unfinished record is held only up to the room the
+  listing has left (at least 4 KiB). Past the limit the listing fails closed with the same
+  permanent `git.ErrOutputTooLarge`. Artifact and workflow discovery (`FullRebuild`), the first
+  sync's workflow-row sweep and `NextID` keep only the paths they use, through the optional
+  `git.PathFilterLister` capability (`git.ListFilesKeeping` falls back to `ListFiles` for a client
+  without it), and the branch-protection lookup by its `ListFiles` pattern, so a commit whose listing is huge but which holds few
+  governed files projects normally. Before, a merged commit whose `ls-tree -r` printed more than
+  16 MiB (about 160k files, or a few thousand deep paths — a few KB as a pack) failed every rebuild
+  and every sync's sweep until it was reverted.
+- **Listings stop at a record ceiling** (INIT-024 TASK-004 review round 1). With no bound on the
+  raw output, a tree of a few small objects whose shared subtrees expand to millions of listed
+  paths would cost one parse per path. So a tree listing fails closed (`git.ErrOutputTooLarge`,
+  `OutputTooLargeError.Records`) past 4 times the checkout budget's entry count — the client's
+  budget, else the default's: 800,000 records — and a diff or the evidence count past twice that,
+  whether the records are kept or dropped. The budget counts directories too, so only a tree no
+  budgeted checkout would admit reaches it. Callers that want one directory name it
+  (`ListFilesUnder`: discovery with an artifacts directory, workflow discovery, `NextID`), and git
+  then walks only that subtree; a repository-root discovery lists the whole tree under the ceiling.
+- **Residual — a sync window whose changed paths alone exceed the diff limit fails closed.**
+  `IncrementalSync` diffs the last synced commit against head, and `Diff` keeps every path, so a
+  window that adds or removes more than the limit's worth of paths leaves the sync state `error`
+  at the previous commit; every later tick fails the same way. An operator rebuild
+  (`POST /api/v1/system/rebuild`, or `FullRebuild`) recovers it — it lists only the governed paths
+  — and later windows sync normally. With a checkout budget (`spine serve`) one merge's diff always
+  fits the default limit, so a window over it takes many large merges between two syncs, or an
+  embedder whose explicit `WithMaxOutputBytes` is smaller. Falling back to a rebuild automatically
+  is a follow-up (INIT-024 TASK-010).
+- **Residual — more governed candidates than the limit.** A tree whose `.md` and workflow paths
+  alone exceed the listing limit (or the record ceiling) still fails `FullRebuild` closed. In
+  standalone no governed merge can bring one in: the budget bounds both.
 - **`diff` runs without `GIT_ALLOC_LIMIT`.** Rename detection loads both blobs of a candidate
   pair, and a legitimate large rename on `main` must not fail `Diff`; so a large blob already on
   the diff base can still be inflated in the git child while its rename is detected (its
-  delta-base cache is pinned like a read command's).
+  delta-base cache is pinned like a read command's). The step-output evidence count, whose
+  commit pair the run-branch author chooses, no longer goes through `Diff` (INIT-024 TASK-004;
+  review finding N-12): `CLIClient.CountChangedPaths` runs `git diff --name-only -z --no-renames`
+  as a read command (`GIT_ALLOC_LIMIT`, the pinned cache), which loads no blob, and keeps no path.
+  A rename then counts as two changed paths (a delete and an add). An operator without the
+  capability (SMP's) keeps counting through `Diff` (owner question 2 default).
+- **`Diff` ignores the repository's submodule ignore settings** (INIT-024 TASK-004). In a
+  non-bare tree `git diff <a> <b>` honours `submodule.<name>.ignore` in the checked-out
+  `.gitmodules` and `diff.ignoreSubmodules` in any config: `ignore = all` hid a gitlink change at a
+  governed path from the governance guard, the projection and the status cascade. `Diff` and
+  `CountChangedPaths` pass `--ignore-submodules=none`, so every gitlink change is reported
+  (`modified`). `ListFiles` (`ls-tree`) was never affected.
+- **History records cannot be forged by a commit message** (INIT-024 TASK-004; review finding
+  N-11). `Log` and `HasCommitWithTrailer` print each record after a boundary drawn per call from
+  `crypto/rand` (128 bits) and require every record to start with a full object id; anything else
+  fails the call (permanent, "unparseable log output"), never a skipped record. Before, a message
+  holding the fixed `---END---` separator and lines shaped like a record became a second entry of
+  `GET /api/v1/query/history`, with whatever id, author, date and trailers it chose.
 - **Named-ref window (closed by the wave 4 follow-up).** The size probe and the read are two git
   processes, but the read is `git cat-file blob <oid>` of the object the probe typed and sized, so
   a ref given by *name* that moves between them cannot change what is read. (Until then the read
@@ -1112,9 +1361,9 @@ The following limitations have been resolved:
   read-only commands parse the commit being merged, which the merge itself then reads without an
   allocation limit.
 - **Not covered:** receive-time inflation (`index-pack` reconstructs a pushed delta to hash it;
-  `receive.maxInputSize` bounds the pack, not the object), checkout-time inflation (`git worktree
-  add` / `checkout` of a branch holding an oversized blob, including the standalone branch-write
-  worktree), and wall-clock timeouts on git commands.
+  `receive.maxInputSize` bounds the pack, not the object). Checkout-time inflation and wall-clock
+  deadlines on mutating commands are now bounded by the checkout budget (INIT-024 TASK-003;
+  "Checkout Budget" below).
 - **Cost:** a `ReadFile` of a file runs three git processes — the entry probe (`ls-tree -l`), the
   object-type check (`cat-file -t`) and the read (`cat-file blob`) — where it ran one before
   TASK-003 (`show`) and two after it; a miss runs one (two when the revision names no tree). So a
@@ -1135,6 +1384,175 @@ The following limitations have been resolved:
 - **Embedders that wrap `ReadFile`** (SMP's bounded reader) return their own too-large error;
   until it matches `git.ErrBlobTooLarge`, discovery files such a read under its read errors and
   `Service.Read` reports a git error rather than 413 (SMP INIT-027 EPIC-004 TASK-008).
+
+### Checkout Budget (INIT-024 TASK-003; review finding N-1)
+- **Bound.** A small push can name one object from many tree entries; a checkout writes every
+  occurrence (a 4,470-byte pack made `EnterBranch` write ~200 MB at `a560c210`, and two levels of
+  1000 entries reach terabytes). A `git.CLIClient` that carries a checkout budget now measures the
+  tree before every command that writes one — `EnterBranch` (before the worktree's directory
+  exists), `Checkout`, `Merge` and `MergeBound`, `ResetBranch`'s `read-tree -m -u` and its
+  `read-tree --reset -u` fallback, the shared tree's restore (its `reset --hard` of HEAD and its
+  switch to the home branch), and `Clone` (made `--no-checkout`, measured, then `reset --hard`) —
+  and refuses one over it with a permanent error matching `git.ErrTreeTooLarge` before anything is
+  written or moved. The limits: 200,000 entries (files, links, gitlinks and directories), 2 GiB of
+  blob bytes and 16 MiB of summed path bytes (`git.TreeBudget`; owner question 1, defaults pending
+  the owner). The measure reads object headers through a streamed `git ls-tree -r -t -l -z` that
+  stops at the first crossing, so measuring a bomb costs about its first 200,000 entries.
+- **Checkouts write stored bytes** (review round 2). Every budgeted repository carries
+  `git.NeutralCheckoutAttributes` — `* -text -ident -filter !eol !working-tree-encoding
+  !conflict-marker-size` — as the last line of `<git-common-dir>/info/attributes`, the
+  highest-precedence attribute source, so no `.gitattributes` (macros included), operator attribute
+  file (`core.attributesFile`, the system file, an earlier line of `info/attributes`) or
+  `core.autocrlf` / `core.eol` setting can make a checkout, merge or linked worktree write more
+  than the blobs the measure sums; conflict markers are always 7 characters. `spine serve` writes
+  the line at start, when it builds a workspace's services, on every push it serves, into every
+  budgeted clone and into every code-repository clone it reuses (operator lines are kept), and a
+  budgeted measure refuses (`git.ErrNeutralAttributesMissing`, fail closed) a repository whose
+  file does not end in it — the last line that is not blank or a comment, by git's own rules
+  (only space, tab and CR are blanks). `merge` is left alone, so `binary` and `merge=union` merge
+  as before. The writer only writes at the top of a repository (never a repository that merely
+  contains the directory it is given). When it first adds the line it brings trees checked out with
+  conversions to their stored bytes, by content, leaving real uncommitted changes in place (the
+  CHANGELOG has the steps); what each tree kind sees:
+  - the shared workspace tree (standalone, home branch): its converted files are rewritten when
+    the line is added (`spine serve` start or the workspace build); its real changes are left by
+    that step and then, as before, quarantined and reset by the restore around its next sequence;
+  - a code-repository clone the pool reuses and a served repository's work tree: only the
+    converted files are rewritten; real changes (tracked edits, staged changes, untracked files)
+    stay as they were — a recorded path keeps the bytes it was checked out with (CRLF, an expanded
+    `$Id$`), so committing it as is records those bytes;
+  - a linked worktree: marked (its real changes recorded) when the line is added, renormalised
+    when a call is made on its own path (one Spine never calls on — an operator's — stays
+    converted, with its mark); its record was never compared under the line, so that call
+    quarantines the tracked state first (`git stash create`, SHA at Warn) before rewriting the
+    unrecorded differences — an edit made there after the line is in the quarantine, not in the
+    tree; a worktree that cannot be marked is logged at Warn and left as it is;
+  - a renormalisation stopped past the line (an I/O error or a crash: every other failure is
+    checked before the line) is retried by the next call, which quarantines the tracked state
+    first (`git stash create`, SHA at Warn) and then rewrites the unrecorded differences — an edit
+    made between the two calls is in the quarantine, not in the tree;
+  - a tree whose marker has no record (an earlier build of this change wrote it, or it cannot be
+    read: damaged, torn, or past its bounds — the marker is untrusted input): the same quarantine
+    first, then every unrecorded unstaged difference is rewritten; staged changes are still never
+    rewritten;
+  - only the calling tree's hold is taken while the line is added; a sequence running in another
+    worktree of the same repository at that moment runs on under the new attributes (one-time).
+  A check that fails before the line — HEAD over the budget, a torn or unreadable HEAD, a cancelled
+  request — leaves no line and no marker. A failure after the work tree's record but before the line
+  is in place (the worktree listing failing, a cancel while another worktree is marked, the
+  `info/attributes` write failing) leaves a marker without the line; the next call that adds the
+  line records the tree again and renormalises it. Either way the repository's budgeted checkouts,
+  merges and pushes
+  keep refusing (`ErrNeutralAttributesMissing`; the git endpoint answers `500 push gate
+  unavailable`) until a call succeeds: a tree already over the budget when the line is first added
+  needs the limit raised for that call (or the tree reduced outside Spine), not a repair push or
+  merge, which the missing line refuses too. A work tree with more uncommitted changes than a
+  record holds (2,097,152 paths) is not given the line either (the build or push logs why). The
+  renormalisation's `git status` is streamed and held to a tree listing's bounds ("Git Read
+  Bounds": the listing limit, `SPINE_GIT_TREE_MAX_PATH_BYTES` plus one byte per
+  `SPINE_GIT_TREE_MAX_ENTRIES` plus 1 MiB, and the record ceiling, four times the entry budget), so
+  every tracked path of a tree the budget admits fits. A status that is larger anyway (more index
+  entries than HEAD's tree, such as staged additions past the margin) fails closed:
+  before the line it refuses the call (no line, until the work tree has fewer differences); past
+  the line the tree stays marked, the shared workspace tree is repaired by the restore around its
+  next sequence (which quarantines and resets it), and a code-repository clone of the git pool by
+  deleting the clone, so the pool clones it again (a budgeted clone gets the line before its
+  checkout). A path marked
+  assume-unchanged or skip-worktree is trusted as git trusts it: not compared, not rewritten. A
+  shared-mode workspace build waits for the tree's hold (to add the line, or to renormalise a
+  marked tree) at most its init deadline (`SPINE_WS_POOL_INIT_TIMEOUT`; "Shared Working Tree",
+  item 9): past it the call gives up, the workspace is served, and the next build retries.
+  Not neutralised (operator configuration): a host `merge.<name>.driver` named by a `merge=`
+  attribute, and `pull.twohead` (Spine never pulls). Consequences: an LFS pointer stays a pointer,
+  `git add` keeps CRLF, does not collapse `$Id: … $`, runs no clean filter (a file Spine writes at
+  an LFS path on a git-lfs host is stored as its full content) and does not re-encode, and a tree
+  checked out with conversions
+  before the upgrade is brought to its stored bytes once, when the line is first added (retried
+  until it succeeds; above).
+- **A merge is measured by its result** (review rounds 1-2). After the switch to the target — in
+  the working tree `git merge` will see, whose merge attributes it reads — `git merge-tree
+  --write-tree` computes the tree the merge will leave (merge-ort; conflict markers included) on
+  the target tip read inside the working-tree hold the merge takes, and that tree is measured on
+  every limit before `git merge` runs; the tip is checked again after the switch and after the
+  measure (a moved tip is a transient refusal). The target is measured on its own before the
+  switch when the switch is a checkout (HEAD on another branch); an up-to-date replay (result =
+  target tree) is not measured. merge-tree and the measured `git merge` run under
+  `GIT_ALLOC_LIMIT` = max(`MaxTotalBytes`, the read allocation limit) — 2 GiB by default; a merge
+  that needs one allocation over it is refused (`git.MergeAllocRefusedMessage`). (The 16 MiB read
+  limit alone would refuse a merge of any packed file over 16 MiB.) `GIT_ALLOC_LIMIT` caps single
+  allocations, not the git child's memory: a content merge of a large file changed on both sides
+  holds several copies of it at once — about 10x the file (a 115 MB file took merge-tree to
+  1.2 GB RSS), so up to ~10 GiB near git's own ~1 GiB per-file diff cap. This is pre-existing
+  (`git merge` itself needs the same); the operator controls are the server's memory limit
+  (container / cgroup), a `SPINE_GIT_TREE_MAX_BYTES` whose ~10x fits it, and keeping very large
+  files out of merged branches. So two merges from one base can
+  no longer walk `main` over the budget, and a repair merge that brings an over-budget `main` back
+  under it is admitted. This needs git >= 2.38: `spine serve` refuses to start on an older git, and
+  a budgeted library merge on one is refused.
+- **On in standalone, off for embedders.** `spine serve` installs the budget and a 2-minute
+  deadline on every local mutating git command as the process default
+  (`git.SetDefaultCheckoutLimits`; `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`,
+  `SPINE_GIT_TREE_MAX_PATH_BYTES`, `SPINE_GIT_MUTATE_TIMEOUT` set other positive values; there is
+  no off switch). A library client built without `git.WithTreeBudget` / `git.WithMutateTimeout` in
+  a process that never set the default — every embedder, SMP included — measures nothing and runs
+  exactly as before (INIT-024 rule 2). SMP's own checkouts and merges (`gitread.CheckTreeDiff`,
+  `boundRunBranchCheckout`, `RealGitOperator.MergeBound`, its `/git/{workspace}` gateway) are SMP's
+  to bound (SMP INIT-027 EPIC-005); `git.MeasureTree` and `git.TreeBudget.Check` are the API for
+  it.
+- **Pushes are measured at pre-receive.** With receive-pack on, the git HTTP endpoint installs a
+  pre-receive hook (`<git-dir>/hooks/pre-receive`, running the hidden `spine git-hook pre-receive`
+  of the same binary) and pins `core.hooksPath` to its directory for the receive-pack it runs. Every
+  pushed tip is typed in one `git cat-file --batch-check` after the pack is unpacked into git's
+  quarantine and before any ref moves: a commit (or a tag of one) has its tree measured, each tree
+  once however many tips share it; a blob or tree tip (a tag of a GPG key, say) is admitted
+  unmeasured, since nothing Spine runs checks one out; a delete is skipped. Over the budget, or
+  not measurable (a missing object, the request's `OpTimeout`), the whole push is refused with a
+  `remote:` line naming the limit, its variable and the size it needs, and the quarantined objects
+  are discarded. Consequences: a pre-receive hook Spine did not write is never replaced — pushes
+  are refused until it is moved aside; hooks kept under a custom `core.hooksPath` (repository,
+  global or system config) do not run for pushes served by Spine, which logs one Warn per
+  repository naming them.
+- **Not atomic with a checkout by name.** A branch measured by name is looked up, measured and
+  then checked out by git, which reads the ref again; a branch that moves in between is written at
+  its new tip. In standalone every pushed tip passes the same budget at pre-receive, so a branch
+  cannot move to an over-budget tree there; a merge re-checks the tip it measured, and
+  `MergeBound` merges the exact measured commit. A writer outside the process that moves the
+  checked-out branch between the merge's last tip check and `git merge` (git refuses pushes to it
+  by default), or that edits `info/attributes` behind the server, is not covered. The totals bound one tree at a time: concurrent worktrees of
+  different branches each get the full budget (no per-tenant disk quota; out of scope).
+- **Mutate deadline.** On expiry the command is SIGTERMed (git removes its locks) and the call
+  fails with a permanent error wrapping `git.MutateTimeoutError`. With a deadline, `EnterBranch`
+  adds the worktree `--no-checkout` and runs the `reset --hard` that fills it itself, because
+  `worktree add` writes the tree in a child git the SIGTERM does not reach; the post-checkout hook
+  is then not run. `push` is not deadlined by it (a governed merge's push stays bounded by the
+  sequence timeout). A smudge filter the host configured keeps running after its git is stopped.
+- **A clone's fetch is neither size-bounded nor deadlined** (security review P3-2). A clone's
+  checkout is measured and deadlined, but the download before it is the remote's: a registered
+  code-repository remote serving a huge pack fills the code-repository disk while it downloads (git
+  has no fetch-side counterpart of `receive.maxInputSize`, and a fixed deadline would fail
+  legitimate large clones). Operator controls: put `SPINE_CODE_REPO_BASE` on its own filesystem or
+  quota, restrict which hosts code-repository remotes may name (egress policy), and limit who may
+  register code repositories. A clone the budget refuses is remembered per remote and budget for
+  10 minutes (a permanent 413-class error), so an over-budget remote is not fetched again on every
+  access.
+- **An over-budget home branch blocks the shared tree.** When the standalone tree's HEAD or home
+  branch is itself over the budget — a repository already over the defaults at upgrade, a limit
+  lowered below the existing tree, or a ref moved without a measured checkout (an operator's
+  `update-ref`, a push to the checked-out branch under a non-default `receive.denyCurrentBranch`)
+  — every restore refuses with nothing reset, so sequences on that workspace fail until the tree is
+  reduced (a merge whose result fits is admitted) or the limits raised: fail closed rather than
+  fill the disk. `spine serve` logs one Warn per workspace tree that is over the budget when it
+  starts (or builds the workspace's services), naming the limit and the remedy.
+- **One tree object over the git allocation limit is unmeasurable** (review round 1). A single
+  directory whose tree object exceeds `GIT_ALLOC_LIMIT` (4x the per-blob read limit, 16 MiB by
+  default — about 150,000 entries with long names) cannot be listed, so the tree is refused with
+  `git.TreeObjectTooLargeMessage`. Raising `SPINE_GIT_TREE_*` does not help; `spine serve` has no
+  setting for the allocation limit (an embedder raises it with `git.WithMaxBlobBytes` /
+  `git.WithMaxGitAllocBytes`).
+- **Refusals are permanent.** A refused governed merge is a permanent merge failure for the run
+  (retrying cannot shrink the tree); a refused branch-scoped write fails with `git_error`. One
+  budget covers every client of the process, code-repository clones and merges included, so a
+  code repository larger than the defaults needs the limits raised for the whole deployment.
 
 ### Webhook Signing Secrets: `migrate` Mode Does Not Close the Cross-Workspace Transplant
 - **What:** signing secrets are sealed in the `enc:v2` envelope, bound to the workspace and the
@@ -1403,9 +1821,107 @@ What that implies, and what it leaves open:
    nothing either. A *permanent* failure after a local merge (a rejected or
    unauthenticated push, a refusal) still routes the run while its merge stays on the local `main`,
    as before TASK-012; re-syncing local `main` is a follow-up.
-9. **The multi-workspace scheduler is bounded but not wired** (owner question 3): in the `db` and
-   `platform-binding` resolver modes no scheduler retries committing runs at all. Wiring
-   `MultiScheduler` into `spine serve` is a follow-up.
+9. **The multi-workspace scheduler is wired; a single leader is assumed** (INIT-024 TASK-008, the
+   open half of P3-27). In the `db` and `platform-binding` resolver modes `spine serve` runs
+   `MultiScheduler` over the workspace pool, so step and run timeouts, the orphan scan and the
+   bounded merge retries fire in every active workspace, each with its own store, git clients and
+   credentials. A tenant cannot hold up the others: one scan per workspace at a time, a tick that
+   makes no progress for its wait (`SPINE_SCHEDULER_WORKSPACE_BUDGET` + 30 s) stops waiting and later
+   ticks skip the stalled workspace until its scan ends, every scan is cancelled at a hard 10-minute
+   deadline, and a panic in one workspace's scan is recovered. What remains:
+   - **More than one replica.** There is no leader election (TASK-008 Decision 3, like the projection
+     sync and every INIT-023 lock): every replica scans every workspace. The scheduler's own writes
+     are compare-and-swap (INIT-023 TASK-008), so a timeout, a run-timeout termination or a
+     recovery applies once, but each replica retries a committing run's merge (the tree lock and the
+     merge-attempt gate are per process; item 7 says what the conditional writes cover across
+     processes). Run one replica per registry, or accept the duplicate merge attempts.
+   - **No startup crash recovery in the shared modes.** Single mode runs `RecoverOnStartup` before it
+     serves (a `pending` run activated, an `assigned` step reset, a completed step routed on, a
+     committing run retried); the shared modes run it for no workspace. Committing runs are still
+     retried by the loop and orphaned active runs failed by the orphan scan (after three thresholds),
+     but a run a crash left `pending`, or on a completed step that was never routed, waits for an
+     operator. Per-workspace startup recovery is a follow-up (TASK-008 owner question 3).
+   - **`platform-binding` schedules only resolved workspaces.** The platform has no enumeration
+     endpoint, so the scheduler lists the bindings the process has resolved since it started
+     (`PlatformBindingProvider.ListIDs`, the cache's ids): after a restart a workspace is scheduled
+     only once a request has resolved it (as with the projection sync).
+   - **How long a workspace that should stop is still scheduled**, per mode. A scan already running
+     when it happens finishes (within the scan deadline below).
+     - `db`: `POST /workspaces/{id}/deactivate` on this replica drops the resolver caches and evicts
+       the workspace, so the next tick skips it. A row deactivated any other way (SQL, another
+       replica's API) is still listed and resolved for up to the db provider's 60 s cache TTL.
+     - `platform-binding`: a binding is re-fetched once its 5-minute cache TTL has passed, and a
+       platform 404 drops it then. While the platform errors (5xx, network) a cached binding is
+       served stale for up to 30 minutes more (`StaleGrace`), so up to 35 minutes in all. The
+       invalidation webhook drops it at once, but only on the replica that receives it. A workspace
+       the platform answers 403 for (or whose secrets cannot be read) stays listed: every tick then
+       logs an Error for it, and each scan's resolve fetches it from the platform again.
+   - **A stalled scan holds what it holds until its deadline.** A scan no tick waits for any more
+     keeps its workspace's tree lock, one git process, one goroutine and its pool reference, and is not
+     counted against later ticks' `SPINE_SCHEDULER_MAX_CONCURRENT_WORKSPACES`. Every scan runs under a
+     hard 10-minute deadline (`MultiSchedulerConfig.ScanDeadline`; no variable): past it the scan's
+     context is cancelled and the scan returns, giving back its pool reference, with an Error. The git
+     commands it runs on that context are stopped with SIGTERM (git's handlers remove its lock files;
+     a remote helper exits with it). A code repository's first clone is not: the git pool runs it
+     detached, shared by every caller waiting for it, so it goes on after the scan has stopped waiting
+     for it. Until the deadline a request for an evicted workspace (a deactivation, a binding
+     invalidation, a credential rotation) waits for that reference: up to the deadline, or less if the
+     request's own deadline comes first. A sequence on a shared working tree (the primary
+     repository's merge and push) runs detached from the cancellation and ends within its own 5-minute
+     bound.
+   - **Building a cold workspace's services is bounded by the pool, not by the scan** (the build runs
+     on the pool's lifetime context, which the services it starts need). The pool waits for a build
+     at most its init timeout (`SPINE_WS_POOL_INIT_TIMEOUT`, default 2 minutes); every caller waiting
+     on the build — the scan, requests, the projection sync, a request already waiting on an evicted
+     entry — then gets an error (`ErrWorkspaceUnavailable`), and so does every caller until the
+     abandoned build returns: no second build starts beside it (a late build registers its database
+     pool over the replacement's). The build's one-shot calls — the database ping and the first
+     connections, the subscription-secret sweep, its git commands, the first bootstrap-admin write
+     and the internal subscription upsert — run under a deadline of the same length, so a database
+     that accepts the connection and never answers fails the build at the timeout instead of holding
+     it. When the abandoned build returns, a successful result is installed and served (a slow but
+     healthy workspace is not rebuilt for ever), unless the workspace was evicted meanwhile or the
+     pool closed; otherwise what it built is closed and the next caller builds afresh. A panic in a
+     build is recovered: what the build had started is closed, and callers get the error. A
+     request meets every one of these failures before its bearer can be validated (that needs the
+     built services), so it answers the uniform pre-authentication `401` (INIT-024 TASK-007), even
+     with a token that is valid there; the cause is logged.
+     **An operator with a workspace that keeps failing this way:** check that its database answers
+     (connection and authentication); if its healthy build is simply slower than the timeout (a large
+     subscription sweep, a slow database), raise `SPINE_WS_POOL_INIT_TIMEOUT`; to bound connection
+     setup independently of Spine, add `connect_timeout=<seconds>` to the workspace's database URL. A
+     build stuck in a call nothing bounds (a builder step that does not use the init context) keeps
+     the workspace unavailable — every request fails at once, nothing hangs — until it returns or the
+     process restarts.
+   - **An attempt cut by the scan deadline records nothing** — its outcome write uses the expired
+     context — so, like a lock wait cut short (item 8), it does not count against the merge retry
+     budget: a code repository whose remote never answers keeps its run in `committing`, retried on
+     later ticks, each attempt held up to the deadline (only that workspace waits). On shutdown a stalled scan is waited for only until the 10 s
+     shutdown deadline. As many tenants stalling in one tick as there are slots delay the others by one
+     wait: the workspaces that tick left undispatched come first in the next tick of the same kind.
+   - **Each tick lists every candidate row.** The scans read, per workspace and per tick, every
+     unfinished step execution (`ListActiveStepExecutions`, `adapters/store/postgres_steps.go`), every
+     run past its timeout, every stale active run and every committing run (`postgres_runs.go`), with
+     no `LIMIT`; the soft budget bounds the work done on them, not the read. A workspace with a very
+     large backlog is loaded into the shared process every 30 s (timeouts) and 60 s (orphans, merge
+     retries). Paging is a follow-up.
+   - **`platform-binding` reads secrets on every scan.** Listing for a tick reads none (`ListIDs`), but
+     each scan resolves its workspace through the pool, and a platform-binding resolve dereferences
+     the binding's three secret references every time (the provider caches no secret value; the
+     secret client's own cache decides what reaches the backend): about three reads per workspace per
+     scan, three scans a minute at the default intervals. The projection sync's `List` adds three
+     more per cached binding per poll.
+   - **A slow scan still lengthens its tick.** A tick waits as long as it makes progress, and the
+     three kinds of scan (timeouts, orphans, merge retries) share one loop, as in single mode. A
+     tenant whose scan is slow but never stalls (each merge retry just under the wait, every tick —
+     a push that fails after its merge landed is retried every tick, item 7) lengthens each of its
+     ticks by up to one workspace budget plus one wait, so the other tenants' next scan of another
+     kind starts that much later: their timeouts are late, never lost. A scan that ends just after
+     each wait costs one wait on every tick that dispatches it (every other tick of its loop, since
+     the tick in between skips it).
+   - **A recovered panic** releases what the scan released by `defer` (the pool reference, the tree
+     lock, transactions); anything held otherwise stays held, the same assumption as net/http's
+     per-request recovery behind every HTTP handler.
 10. **`classifyGitError`'s bare `"lock"` substring** also matches paths in git's stderr (an untracked
     `blocked-notes.md` in the way of a checkout reads as "repository locked", transient). The retry
     budget caps the loop; matching `index.lock': File exists` precisely is a follow-up. Likewise

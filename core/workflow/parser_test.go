@@ -1032,3 +1032,55 @@ steps:
 		t.Errorf("expected step.repository=payments-service, got %q", wf.Steps[0].Repository)
 	}
 }
+
+// TestParse_RefusesTrailingDocument is INIT-024 TASK-002 AC 5 (review
+// finding N-7) at the workflow parser: a definition followed by a second
+// YAML document is refused, whatever the second document holds, while a
+// bare trailing `---` is still accepted. Every Spine reader decoded only
+// the first document, so the second was silently ignored.
+func TestParse_RefusesTrailingDocument(t *testing.T) {
+	const def = `id: trailing
+name: Trailing
+version: "1.0"
+status: Active
+applies_to: [Task]
+entry_step: start
+steps:
+  - id: start
+    name: Start
+    type: manual
+    outcomes:
+      - {id: done, name: Done, next_step: end}
+`
+	for _, c := range []struct {
+		name    string
+		content string
+		refuse  bool
+	}{
+		{"second definition", def + "---\n" + strings.Replace(def, "type: manual", "type: review", 1), true},
+		{"second document with one key", def + "---\nsteps: []\n", true},
+		{"single document", def, false},
+		{"bare trailing separator", def + "---\n", false},
+		{"explicit document end", def + "...\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			wf, err := workflow.Parse("workflows/trailing.yaml", []byte(c.content))
+			if !c.refuse {
+				if err != nil {
+					t.Fatalf("Parse: %v, want accepted", err)
+				}
+				if wf.ID != "trailing" || len(wf.Steps) != 1 || wf.Steps[0].Type != domain.StepTypeManual {
+					t.Fatalf("Parse decoded %+v", wf)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Parse accepted a file with a second document (decoded id %q, %d step(s))", wf.ID, len(wf.Steps))
+			}
+			if !strings.Contains(err.Error(), "parse workflow workflows/trailing.yaml") ||
+				!strings.Contains(err.Error(), "unexpected second document") {
+				t.Fatalf("Parse error = %v, want the path and \"unexpected second document\"", err)
+			}
+		})
+	}
+}

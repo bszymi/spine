@@ -42,6 +42,7 @@ import (
 
 	"github.com/bszymi/spine/adapters/git/refname"
 	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/refadmit"
 )
 
 // ErrInvalidRef is wrapped by every grammar refusal. A refusal is a
@@ -268,7 +269,23 @@ func (c *CLIClient) resolveCommit(ctx context.Context, op, what, v string) (stri
 //     branch name (main@{1}), passes through unchanged.
 //  4. a bare branch name is looked up exactly: the object id when the
 //     branch exists; otherwise the name passes through, so tags,
-//     abbreviated ids and "origin/main" resolve exactly as before.
+//     abbreviated ids and "origin/main" resolve exactly as before —
+//     except
+//  5. a bare name in the reserved namespace (its first component folds
+//     to "spine": refadmit.Classify's rule) or the tree's home branch,
+//     when refs/heads/<n> is missing: ErrKindNotFound, never a
+//     passthrough (INIT-024 TASK-004, review finding N-10). These names
+//     are always meant as the branch — a run, planning or divergence
+//     branch, spine/init, the shared tree's home — and the branch is
+//     typically missing because it was deleted: a run's branch after
+//     cleanup, which the evidence querier still reads for a terminal
+//     run. git's DWIM would then resolve a same-named tag or refs/<n>
+//     (refs/<n> beats refs/tags/<n>), so every Rev-class read of the
+//     name — ReadFile, RefSHA, Diff, ListFiles, TreeEntryType,
+//     MergeBase, Log{Since}, MeasureTree — served content no review
+//     saw. Planting such a ref needs operator push rights (INIT-023
+//     TASK-016 admission) or a ref that predates the upgrade. A caller
+//     that wants the tag names it refs/tags/<n> (rule 3).
 //
 // A lookup that fails for any other reason returns the classified error.
 func (c *CLIClient) resolveRev(ctx context.Context, op, what, rev string) (string, error) {
@@ -296,7 +313,19 @@ func (c *CLIClient) resolveRev(ctx context.Context, op, what, rev string) (strin
 	if ok {
 		return oid, nil
 	}
+	if reservedOrHome(short, c.treeHome()) {
+		return "", branchNotFound(op, what, rev) // rule 5
+	}
 	return rev, nil
+}
+
+// reservedOrHome reports whether short (a valid branch name) is one a
+// Rev-class read must resolve as a branch only (resolveRev rule 5): any
+// name refadmit.Classify does not call an ordinary branch — the reserved
+// spine namespace, case-fold spellings included, so the namespace is the
+// one push admission enforces — or the tree's home branch.
+func reservedOrHome(short, home string) bool {
+	return refadmit.Classify(headsPrefix+short).Class != refadmit.ClassBranch || short == home
 }
 
 // --- Git version floor. ---

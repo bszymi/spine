@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"math"
 	"testing"
 )
 
@@ -56,10 +57,113 @@ func StderrKeptForTest(p []byte, chunk int) string {
 	return s.String()
 }
 
-// ParseNameStatusZForTest exposes Diff's -z parser.
+// ParseNameStatusZForTest runs Diff's streamed -z parser
+// (nameStatusCollector) over a whole output, written in one piece, with
+// no bounds, and ends it as Diff does (refusal, endOfStream, finish). It
+// returns the parse error itself (errMalformedDiff-wrapped), as the
+// buffered parser it replaced did.
 func ParseNameStatusZForTest(out string) ([]FileDiff, error) {
-	return parseNameStatusZ(out)
+	return ParseNameStatusZChunkedForTest(out, len(out))
 }
+
+// unboundedForTest is no limit at all.
+var unboundedForTest = listingBounds{bytes: math.MaxInt64, records: math.MaxInt64}
+
+// ParseNameStatusZChunkedForTest is ParseNameStatusZForTest with the
+// output written in chunk-sized writes (as os/exec's copy would hand it
+// over), so a test can split records at every byte.
+func ParseNameStatusZChunkedForTest(out string, chunk int) ([]FileDiff, error) {
+	s := newNameStatusCollector("diff", unboundedForTest)
+	feedForTest(&s.nulRecords, []byte(out), chunk)
+	err := s.refusal()
+	if err == nil {
+		err = endOfStream(s, unterminatedDiff)
+	}
+	if err == nil {
+		err = s.finish()
+	}
+	if err != nil {
+		return nil, err.Err
+	}
+	return s.diffs, nil
+}
+
+// ListedForTest feeds a `ls-tree -r --name-only -z` output to ListFiles'
+// streamed collector in chunk-sized writes, bounded to limit kept bytes
+// and records records (<= 0: none), and ends it as runListing does,
+// returning what it kept or the refusal ListFiles would return. carry
+// reports the most bytes the collector ever carried for one unfinished
+// record.
+func ListedForTest(out []byte, chunk int, limit, records int64, keep func(string) bool) (paths []string, carry int, err error) {
+	b := listingBounds{bytes: limit, records: records}
+	if records <= 0 {
+		b.records = math.MaxInt64
+	}
+	s := newPathCollector("list_files", b, keep)
+	carry = feedForTest(&s.nulRecords, out, chunk)
+	if gerr := s.refusal(); gerr != nil {
+		return nil, carry, gerr
+	}
+	if gerr := endOfStream(s, unterminatedListing); gerr != nil {
+		return nil, carry, gerr
+	}
+	return s.paths, carry, nil
+}
+
+// feedForTest writes p to s in chunk-sized writes until s refuses one,
+// and returns the most bytes s carried between writes.
+func feedForTest(s *nulRecords, p []byte, chunk int) (maxCarry int) {
+	if chunk <= 0 {
+		chunk = len(p)
+	}
+	for len(p) > 0 {
+		n := min(chunk, len(p))
+		if _, err := s.Write(p[:n]); err != nil {
+			return maxCarry
+		}
+		maxCarry = max(maxCarry, len(s.carry))
+		p = p[n:]
+	}
+	return maxCarry
+}
+
+// CountedForTest feeds a `git diff --name-only -z` output to
+// CountChangedPaths' counter in chunk-sized writes (records: its ceiling,
+// <= 0 for none) and ends it as runListing does.
+func CountedForTest(out []byte, chunk int, records int64) (int, error) {
+	if records <= 0 {
+		records = math.MaxInt64
+	}
+	s := &pathCounter{op: "count_changed_paths", maxRecords: records}
+	for p := out; len(p) > 0; {
+		n := min(max(chunk, 1), len(p))
+		if _, err := s.Write(p[:n]); err != nil {
+			break
+		}
+		p = p[n:]
+	}
+	if err := s.refusal(); err != nil {
+		return 0, err
+	}
+	if err := endOfStream(s, unterminatedCount); err != nil {
+		return 0, err
+	}
+	return s.n, nil
+}
+
+// DiffLimitForTest and RecordCeilingForTest are the client's diff limit
+// and tree-listing record ceiling (diffLimit, recordCeiling).
+func (c *CLIClient) DiffLimitForTest() int64     { return c.diffLimit() }
+func (c *CLIClient) RecordCeilingForTest() int64 { return c.recordCeiling() }
+
+// ListingLimitForTest is the bound the client's streamed listings hold
+// the paths they keep to (listingLimit).
+func (c *CLIClient) ListingLimitForTest() int64 { return c.listingLimit() }
+
+// SetEnvHookForTest installs a hook called with the op and the
+// environment of every streamed listing command (ListFiles, Diff,
+// CountChangedPaths).
+func (c *CLIClient) SetEnvHookForTest(hook func(op string, env []string)) { c.envHook = hook }
 
 // IsGitAllocRefusalForTest exposes the alloc-limit stderr matcher.
 func IsGitAllocRefusalForTest(stderr string, limit int64) bool {
@@ -126,4 +230,33 @@ func StdoutSinkForTest(p []byte, chunk int, limit int64, failing, text bool) Sin
 		r.Kept = string(s.Bytes())
 	}
 	return r
+}
+
+// SetMeasureHookForTest installs the checkout-budget measure hook
+// (INIT-024 TASK-003): it is called once per measure with the listing
+// bytes git handed the parser and the totals when it stopped.
+func (c *CLIClient) SetMeasureHookForTest(hook func(MeasureTrace)) {
+	c.measureHook = hook
+}
+
+// ResetDefaultCheckoutLimitsForTest clears the process default
+// (SetDefaultCheckoutLimits).
+func ResetDefaultCheckoutLimitsForTest() {
+	processCheckoutLimits.Store(nil)
+}
+
+// ReadTreeForTest runs ResetBranch's two-tree switch (`read-tree -m -u
+// from to`) through runWith, under the client's mutate deadline.
+func (c *CLIClient) ReadTreeForTest(ctx context.Context, from, to string) error {
+	_, _, err := c.runWith(ctx, "reset_branch", runOpts{}, "read-tree", "-m", "-u", "--end-of-options", from, to)
+	return err
+}
+
+// CheckBudgetGitVersionOutputForTest exposes the budget's git floor parser.
+func CheckBudgetGitVersionOutputForTest(line string) error { return checkBudgetGitVersionOutput(line) }
+
+// SetMergeResultHookForTest installs a hook called with every merge
+// result tree a budgeted merge measures.
+func (c *CLIClient) SetMergeResultHookForTest(hook func(tree string)) {
+	c.mergeResultHook = hook
 }

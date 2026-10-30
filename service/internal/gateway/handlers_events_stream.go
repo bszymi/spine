@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 )
@@ -20,11 +21,29 @@ const (
 	sseReplayCap     = 100
 	sseHeartbeat     = 30 * time.Second
 	sseWriteDeadline = 5 * time.Second
+	// sseRevalidateTimeout bounds one heartbeat's bearer re-check, so a
+	// hung token store cannot stall the stream loop; a timeout closes
+	// the stream like any other failed check.
+	sseRevalidateTimeout = 5 * time.Second
 )
+
+// sseStreamOp is the permission an event stream needs, at connect and at
+// every revalidation.
+const sseStreamOp auth.Operation = "events.read"
 
 // GET /api/v1/events/stream — SSE event stream
 func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
-	if !s.authorize(w, r, "events.read") {
+	if !s.authorize(w, r, sseStreamOp) {
+		return
+	}
+
+	// Capture what the heartbeat re-checks (INIT-024 TASK-007, N-14)
+	// before any header is written, so a request that cannot be
+	// revalidated is refused with a normal error response.
+	reval, err := s.newSSERevalidator(r, sseStreamOp)
+	if err != nil {
+		observe.Logger(r.Context()).Error("sse: cannot capture the stream's bearer for revalidation", "error", err)
+		WriteError(w, domain.NewError(domain.ErrUnauthorized, uniformUnauthorizedMessage))
 		return
 	}
 
@@ -140,8 +159,13 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	subID := eventBroadcaster.Subscribe(events)
 	defer eventBroadcaster.Unsubscribe(subID)
 
-	// Stream loop
-	heartbeat := time.NewTicker(sseHeartbeat)
+	// Stream loop. Every heartbeat tick first re-validates the stream's
+	// bearer (N-14); see sseRevalidator.
+	interval := s.sseHeartbeat
+	if interval <= 0 {
+		interval = sseHeartbeat
+	}
+	heartbeat := time.NewTicker(interval)
 	defer heartbeat.Stop()
 
 	for {
@@ -166,12 +190,111 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-heartbeat.C:
+			if reval != nil {
+				if err := reval.check(r.Context()); err != nil {
+					// Revoked, expired, suspended, demoted, or not
+					// checkable right now: close. The client's
+					// reconnect meets authMiddleware, which answers
+					// 401 for a bearer that is no longer good. The
+					// frame does not say which: the stream's reader
+					// learns no more than a new request would tell it.
+					logSSERevalidationFailure(log, err)
+					_ = writeSSEComment(rc, w, flusher, "reauthentication required")
+					return
+				}
+			}
 			if err := writeSSEHeartbeat(rc, w, flusher); err != nil {
 				log.Warn("sse heartbeat failed, dropping connection", "error", err)
 				return
 			}
 		}
 	}
+}
+
+// sseRevalidator re-checks an open event stream's bearer on every
+// heartbeat (INIT-024 TASK-007, review finding N-14).
+//
+// The bearer used to be checked once, at connect, so a stream outlived
+// the revocation of its token, its expiry, the suspension of its actor
+// and the loss of its events.read role: the actor kept receiving the
+// workspace's events until the connection dropped, while every new
+// request was refused. Now each heartbeat tick runs the same checks
+// authMiddleware and authorize run at connect — auth.ValidateToken
+// (revocation, expiry, actor status) and auth.Authorize on the fresh
+// actor — and any failure closes the stream. The interval is the
+// heartbeat's, 30 s (owner question 1 default, pending the owner), so
+// the post-revocation window is at most one interval; no timer or
+// goroutine is added.
+//
+// What it holds:
+//
+//   - the raw bearer, re-read from the request's own Authorization header
+//     (authMiddleware validated exactly that header), never copied into a
+//     context value or a log;
+//   - the auth service that validated it at connect: the workspace's own
+//     (its ServiceSet's) in shared mode, the process-level one in single
+//     mode. It is not re-resolved per tick: the handler releases its pool
+//     reference before the loop, and when the workspace is evicted the
+//     ssDone branch closes the stream, so the client reconnects against
+//     the rebuilt services. Re-acquiring a pool reference on every tick
+//     would rebuild an idle-evicted workspace just to keep a heartbeat
+//     going. A tick that races the eviction finds the store closing; the
+//     check fails and closes the stream, which is the same outcome.
+//   - the connect-time actor id: the token must still resolve to it.
+type sseRevalidator struct {
+	auth    *auth.Service
+	token   string
+	actorID string
+	op      auth.Operation
+}
+
+// newSSERevalidator captures the stream's credentials. It returns (nil,
+// nil) only when the request carries no actor — dev mode let it through
+// authorize without one, so there is no bearer to re-check. An actor with
+// no recoverable bearer or no auth service is an error: the stream must
+// not open unchecked.
+func (s *Server) newSSERevalidator(r *http.Request, op auth.Operation) (*sseRevalidator, error) {
+	actor := actorFromContext(r.Context())
+	if actor == nil {
+		return nil, nil
+	}
+	token, err := bearerFromRequest(r)
+	if err != nil {
+		return nil, fmt.Errorf("authenticated stream without a readable bearer: %w", err)
+	}
+	authSvc := s.authFrom(r.Context())
+	if authSvc == nil {
+		return nil, errors.New("authenticated stream without an auth service")
+	}
+	return &sseRevalidator{auth: authSvc, token: token, actorID: actor.ActorID, op: op}, nil
+}
+
+// check re-validates the bearer and the permission. Any error means the
+// stream must close.
+func (v *sseRevalidator) check(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, sseRevalidateTimeout)
+	defer cancel()
+	fresh, err := v.auth.ValidateToken(ctx, v.token)
+	if err != nil {
+		return err
+	}
+	if fresh == nil || fresh.ActorID != v.actorID {
+		return domain.NewError(domain.ErrUnauthorized, "bearer no longer resolves to the stream's actor")
+	}
+	return auth.Authorize(fresh, v.op)
+}
+
+// logSSERevalidationFailure logs why a stream closed: Info for the
+// expected outcomes (a revoked or expired token, an inactive actor, a
+// lost permission), Warn for anything else (a token-store error or
+// timeout), which closes the stream too.
+func logSSERevalidationFailure(log *slog.Logger, err error) {
+	var se *domain.SpineError
+	if errors.As(err, &se) && (se.Code == domain.ErrUnauthorized || se.Code == domain.ErrForbidden) {
+		log.Info("SSE stream closing: bearer no longer valid", "reason", se.Message)
+		return
+	}
+	log.Warn("SSE stream closing: bearer could not be revalidated", "error", err)
 }
 
 // sseLimiterKey scopes the per-actor SSE cap to the request's workspace
@@ -352,6 +475,18 @@ func writeSSEEvent(rc *http.ResponseController, w http.ResponseWriter, flusher h
 func writeSSEHeartbeat(rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher) error {
 	setSSEDeadline(rc)
 	if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
+// writeSSEComment writes one SSE comment frame (": <text>"), which a
+// client ignores except as proof the connection is alive. text must be a
+// constant without line breaks.
+func writeSSEComment(rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher, text string) error {
+	setSSEDeadline(rc)
+	if _, err := fmt.Fprintf(w, ": %s\n\n", text); err != nil {
 		return err
 	}
 	flusher.Flush()

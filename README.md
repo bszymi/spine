@@ -21,6 +21,7 @@ spine init-repo my-project
 # Start the runtime server (requires PostgreSQL)
 export SPINE_DATABASE_URL=postgres://localhost:5432/spine?sslmode=disable
 export SPINE_INSECURE_LOCAL=1   # acknowledges sslmode=disable for local use
+export SPINE_ENV=development    # required: production, staging or development
 spine migrate
 spine serve
 
@@ -46,7 +47,7 @@ spine validate --all
 
 | Variable | Purpose |
 |----------|---------|
-| `SPINE_ENV=production` | Activates production checks (refuses dev-mode auth bypass, requires secret encryption). `SPINE_GIT_HTTP_DEV_NO_AUTH` is refused unless `SPINE_ENV=development`. |
+| `SPINE_ENV=production` | **Required in every environment** (`production`, `staging` or `development`): `spine serve` and `spine secrets reencrypt` refuse to start when it is unset or unknown. `production` activates the production checks (refuses dev-mode auth bypass, requires secret encryption). `SPINE_GIT_HTTP_DEV_NO_AUTH` is refused unless `SPINE_ENV=development`. |
 | `SPINE_DATABASE_URL=…?sslmode=require` | `sslmode=disable` is refused unless `SPINE_INSECURE_LOCAL=1`. |
 | `SPINE_SECRET_ENCRYPTION_KEY` | Base64 32-byte AES-256 key for at-rest webhook-secret encryption. Generate with `openssl rand -base64 32`. |
 | `SPINE_SECRET_PREVIOUS_KEYS` | Optional. Comma-separated previous keys that still decrypt during a key rotation (never seal). |
@@ -57,11 +58,13 @@ spine validate --all
 | `SPINE_TRUSTED_PROXY_CIDRS` | CIDRs of reverse proxies whose `X-Forwarded-For` Spine should trust for rate-limiting. A request from one of them never gets token-less git access. |
 | `SPINE_DEV_MODE` | Development only (refused in production): lets unauthenticated requests through the `/api/v1` auth gate. Does not affect `/git`. |
 | `SPINE_GIT_HTTP_DEV_NO_AUTH` | Development only: `/git` clones and fetches need no token. Refused at startup unless `SPINE_ENV=development`; pushes always need a token. |
+| `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`, `SPINE_GIT_TREE_MAX_PATH_BYTES` | Checkout budget (defaults 200000 entries, 2147483648 bytes, 16777216 path bytes): a tree over it is never checked out, merged, cloned or accepted in a push. Positive integers only (no off switch); an invalid value refuses to start. Needs git >= 2.38. See `KNOWN-LIMITATIONS.md` "Checkout Budget". |
+| `SPINE_GIT_MUTATE_TIMEOUT` | Deadline of every local mutating git command (default `2m`; a positive Go duration). |
 
 ### Integrations
 
 - **Webhook / SSE / pull event delivery** — see [integration-guide §6](/docs/integration-guide.md#6-event-integration). Gated by `SPINE_EVENT_DELIVERY=true`.
-- **Git HTTP clone endpoint for runners** — see [integration-guide §7](/docs/integration-guide.md#7-git-http-serve-endpoint). Token-less clones are limited to direct peers in `SPINE_GIT_HTTP_TRUSTED_CIDRS` (never a proxy, never a Docker bridge gateway).
+- **Git HTTP clone endpoint for runners** — see [integration-guide §7](/docs/integration-guide.md#7-git-http-serve-endpoint). Token-less clones are limited to direct peers in `SPINE_GIT_HTTP_TRUSTED_CIDRS` (never a proxy, never a Docker bridge gateway), and in shared mode to the workspaces each runner address is bound to (`ws-a=172.28.1.10/32;ws-b=...`).
 
 ---
 
@@ -319,6 +322,37 @@ make docker-vet
 # Security-specific lint (gosec) — gate for new security findings
 make lint-security
 ```
+
+### Supply-Chain Checks
+
+CI pins every action to a full commit SHA (with a `# vX.Y.Z` comment), every image to a digest
+next to its tag, and every job to a versioned runner (`ubuntu-24.04`). Two jobs keep it that way:
+
+- **`toolchain-parity`** runs `go run ./dev/pincheck -resolve`. It refuses:
+  - an unpinned action or image, wherever it appears: Dockerfiles at any depth, workflows,
+    composite actions, compose files, and `docker run|pull|create` in `run:` scripts and the
+    Makefile;
+  - a golang image (the Dockerfile builder, the CI git-floor container, the Makefile's
+    `DOCKER_GO`) or a setup-go `go-version` that differs from go.mod's `toolchain` line;
+  - a CI image that differs from the compose stack's image of the same repository;
+  - a `*-latest` runner label.
+
+  With `-resolve` it also checks the golang digest's `GOLANG_VERSION` in the registry, and that
+  each action's `# vX.Y.Z` tag is exactly the pinned commit. The golang image sets
+  `GOTOOLCHAIN=local`, so its own Go is the compiler that ships; bumping go.mod alone would
+  silently keep the old one.
+- **`vuln`** runs `govulncheck ./...` and fails on any reachable advisory.
+
+To move the Go toolchain:
+
+1. Change go.mod's `toolchain` line.
+2. Point all three golang references at the new `golang:<version>-bookworm` tag and its index
+   digest (`docker buildx imagetools inspect golang:<version>-bookworm`).
+3. Set every setup-go `go-version` to the new version.
+4. Run `make toolchain-parity` and `make vuln`.
+
+Dependabot (`.github/dependabot.yml`) proposes module, action and image updates weekly. It does
+not move the toolchain line or the setup-go version.
 
 ---
 

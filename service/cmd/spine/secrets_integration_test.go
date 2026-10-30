@@ -122,7 +122,9 @@ func clearSecretBackendEnv(t *testing.T) {
 	t.Setenv("SPINE_SECRET_PROVIDER", "")
 	t.Setenv("SPINE_SECRET_FILE_ROOT", "")
 	t.Setenv("WORKSPACE_RESOLVER", "")
-	t.Setenv("SPINE_ENV", "")
+	// Known and non-production: `spine secrets reencrypt` refuses an unset
+	// SPINE_ENV (INIT-024 TASK-007).
+	t.Setenv("SPINE_ENV", "development")
 	t.Setenv("SPINE_SECRET_PREVIOUS_KEYS", "")
 	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "")
 	t.Setenv("SPINE_INSECURE_LOCAL", "1")

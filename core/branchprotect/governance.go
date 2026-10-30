@@ -43,6 +43,23 @@ var DefaultGovernancePaths = []string{".spine/", ".spine.yaml", "workflows/"}
 type GovernancePaths struct {
 	// entries are folded (foldPath) and carry no trailing "/".
 	entries []string
+	// set indexes entries for Match (INIT-024 TASK-002, codex round 1).
+	// Since the guard adds an entry per changed workflow definition at
+	// decision time (WithLiteralEntries, WorkflowDefinitionPaths), the entry count
+	// grows with the run's diff: a linear scan of the entries for every
+	// changed path made one evaluation quadratic in run-controlled input.
+	// Match now looks up the path and each of its "/"-ancestors instead,
+	// which decides exactly the same "q == E or q has the prefix E + /".
+	set map[string]struct{}
+}
+
+// governancePathsOf builds the set from folded, de-duplicated entries.
+func governancePathsOf(entries []string) GovernancePaths {
+	set := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		set[e] = struct{}{}
+	}
+	return GovernancePaths{entries: entries, set: set}
 }
 
 // ErrInvalidGovernancePath is wrapped by every NewGovernancePaths error.
@@ -79,7 +96,7 @@ func NewGovernancePaths(entries []string) (GovernancePaths, error) {
 		out = append(out, e)
 	}
 	sort.Strings(out)
-	return GovernancePaths{entries: out}, nil
+	return governancePathsOf(out), nil
 }
 
 func defaultGovernancePaths() GovernancePaths {
@@ -125,6 +142,121 @@ func normalizeGovernanceEntry(raw string) (string, error) {
 	return foldPath(e), nil
 }
 
+// WithLiteralEntries returns a copy of g with each entry added as a
+// literal prefix entry (INIT-024 TASK-002, review finding N-5). It exists
+// for entries the engine derives at decision time — the orchestrator's
+// <artifacts_dir>/workflows directory and the WorkflowDefinitionPaths
+// backstop — not for configuration, which goes through NewGovernancePaths.
+//
+// An entry is case-folded like every entry, with its leading and trailing
+// "/" removed; nothing else is changed, and nothing is refused. That
+// differs from NewGovernancePaths on purpose: its refusal of glob and
+// quoting characters (* ? [ \ ") and of empty or dot segments keeps an
+// operator from writing a pattern the guard would read as a literal, but
+// these entries come from git paths and from the artifacts directory the
+// projection matches literally, and a directory named "[id]" is a legal
+// git path. Refusing it would leave the backstop nothing to add — a merge
+// the projection may install from, let through. Matching stays Match's:
+// a literal, folded compare of the path and its "/"-ancestors, so a file
+// entry governs that file (and anything a later tree puts beneath the
+// same name) and a directory entry everything under it. An entry that is
+// empty once trimmed is skipped (it would guard every path). A zero-value
+// g starts from DefaultGovernancePaths, as Match does.
+func (g GovernancePaths) WithLiteralEntries(entries ...string) GovernancePaths {
+	base := g.entries
+	if base == nil {
+		base = defaultGovernancePaths().entries
+	}
+	seen := make(map[string]struct{}, len(base)+len(entries))
+	out := make([]string, 0, len(base)+len(entries))
+	for _, e := range base {
+		seen[e] = struct{}{}
+		out = append(out, e)
+	}
+	for _, raw := range entries {
+		e := foldPath(strings.TrimRight(strings.TrimLeft(raw, "/"), "/"))
+		if e == "" {
+			continue
+		}
+		if _, dup := seen[e]; dup {
+			continue
+		}
+		seen[e] = struct{}{}
+		out = append(out, e)
+	}
+	sort.Strings(out)
+	return governancePathsOf(out)
+}
+
+// workflowsDirName is the folded last segment of a directory the backstop
+// treats as a workflow directory.
+const workflowsDirName = "workflows"
+
+// WorkflowDefinitionPaths is the guard's structural backstop (INIT-024
+// TASK-002, review finding N-5). It returns every path that looks like a
+// workflow definition: a leaf ending in ".yaml" or ".yml" directly inside
+// a directory whose last segment is "workflows", at any depth, both
+// compared case-folded like Match ("Docs/WORKFLOWS/x.YML" counts, and so
+// does "worKflows" with U+212A KELVIN SIGN). Each path is returned once
+// (by its folded form), with its leading "/" removed and a C-quoted path
+// in its decoded form.
+//
+// Why: the projection installs the direct *.yaml / *.yml children of
+// workflows/ and of <artifacts_dir>/workflows/ as live workflow policy,
+// and artifacts_dir is the projection's configuration, which the guard
+// may never have been told (no GovernanceGuard.WorkflowDirs, no
+// Orchestrator.WithArtifactsDir). Whatever artifacts_dir is, every file
+// the projection could install from it has this shape, so adding these
+// paths to the guarded set (GovernancePaths.WithLiteralEntries) holds the
+// merge anyway. Only the matched files are added, never their directory:
+// a sibling the same merge changes ("workflows/scripts/build.sh",
+// "workflows/README.md") stays ungoverned unless a configured entry
+// covers it. It over-approximates the projection only by the YAML files
+// themselves: one in any directory named "workflows"
+// (".github/workflows/ci.yml") needs an operator approval too. Nested
+// files ("workflows/steps/x.yaml") are not definitions and are not
+// matched here; the artifacts-directory entry covers those.
+//
+// Paths Match already governs whatever the entries — "", a path
+// domain.UnsafeRepositoryPath refuses, a C-quoted path that does not
+// decode — are skipped; a C-quoted path that decodes is judged by its
+// decoded form, as Match judges it.
+func WorkflowDefinitionPaths(paths []string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, p := range paths {
+		if p == "" || domain.UnsafeRepositoryPath(p) {
+			continue
+		}
+		if strings.HasPrefix(p, `"`) {
+			dec, ok := unquoteGitPath(p)
+			if !ok || dec == "" || domain.UnsafeRepositoryPath(dec) {
+				continue
+			}
+			p = dec
+		}
+		p = strings.TrimLeft(p, "/")
+		i := strings.LastIndexByte(p, '/')
+		if i <= 0 {
+			continue // a root-level file has no parent directory
+		}
+		parent, leaf := p[:i], foldPath(p[i+1:])
+		if !strings.HasSuffix(leaf, ".yaml") && !strings.HasSuffix(leaf, ".yml") {
+			continue
+		}
+		if foldPath(parent[strings.LastIndexByte(parent, '/')+1:]) != workflowsDirName {
+			continue
+		}
+		key := foldPath(p)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
 // Entries returns the folded entries, each without a trailing "/", for
 // logs and wiring tests.
 func (g GovernancePaths) Entries() []string {
@@ -168,13 +300,32 @@ func (g GovernancePaths) Match(p string) bool {
 		}
 		p = dec
 	}
-	entries := g.entries
-	if entries == nil {
-		entries = defaultGovernancePaths().entries
+	if g.entries == nil {
+		g = defaultGovernancePaths()
 	}
 	q := foldPath(strings.TrimLeft(p, "/"))
-	for _, e := range entries {
-		if q == e || strings.HasPrefix(q, e+"/") {
+	if g.set == nil {
+		// Not built by a constructor of this package (cannot happen
+		// today): the plain scan decides the same, only slower.
+		for _, e := range g.entries {
+			if q == e || strings.HasPrefix(q, e+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	// q == E, or q has the prefix E + "/": E is q itself or q up to one
+	// of its "/" bytes. Entries carry no trailing "/", and a "/" byte is
+	// never inside a multi-byte UTF-8 sequence, so these lookups decide
+	// exactly what the scan above decides, in time linear in len(q).
+	if _, ok := g.set[q]; ok {
+		return true
+	}
+	for i := 0; i < len(q); i++ {
+		if q[i] != '/' {
+			continue
+		}
+		if _, ok := g.set[q[:i]]; ok {
 			return true
 		}
 	}

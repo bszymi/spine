@@ -539,3 +539,48 @@ func TestPlatformBindingProvider_ListReturnsCachedOnly(t *testing.T) {
 		t.Fatalf("List = %+v, want [acme]", got)
 	}
 }
+
+// INIT-024 TASK-008 (review round 1): the multi-workspace scheduler lists
+// workspaces with ListIDs, which reports the cached bindings' ids, sorted,
+// without reading a secret or calling the platform.
+func TestPlatformBindingProvider_ListIDsReadsNoSecret(t *testing.T) {
+	ps := newPlatformServer(t, map[string]workspace.PlatformBinding{
+		"globex": bindingFor("globex"),
+		"acme":   bindingFor("acme"),
+	})
+	sc := &fakeSecretClient{values: map[secrets.SecretRef]string{}}
+	for _, ws := range []string{"acme", "globex"} {
+		for ref, v := range seedFakeSecrets(ws).values {
+			sc.values[ref] = v
+		}
+	}
+	p := newProvider(t, ps, sc)
+	ids, err := p.ListIDs(context.Background())
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("ListIDs on an empty cache = %v, %v", ids, err)
+	}
+	for _, ws := range []string{"globex", "acme"} {
+		if _, err := p.Resolve(context.Background(), ws); err != nil {
+			t.Fatalf("Resolve %s: %v", ws, err)
+		}
+	}
+	secretReads, platformHits := sc.calls.Load(), ps.hits.Load()
+	ids, err = p.ListIDs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != "acme" || ids[1] != "globex" {
+		t.Fatalf("ListIDs = %v, want [acme globex]", ids)
+	}
+	if sc.calls.Load() != secretReads || ps.hits.Load() != platformHits {
+		t.Fatalf("ListIDs read %d secrets and called the platform %d times; want none",
+			sc.calls.Load()-secretReads, ps.hits.Load()-platformHits)
+	}
+	// List, for comparison, reads every cached binding's three secrets.
+	if _, err := p.List(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := sc.calls.Load() - secretReads; got != 6 {
+		t.Fatalf("List read %d secrets, want 6 (3 per cached binding)", got)
+	}
+}

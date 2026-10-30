@@ -232,6 +232,7 @@ type Server struct {
 	gitDevNoAuth               bool                       // SPINE_GIT_HTTP_DEV_NO_AUTH: /git clone and fetch skip the bearer (SPINE_ENV=development only); pushes never do
 	env                        string                     // SPINE_ENV value (production/staging/development); surfaced in health
 	sseLimiter                 *sseLimiter                // caps concurrent SSE streams per (workspace, actor)
+	sseHeartbeat               time.Duration              // SSE heartbeat and bearer-revalidation interval (INIT-024 TASK-007); 0 means sseHeartbeat (30 s)
 	trustedProxyCIDRs          []*net.IPNet               // reverse-proxy networks: their XFF picks the rate-limit bucket; a request from them never gets token-less git access
 	rebuilds                   sync.Map                   // (workspace, rebuild_id) -> *rebuildState; see rebuildRegistryKey
 	gitProxyWarnAt             atomic.Int64               // unix nanos of the last "proxied trusted-CIDR git peer" Warn; rate-limits it

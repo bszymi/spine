@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -170,6 +171,25 @@ func (p *PlatformBindingProvider) List(ctx context.Context) ([]Config, error) {
 		configs = append(configs, *cfg)
 	}
 	return configs, nil
+}
+
+// ListIDs returns the ids of the bindings currently held in the cache,
+// sorted — the workspaces List would report — without assembling their
+// configs: no secret is read and the platform is not called (INIT-024
+// TASK-008). The multi-workspace scheduler lists with it: each scan
+// resolves its workspace through the pool anyway, so List's three secret
+// reads per cached binding per tick would be thrown away. Like List it
+// includes a binding whose secrets cannot be read right now; the pool's
+// Resolve then refuses it.
+func (p *PlatformBindingProvider) ListIDs(context.Context) ([]string, error) {
+	p.mu.RLock()
+	ids := make([]string, 0, len(p.cache))
+	for ws := range p.cache {
+		ids = append(ids, ws)
+	}
+	p.mu.RUnlock()
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // Invalidate drops the cached binding for workspaceID so the next

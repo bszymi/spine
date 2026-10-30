@@ -12,6 +12,8 @@ import (
 	"github.com/bszymi/spine/core/queue"
 	"github.com/bszymi/spine/service/internal/config"
 	"github.com/bszymi/spine/service/internal/gateway"
+	"github.com/bszymi/spine/service/internal/githttp"
+	"github.com/bszymi/spine/service/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -42,11 +44,19 @@ func serveCmd() *cobra.Command {
 				return err
 			}
 
+			// SPINE_ENV must name a known environment (INIT-024
+			// TASK-007, N-16): an unset or mistyped value used to run
+			// every production gate below on its non-production branch.
+			// Checked before every other environment-dependent gate.
+			runtimeEnv, err := requireRuntimeEnv()
+			if err != nil {
+				return err
+			}
+
 			if err := validateOperatorToken(os.Getenv("SPINE_OPERATOR_TOKEN")); err != nil {
 				return err
 			}
 
-			runtimeEnv := resolveRuntimeEnv()
 			devMode := devModeEnabled()
 			if err := guardDevModeEnv(runtimeEnv, devMode); err != nil {
 				return err
@@ -61,6 +71,24 @@ func serveCmd() *cobra.Command {
 			if err := guardGitHTTPDevNoAuth(runtimeEnv, gitDevNoAuth); err != nil {
 				return err
 			}
+			// SPINE_GIT_HTTP_TRUSTED_CIDRS (INIT-024 TASK-006, N-2): a
+			// malformed value, or the bare list in shared mode, refuses
+			// startup here, before any registry, secret or listener is
+			// opened. The trust is bound to workspaces further down, once
+			// the resolver exists.
+			gitTrusted, err := parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS"))
+			if err != nil {
+				return fmt.Errorf("SPINE_GIT_HTTP_TRUSTED_CIDRS: %w", err)
+			}
+			if err := gitTrusted.checkMode(sharedWorkspaceResolverEnv()); err != nil {
+				return err
+			}
+			// The git endpoint's slot caps and command-read deadline
+			// (INIT-024 TASK-005, N-13): a malformed value refuses startup.
+			gitHTTPLimits, err := loadGitHTTPLimits()
+			if err != nil {
+				return err
+			}
 
 			// SMP_ADMIN_TOKEN strength gate (INIT-023 TASK-013): checked
 			// before any store, secret or listener is opened.
@@ -70,6 +98,13 @@ func serveCmd() *cobra.Command {
 			}
 			if smpAdminWarning != "" {
 				log.Warn(smpAdminWarning, "env", runtimeEnv)
+			}
+
+			// The git checkout budget and mutate deadline (INIT-024
+			// TASK-003): the process default of every git client below,
+			// installed before any is built or used.
+			if err := installCheckoutLimits(log); err != nil {
+				return err
 			}
 
 			codeRepoBase, err := loadCodeRepoBase(runtimeEnv)
@@ -137,6 +172,20 @@ func serveCmd() *cobra.Command {
 				gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+smpID))
 			}
 			gitClient := buildPrimaryGitClient(repoPath, gitOpts)
+			// The budget's premise (INIT-024 TASK-003): checkouts of the tree
+			// write stored bytes (neutral checkout attributes). Only the
+			// single-workspace tree this process serves itself; in shared
+			// mode buildServiceSet does it for each workspace's tree. A
+			// failure is logged and every budgeted measure then refuses
+			// (fail closed). Then, once: warn when the tree is already over
+			// the budget.
+			if wsWiring.Pool == nil {
+				if err := gitClient.EnsureNeutralWorkTree(ctx); err != nil {
+					log.Error("neutral checkout attributes not set, or the workspace tree not yet brought to its stored bytes (retried at the next start); its checkouts and merges may be refused",
+						append([]any{"error", err}, githttp.TreeLimitLogAttrs(err)...)...)
+				}
+				go workspace.WarnIfOverCheckoutBudget(context.WithoutCancel(ctx), gitClient, os.Getenv("SPINE_WORKSPACE_ID"), log)
+			}
 			if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {
 				log.Warn("failed to configure credential helper", "error", err)
 			}
@@ -152,9 +201,12 @@ func serveCmd() *cobra.Command {
 			if len(trustedProxyCIDRs) > 0 {
 				log.Info("rate limiter will honor X-Forwarded-For from trusted proxies", "cidrs", os.Getenv("SPINE_TRUSTED_PROXY_CIDRS"))
 			}
-			gitTrustedCIDRs := parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS"))
-			if overlap := overlappingCIDRs(gitTrustedCIDRs, trustedProxyCIDRs); len(overlap) > 0 {
+			if overlap := overlappingCIDRs(gitTrusted.all(), trustedProxyCIDRs); len(overlap) > 0 {
 				log.Warn("SPINE_GIT_HTTP_TRUSTED_CIDRS overlaps SPINE_TRUSTED_PROXY_CIDRS: a request from a declared proxy is never given token-less git access, so token-less clones from the overlap will be refused",
+					"overlap", overlap)
+			}
+			if overlap := crossWorkspaceCIDROverlaps(gitTrusted.ByWorkspace); len(overlap) > 0 {
+				log.Warn("SPINE_GIT_HTTP_TRUSTED_CIDRS binds overlapping CIDRs to different workspaces: an address in the overlap clones each of those workspaces token-less; give each workspace its own runner addresses",
 					"overlap", overlap)
 			}
 
@@ -170,6 +222,23 @@ func serveCmd() *cobra.Command {
 			runtimeWS := os.Getenv("SPINE_WORKSPACE_ID")
 			if runtimeWS == "" {
 				runtimeWS = "default"
+			}
+
+			// Bind the git trusted CIDRs to workspaces (INIT-024
+			// TASK-006). Shared mode is decided by the resolver actually
+			// built (a ServicePool), and the bare list is refused there
+			// again; in single mode it belongs to runtimeWS, the workspace
+			// the file resolver serves (both read SPINE_WORKSPACE_ID,
+			// default "default").
+			gitTrustedByWorkspace, err := gitTrusted.bind(wsWiring.Pool != nil, runtimeWS)
+			if err != nil {
+				return err
+			}
+			if wsWiring.Pool == nil {
+				for _, id := range unservedTrustedWorkspaces(gitTrustedByWorkspace, runtimeWS) {
+					log.Warn("SPINE_GIT_HTTP_TRUSTED_CIDRS binds a workspace this single-workspace server does not serve; the entry has no effect",
+						"workspace_id", id, "served_workspace_id", runtimeWS)
+				}
 			}
 
 			deps := serveDeps{
@@ -190,9 +259,10 @@ func serveCmd() *cobra.Command {
 				RuntimeEnv:                 runtimeEnv,
 				DevMode:                    devMode,
 				TrustedProxyCIDRs:          trustedProxyCIDRs,
-				TrustedGitHTTPCIDRs:        gitTrustedCIDRs,
+				TrustedGitHTTPCIDRs:        gitTrustedByWorkspace,
 				GitHTTPDevNoAuth:           gitDevNoAuth,
 				GitReceivePackEnabled:      parseGitReceivePackEnabled(os.Getenv("SPINE_GIT_RECEIVE_PACK_ENABLED")),
+				GitHTTPLimits:              gitHTTPLimits,
 				EventDeliveryOn:            deliveryCfg.Enabled,
 				SMPEventURL:                deliveryCfg.SMPEventURL,
 				SMPWorkspaceID:             os.Getenv("SMP_WORKSPACE_ID"),

@@ -264,12 +264,14 @@ func TestHandleGit_DisabledPushDoesNotResolvePolicy(t *testing.T) {
 	}
 
 	var resolverCalled bool
-	// No auth bypass is configured: the flag-off short-circuit skips
-	// the auth gate on its own (before INIT-023 TASK-015 this test also
-	// set devMode, which no longer affects /git).
+	// The caller is authenticated: since INIT-024 TASK-006 a push with
+	// the flag off meets the auth gate too, and only an authenticated
+	// caller gets the flag's 403.
+	authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
 	s := &Server{
 		gitHTTP:    handler,
 		wsResolver: resolver,
+		auth:       authSvc,
 		gitPushResolver: func(_ context.Context, _ string) (GitPushResources, func(), error) {
 			resolverCalled = true
 			return GitPushResources{Policy: branchprotect.NewPermissive()}, func() {}, nil
@@ -278,6 +280,7 @@ func TestHandleGit_DisabledPushDoesNotResolvePolicy(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/git/ws-off/git-receive-pack",
 		strings.NewReader(""))
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("workspace_id", "ws-off")
 	rctx.URLParams.Add("*", "git-receive-pack")
@@ -389,8 +392,8 @@ func TestHandleGit_TrustedCIDRDoesNotBypassPushAuth(t *testing.T) {
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
 			return repo, nil
 		},
-		TrustedCIDRs:       []string{"127.0.0.0/8"},
-		ReceivePackEnabled: true,
+		TrustedCIDRsByWorkspace: map[string][]string{"ws-1": {"127.0.0.0/8"}},
+		ReceivePackEnabled:      true,
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -422,13 +425,13 @@ func TestHandleGit_TrustedCIDRDoesNotBypassPushAuth(t *testing.T) {
 	}
 }
 
-// TestHandleGit_PushDisabledReturns403NotAuth asserts that when the
-// receive-pack flag is off, the handler's 403-with-flag-name response
-// reaches the caller even without a bearer token. The auth gate must
-// not hide that guidance behind a 401 — operators who hit this for the
-// first time will not have configured a token yet, and the flag-name
-// message is the whole point of the UX.
-func TestHandleGit_PushDisabledReturns403NotAuth(t *testing.T) {
+// TestHandleGit_PushDisabled403OnlyForAuthenticatedCaller replaces
+// TestHandleGit_PushDisabledReturns403NotAuth (INIT-024 TASK-006). With
+// the receive-pack flag off, the handler's 403 naming the flag reaches a
+// caller authenticated for the workspace; a caller without a valid token
+// gets the uniform 401 the gate gives every unauthenticated request, so
+// the answer no longer depends on whether the workspace exists.
+func TestHandleGit_PushDisabled403OnlyForAuthenticatedCaller(t *testing.T) {
 	repo := t.TempDir()
 	resolver := &poolStubResolver{cfg: workspace.Config{
 		ID:       "ws-1",
@@ -444,29 +447,40 @@ func TestHandleGit_PushDisabledReturns403NotAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
+	authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
 	s := &Server{
 		gitHTTP:    handler,
 		wsResolver: resolver,
+		auth:       authSvc,
 	}
 
-	req := httptest.NewRequest("GET",
-		"/git/ws-1/info/refs?service=git-receive-pack", nil)
-	// External IP, no auth header.
-	req.RemoteAddr = "203.0.113.1:12345"
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("workspace_id", "ws-1")
-	rctx.URLParams.Add("*", "info/refs")
-	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
-	w := httptest.NewRecorder()
+	send := func(header string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET",
+			"/git/ws-1/info/refs?service=git-receive-pack", http.NoBody)
+		req.RemoteAddr = "203.0.113.1:12345"
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("workspace_id", "ws-1")
+		rctx.URLParams.Add("*", "info/refs")
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+		w := httptest.NewRecorder()
+		s.handleGit(w, req)
+		return w
+	}
 
-	s.handleGit(w, req)
-
+	if w := send(""); w.Code != http.StatusUnauthorized ||
+		!strings.Contains(w.Body.String(), "authorization required for external git access") {
+		t.Errorf("no token: got %d (body: %s), want the uniform 401", w.Code, w.Body.String())
+	}
+	w := send("Bearer " + bearer)
 	if w.Code != http.StatusForbidden {
-		t.Errorf("expected 403 with flag-name guidance, got %d (body: %s)",
+		t.Errorf("authenticated: expected 403 with flag-name guidance, got %d (body: %s)",
 			w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
-		t.Errorf("expected 403 body to name SPINE_GIT_RECEIVE_PACK_ENABLED, got: %s",
+		t.Errorf("authenticated: expected 403 body to name SPINE_GIT_RECEIVE_PACK_ENABLED, got: %s",
 			w.Body.String())
 	}
 }
@@ -487,7 +501,7 @@ func TestHandleGit_TrustedCIDRBypassesReadAuth(t *testing.T) {
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
 			return repo, nil
 		},
-		TrustedCIDRs: []string{"127.0.0.0/8"},
+		TrustedCIDRsByWorkspace: map[string][]string{"ws-1": {"127.0.0.0/8"}},
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -608,19 +622,22 @@ func TestHandleGit_UnauthenticatedUnavailable_Returns401(t *testing.T) {
 	}
 }
 
-// TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors asserts that
-// trusted-CIDR callers — which the existing clone affordance trusts
-// to know workspace IDs already — continue to receive distinct
-// resolution errors so operators can debug genuinely missing repos.
-// Hiding this from trusted callers would turn TASK-031 into a
-// usability regression.
-func TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors(t *testing.T) {
+// TestHandleGit_TrustedCIDRSeesUniform401ForMissingWorkspace replaces
+// TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors (TASK-031), which
+// pinned a distinct 404 for a trusted-CIDR caller on the premise that a
+// trusted address may know every workspace ID. INIT-024 TASK-006 (N-2)
+// removed that premise: a trusted address is trusted only for the
+// workspaces it is bound to, and a workspace that does not resolve takes
+// no bypass — even one whose ID the address is bound to — so the caller
+// meets the auth gate's uniform 401 like any unauthenticated caller. An
+// authenticated caller still gets the distinct 404.
+func TestHandleGit_TrustedCIDRSeesUniform401ForMissingWorkspace(t *testing.T) {
 	repo := t.TempDir()
 	handler, err := githttp.NewHandler(githttp.Config{
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
 			return repo, nil
 		},
-		TrustedCIDRs: []string{"127.0.0.0/8"},
+		TrustedCIDRsByWorkspace: map[string][]string{"missing-ws": {"127.0.0.0/8"}},
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -641,8 +658,21 @@ func TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors(t *testing.T) {
 
 	s.handleGit(w, req)
 
+	if w.Code != http.StatusUnauthorized ||
+		!strings.Contains(w.Body.String(), "authorization required for external git access") {
+		t.Errorf("trusted-CIDR caller, missing workspace: got %d body=%s, want the uniform 401",
+			w.Code, w.Body.String())
+	}
+
+	// Guard: an authenticated caller is past the auth gate and still
+	// gets the distinct 404 operators debug missing repositories with.
+	authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
+	s.auth = authSvc
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	w = httptest.NewRecorder()
+	s.handleGit(w, req)
 	if w.Code != http.StatusNotFound {
-		t.Errorf("trusted-CIDR caller should see the distinct 404, got %d body=%s",
+		t.Errorf("authenticated caller, missing workspace: got %d body=%s, want the distinct 404",
 			w.Code, w.Body.String())
 	}
 }
@@ -1121,12 +1151,12 @@ func (inactiveLookupResolver) ListActive(_ context.Context) ([]repository.Reposi
 }
 
 // TestHandleGit_PerRepoRouting_PushDisabledKeeps403 asserts that an
-// unauthenticated `git-receive-pack` probe with the receive-pack
-// flag OFF receives the inner handler's 403 (with
-// SPINE_GIT_RECEIVE_PACK_ENABLED guidance) — even when the URL
-// includes an unknown repository ID. Resolving the repository here
-// would leak its state (404 vs 412) to a caller we deliberately
-// chose not to authenticate.
+// authenticated `git-receive-pack` request with the receive-pack flag
+// OFF receives the inner handler's 403 (with
+// SPINE_GIT_RECEIVE_PACK_ENABLED guidance) — even when the URL includes
+// an unknown repository ID: the flag, not the repository, is what the
+// caller needs to hear about. Without a token the same request gets the
+// uniform 401 (INIT-024 TASK-006).
 func TestHandleGit_PerRepoRouting_PushDisabledKeeps403(t *testing.T) {
 	pool, _ := newTestPool(t, map[string]string{}) // empty registry
 	wsResolver := &poolStubResolver{cfg: workspace.Config{
@@ -1143,20 +1173,32 @@ func TestHandleGit_PerRepoRouting_PushDisabledKeeps403(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
+	authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
 	s := &Server{
 		gitHTTP:    handler,
 		wsResolver: wsResolver,
 		gitPool:    pool,
+		auth:       authSvc,
 	}
 
-	req := httptest.NewRequest("POST",
-		"/git/ws-1/missing-repo/git-receive-pack", strings.NewReader(""))
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("workspace_id", "ws-1")
-	rctx.URLParams.Add("*", "missing-repo/git-receive-pack")
-	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
-	w := httptest.NewRecorder()
+	newReq := func() *http.Request {
+		req := httptest.NewRequest("POST",
+			"/git/ws-1/missing-repo/git-receive-pack", strings.NewReader(""))
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("workspace_id", "ws-1")
+		rctx.URLParams.Add("*", "missing-repo/git-receive-pack")
+		return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	}
 
+	w := httptest.NewRecorder()
+	s.handleGit(w, newReq())
+	if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "missing-repo") {
+		t.Errorf("no token: expected the uniform 401, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	req := newReq()
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	w = httptest.NewRecorder()
 	s.handleGit(w, req)
 
 	if w.Code != http.StatusForbidden {

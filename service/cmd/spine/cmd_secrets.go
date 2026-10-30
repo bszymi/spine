@@ -187,7 +187,14 @@ func requireRegistryResolver() error {
 }
 
 func runSecretsReencrypt(ctx context.Context, out io.Writer, opts reencryptOptions) error {
-	cipher, err := loadSecretCipher(resolveRuntimeEnv())
+	// The same SPINE_ENV gate as spine serve (INIT-024 TASK-007, N-16):
+	// the key ring below is required only under production, so an unset
+	// or mistyped value must not quietly pick the lenient branch.
+	env, err := requireRuntimeEnv()
+	if err != nil {
+		return fmt.Errorf("%w (nothing was changed)", err)
+	}
+	cipher, err := loadSecretCipher(env)
 	if err != nil {
 		return err
 	}

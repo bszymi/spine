@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -120,21 +121,214 @@ func parseWebhookAllowedHosts(raw string) []string {
 	return out
 }
 
-// parseGitHTTPTrustedCIDRs parses the SPINE_GIT_HTTP_TRUSTED_CIDRS
-// comma-separated list. An empty input yields nil so deployments must
-// opt in explicitly — a prior default of all RFC1918 ranges made any
-// container on any Docker bridge "trusted".
-func parseGitHTTPTrustedCIDRs(raw string) []string {
-	if raw == "" {
-		return nil
+// gitTrustedCIDRs is the parsed SPINE_GIT_HTTP_TRUSTED_CIDRS: the runner
+// addresses whose direct peers may clone and fetch over /git without a
+// bearer token. It has one of two forms (INIT-024 TASK-006, review
+// finding N-2):
+//
+//   - Unbound, the bare list `172.28.1.10/32,172.28.1.11/32`. It names no
+//     workspace, so it is accepted only in single mode, where bind gives
+//     it to the one workspace. In shared mode it would let every listed
+//     address read every workspace, and spine serve refuses to start.
+//   - ByWorkspace, the per-workspace form
+//     `ws-a=172.28.1.10/32;ws-b=172.28.1.11/32,172.28.1.12/32`: entries
+//     separated by ';', each `<workspace-id>=<cidr>[,<cidr>...]`. An
+//     address is trusted only for the workspaces it is listed under.
+//     Accepted in every mode.
+//
+// Both empty means every caller presents a token (the default).
+type gitTrustedCIDRs struct {
+	Unbound     []string
+	ByWorkspace map[string][]string
+}
+
+// all returns every CIDR of either form, for the startup overlap check
+// against SPINE_TRUSTED_PROXY_CIDRS.
+func (g gitTrustedCIDRs) all() []string {
+	out := append([]string(nil), g.Unbound...)
+	ids := make([]string, 0, len(g.ByWorkspace))
+	for id := range g.ByWorkspace {
+		ids = append(ids, id)
 	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		out = append(out, g.ByWorkspace[id]...)
+	}
+	return out
+}
+
+// gitTrustedCIDRsPerWorkspaceHint is the per-workspace form, named by
+// every parse and mode error.
+// The example is quoted: an unquoted ';' ends a shell assignment.
+const gitTrustedCIDRsPerWorkspaceHint = "the per-workspace form <workspace-id>=<cidr>[,<cidr>...] with entries separated by ';', " +
+	"e.g. SPINE_GIT_HTTP_TRUSTED_CIDRS='ws-a=172.28.1.10/32;ws-b=172.28.1.11/32'"
+
+// parseGitHTTPTrustedCIDRs parses SPINE_GIT_HTTP_TRUSTED_CIDRS into one of
+// the two forms gitTrustedCIDRs describes. A value with an '=' anywhere is
+// the per-workspace form; any other value is the bare list. Whitespace
+// around entries and empty entries are dropped, and an empty input yields
+// no trust so deployments opt in explicitly (a prior default of all
+// RFC1918 ranges made any container on any Docker bridge "trusted").
+//
+// Every entry is validated here, so a malformed value refuses startup
+// (it used to reach githttp.NewHandler, whose error disabled the whole
+// /git endpoint with only a log line): an unparsable CIDR, an entry with
+// no '=' in the per-workspace form (which also catches a bare list mixed
+// into it), a workspace ID that workspace.ValidateID refuses (no resolver
+// can ever resolve it), a workspace named twice, or one bound to no CIDR.
+func parseGitHTTPTrustedCIDRs(raw string) (gitTrustedCIDRs, error) {
+	if !strings.Contains(raw, "=") {
+		cidrs, err := parseTrustedCIDRList(raw)
+		if err != nil {
+			return gitTrustedCIDRs{}, err
+		}
+		return gitTrustedCIDRs{Unbound: cidrs}, nil
+	}
+	by := make(map[string][]string)
+	for _, entry := range strings.Split(raw, ";") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		id, list, ok := strings.Cut(entry, "=")
+		if !ok {
+			return gitTrustedCIDRs{}, fmt.Errorf("entry %q names no workspace; use %s", entry, gitTrustedCIDRsPerWorkspaceHint)
+		}
+		id = strings.TrimSpace(id)
+		if err := workspace.ValidateID(id); err != nil {
+			return gitTrustedCIDRs{}, fmt.Errorf("entry %q: %w; use %s", entry, err, gitTrustedCIDRsPerWorkspaceHint)
+		}
+		if _, dup := by[id]; dup {
+			return gitTrustedCIDRs{}, fmt.Errorf("workspace %q is named twice; list all of its CIDRs in one entry", id)
+		}
+		cidrs, err := parseTrustedCIDRList(list)
+		if err != nil {
+			return gitTrustedCIDRs{}, fmt.Errorf("workspace %q: %w", id, err)
+		}
+		if len(cidrs) == 0 {
+			return gitTrustedCIDRs{}, fmt.Errorf("workspace %q is bound to no CIDR", id)
+		}
+		by[id] = cidrs
+	}
+	return gitTrustedCIDRs{ByWorkspace: by}, nil
+}
+
+// parseTrustedCIDRList splits a comma-separated CIDR list, dropping
+// whitespace and empty entries, and refuses an unparsable CIDR.
+func parseTrustedCIDRList(raw string) ([]string, error) {
 	var out []string
 	for _, c := range strings.Split(raw, ",") {
-		if c = strings.TrimSpace(c); c != "" {
-			out = append(out, c)
+		if c = strings.TrimSpace(c); c == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(c); err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q", c)
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// checkMode refuses the bare list in shared mode (INIT-024 TASK-006,
+// owner question 1 default "refuse to start", pending the owner). shared
+// is true for a resolver that serves many workspaces (db,
+// platform-binding). The bare list names no workspace, so it would trust
+// every listed address for every tenant's repository; failing at startup
+// makes the change visible instead of silently dropping the operator's
+// list.
+func (g gitTrustedCIDRs) checkMode(shared bool) error {
+	if shared && len(g.Unbound) > 0 {
+		return fmt.Errorf("SPINE_GIT_HTTP_TRUSTED_CIDRS is a bare CIDR list, which names no workspace, but this server is in shared mode "+
+			"(WORKSPACE_RESOLVER=db or platform-binding): it would let every listed address clone every workspace's repository without a token. "+
+			"Bind each runner address to the workspaces it serves with %s (docs/integration-guide.md §7)", gitTrustedCIDRsPerWorkspaceHint)
+	}
+	return nil
+}
+
+// bind returns the workspace-bound trust the git handler enforces:
+// ByWorkspace as parsed, or — in single mode only — the bare list bound
+// to singleWorkspaceID, the one workspace the file resolver serves. It
+// repeats checkMode, so a shared server is refused here even if the
+// early, environment-based check ever disagreed with the resolver that
+// was actually built.
+func (g gitTrustedCIDRs) bind(shared bool, singleWorkspaceID string) (map[string][]string, error) {
+	if err := g.checkMode(shared); err != nil {
+		return nil, err
+	}
+	if len(g.Unbound) > 0 {
+		return map[string][]string{singleWorkspaceID: g.Unbound}, nil
+	}
+	return g.ByWorkspace, nil
+}
+
+// crossWorkspaceCIDROverlaps returns, sorted, every pair of CIDRs bound
+// to different workspaces that overlap (`ws-a=172.28.1.0/24 overlaps
+// ws-b=172.28.1.11/32`). An address in the overlap is trusted for both
+// workspaces, which a per-workspace binding is meant to prevent (a range
+// typo, or two tenants sharing a runner address), so serve warns at
+// startup. It is not refused: one runner may legitimately serve two
+// workspaces. Entries are already validated by parseGitHTTPTrustedCIDRs.
+func crossWorkspaceCIDROverlaps(byWorkspace map[string][]string) []string {
+	type bound struct {
+		ws, raw string
+		n       *net.IPNet
+	}
+	var all []bound
+	for ws, cidrs := range byWorkspace {
+		for _, raw := range cidrs {
+			if _, n, err := net.ParseCIDR(raw); err == nil {
+				all = append(all, bound{ws, raw, n})
+			}
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].ws != all[j].ws {
+			return all[i].ws < all[j].ws
+		}
+		return all[i].raw < all[j].raw
+	})
+	var out []string
+	for i := range all {
+		for j := i + 1; j < len(all); j++ {
+			a, b := all[i], all[j]
+			if a.ws == b.ws {
+				continue
+			}
+			if a.n.Contains(b.n.IP) || b.n.Contains(a.n.IP) {
+				out = append(out, a.ws+"="+a.raw+" overlaps "+b.ws+"="+b.raw)
+			}
 		}
 	}
 	return out
+}
+
+// unservedTrustedWorkspaces returns, sorted, the workspaces a
+// per-workspace SPINE_GIT_HTTP_TRUSTED_CIDRS binds other than served —
+// in single mode such an entry can never match a request, and serve
+// warns about it.
+func unservedTrustedWorkspaces(byWorkspace map[string][]string, served string) []string {
+	var out []string
+	for id := range byWorkspace {
+		if id != served {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// sharedWorkspaceResolverEnv reports whether WORKSPACE_RESOLVER selects
+// a shared-mode resolver (db or platform-binding), read the way
+// buildWorkspaceResolver reads it. It lets the bare-list refusal run
+// before any registry, secret or database is opened; an unknown value
+// is left to buildWorkspaceResolver's own refusal, and bind re-checks
+// against the resolver actually built.
+func sharedWorkspaceResolverEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WORKSPACE_RESOLVER"))) {
+	case "db", "platform-binding":
+		return true
+	}
+	return false
 }
 
 // parseGitReceivePackEnabled reads the SPINE_GIT_RECEIVE_PACK_ENABLED
@@ -175,7 +369,10 @@ func requireSecureDBURL(url string) error {
 	return fmt.Errorf("database URL uses sslmode=disable; set SPINE_INSECURE_LOCAL=1 to acknowledge (local development only) or use sslmode=require/verify-full")
 }
 
-// resolveRuntimeEnv returns the normalized SPINE_ENV value.
+// resolveRuntimeEnv returns the normalized SPINE_ENV value: production,
+// staging or development (case and surrounding whitespace ignored), or ""
+// for an unset or unknown value. Only requireRuntimeEnv decides whether ""
+// may run; callers past that gate always see a known value.
 func resolveRuntimeEnv() string {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("SPINE_ENV")))
 	switch v {
@@ -184,6 +381,49 @@ func resolveRuntimeEnv() string {
 	default:
 		return ""
 	}
+}
+
+// runtimeEnvMaxEcho bounds how much of an unknown SPINE_ENV value the
+// refusal quotes, so a stray multi-kilobyte value cannot flood the log.
+const runtimeEnvMaxEcho = 64
+
+// requireRuntimeEnv is the SPINE_ENV startup gate of `spine serve` and
+// `spine secrets reencrypt` (INIT-024 TASK-007, review finding N-16). It
+// returns the normalized value, or an error naming the three accepted
+// values when SPINE_ENV is unset, blank or anything else.
+//
+// Every production gate keys on the exact value "production": the
+// SPINE_SECRET_ENCRYPTION_KEY and SPINE_CODE_REPO_BASE requirements, the
+// SMP_ADMIN_TOKEN strength refusal, the SPINE_DEV_MODE refusal and the
+// pooled bootstrap's strict collision handling. resolveRuntimeEnv maps an
+// unset or mistyped value ("prod", "prodution") to "", which took the
+// non-production branch of every one of them, so a deployment that
+// forgot or misspelled the variable silently ran with plaintext webhook
+// secrets, a weak platform bearer and dev-mode auth allowed. Refusing to
+// start makes the choice explicit: the only ways to leave the production
+// gates off are SPINE_ENV=staging and SPINE_ENV=development, written
+// down. Owner question 2 default (refuse rather than treat unset as
+// production), pending the owner.
+//
+// An accepted spelling is any ASCII case of the three words with
+// surrounding whitespace, which resolveRuntimeEnv maps to exactly that
+// word, so no accepted value can reach a gate as anything else. The
+// refusal quotes an unknown value (bounded, %q-escaped): SPINE_ENV is not
+// a secret.
+func requireRuntimeEnv() (string, error) {
+	if env := resolveRuntimeEnv(); env != "" {
+		return env, nil
+	}
+	raw := os.Getenv("SPINE_ENV")
+	const accepted = "set it to production, staging or development (the production startup gates apply only to SPINE_ENV=production)"
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("SPINE_ENV is not set; %s", accepted)
+	}
+	shown := raw
+	if len(shown) > runtimeEnvMaxEcho {
+		shown = shown[:runtimeEnvMaxEcho] + "..."
+	}
+	return "", fmt.Errorf("SPINE_ENV=%q is not a known runtime environment; %s", shown, accepted)
 }
 
 // devModeEnabled reports whether SPINE_DEV_MODE is set to an

@@ -156,8 +156,9 @@ func intPtr(n int) *int { return &n }
 // branchChangeAtSubmit derives the evidence for a submit whose capture was
 // hb (nil when nothing was captured). run is SubmitStepResult's own read,
 // taken before this submit's commit_meta write, so its binding is the
-// previous one. It makes at most one git call (the diff), and none when
-// the head is unrecorded or equal to the previous head.
+// previous one. It makes at most one git call (the count of changed
+// paths, countChangedPaths), and none when the head is unrecorded or equal
+// to the previous head.
 func (o *Orchestrator) branchChangeAtSubmit(ctx context.Context, run *domain.Run, exec *domain.StepExecution, hb *headBinding) BranchChange {
 	bc := BranchChange{RepositoryID: domain.PrimaryRepositoryID}
 	switch {
@@ -203,7 +204,7 @@ func (o *Orchestrator) branchChangeAtSubmit(ctx context.Context, run *domain.Run
 
 	diffCtx, cancel := context.WithTimeout(ctx, evidenceDiffTimeout)
 	defer cancel()
-	diffs, err := o.git.Diff(diffCtx, bc.PreviousSHA, bc.HeadSHA)
+	changed, err := o.countChangedPaths(diffCtx, bc.PreviousSHA, bc.HeadSHA)
 	if err != nil {
 		kind := diffFailureKind(diffCtx, err)
 		observe.Logger(ctx).Warn("step output evidence: diff failed; branch change unknown",
@@ -212,7 +213,7 @@ func (o *Orchestrator) branchChangeAtSubmit(ctx context.Context, run *domain.Run
 		bc.Status, bc.Reason = BranchChangeUnknown, EvidenceReasonDiffFailedPrefix+kind
 		return bc
 	}
-	if len(diffs) == 0 {
+	if changed == 0 {
 		// The head moved but the tree did not (review round 1): an empty
 		// commit — or a change and its revert — must not dodge the flag.
 		// A diff that succeeded with no entry proves the content is the
@@ -221,8 +222,24 @@ func (o *Orchestrator) branchChangeAtSubmit(ctx context.Context, run *domain.Run
 		bc.Status, bc.ChangedPaths, bc.Reason = BranchChangeUnchanged, intPtr(0), EvidenceReasonTreeUnchanged
 		return bc
 	}
-	bc.Status, bc.ChangedPaths = BranchChangeChanged, intPtr(len(diffs))
+	bc.Status, bc.ChangedPaths = BranchChangeChanged, intPtr(changed)
 	return bc
+}
+
+// countChangedPaths is the evidence's one git call: how many paths differ
+// between from and to. An operator with the ChangedPathCounter capability
+// counts without rename detection and without loading a blob (INIT-024
+// TASK-004, review finding N-12); any other counts the entries of Diff,
+// as before (owner question 2 default), where a rename is one path.
+func (o *Orchestrator) countChangedPaths(ctx context.Context, from, to string) (int, error) {
+	if c, ok := o.git.(ChangedPathCounter); ok {
+		return c.CountChangedPaths(ctx, from, to)
+	}
+	diffs, err := o.git.Diff(ctx, from, to)
+	if err != nil {
+		return 0, err
+	}
+	return len(diffs), nil
 }
 
 // storedEvidence decodes the run's persisted evidence for executionID.

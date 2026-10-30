@@ -493,10 +493,14 @@ func commitRetryFor(eng schedulerEngine) func(ctx context.Context, runID string)
 // operator-only at push time, with a Warn log per refused ref. In single
 // mode the resolver attaches exactly this pair, so the warning below
 // describes what pushes will actually get.
-func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, policy branchprotect.Policy, runs refadmit.RunReader, stepDefs refadmit.StepDefLookup, perWorkspace bool, log *slog.Logger) *githttp.Handler {
+//
+// limits are the slot caps and the command-read deadline (INIT-024
+// TASK-005; zero fields: the defaults of the mode, gitHTTPLimits.effective).
+func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs map[string][]string, receivePackEnabled bool, policy branchprotect.Policy, runs refadmit.RunReader, stepDefs refadmit.StepDefLookup, perWorkspace bool, limits gitHTTPLimits, log *slog.Logger) *githttp.Handler {
 	if wsResolver == nil {
 		return nil
 	}
+	effLimits := limits.effective(perWorkspace)
 	h, err := githttp.NewHandler(githttp.Config{
 		ResolveRepoPath: func(ctx context.Context, workspaceID string) (string, error) {
 			cfg, err := wsResolver.Resolve(ctx, workspaceID)
@@ -505,16 +509,26 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 			}
 			return cfg.RepoPath, nil
 		},
-		TrustedCIDRs:       trustedCIDRs,
-		ReceivePackEnabled: receivePackEnabled,
-		Policy:             policy,
-		RunRefs:            runs,
-		StepDefs:           stepDefs,
+		TrustedCIDRsByWorkspace: trustedCIDRs,
+		ReceivePackEnabled:      receivePackEnabled,
+		Policy:                  policy,
+		RunRefs:                 runs,
+		StepDefs:                stepDefs,
+		// The pre-receive hook holds pushes to the client's checkout
+		// budget (INIT-024 TASK-003; installCheckoutLimits set it).
+		TreeBudget: processTreeBudget(),
+		// Fair slots and the command-read deadline (INIT-024 TASK-005),
+		// with the defaults of this server's mode.
+		MaxConcurrent:             effLimits.MaxConcurrent,
+		MaxConcurrentPerWorkspace: effLimits.MaxConcurrentPerWorkspace,
+		MaxConcurrentPerActor:     effLimits.MaxConcurrentPerActor,
+		CommandReadTimeout:        effLimits.CommandReadTimeout,
 	})
 	if err != nil {
 		log.Warn("git HTTP endpoint disabled", "reason", err.Error())
 		return nil
 	}
+	logGitHTTPLimits(log, limits, perWorkspace)
 	if len(trustedCIDRs) == 0 {
 		// Recommend the runners' own addresses, never a subnet: a
 		// range that contains a Docker bridge gateway or a reverse
@@ -524,7 +538,9 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 			"To let runners clone token-less, set SPINE_GIT_HTTP_TRUSTED_CIDRS to the runners' own addresses only " +
 			"(never a range containing a Docker bridge gateway or a reverse proxy; see docker-compose.override.yaml.example).")
 	} else {
-		log.Info("git HTTP endpoint enabled", "trusted_cidrs", trustedCIDRs)
+		// Each workspace lists the runner addresses that may clone it
+		// token-less, and no other workspace (INIT-024 TASK-006).
+		log.Info("git HTTP endpoint enabled", "trusted_cidrs_by_workspace", trustedCIDRs)
 	}
 	if receivePackEnabled {
 		if policy == nil {
@@ -545,6 +561,15 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 		}
 	}
 	return h
+}
+
+// processTreeBudget is the checkout budget installCheckoutLimits made
+// the process default, or the zero budget (the defaults) when none was.
+func processTreeBudget() git.TreeBudget {
+	if l := git.DefaultCheckoutLimits(); l.Budget != nil {
+		return *l.Budget
+	}
+	return git.TreeBudget{}
 }
 
 // startEventDelivery bootstraps the event delivery subscriber and

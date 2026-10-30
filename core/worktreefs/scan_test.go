@@ -44,7 +44,37 @@ var forbidden = map[string]map[string]bool{
 var allowed = map[string]bool{
 	"adapters/git/cli.go:createAskpassScript": true, // GIT_ASKPASS helper in os.TempDir
 	"adapters/git/cli.go:CLIClient.Close":     true, // removes that helper
-	"adapters/git/branchwrite.go:EnterBranch": true, // MkdirTemp/RemoveAll of the private worktree parent (RemoveAll never follows links inside it)
+	// MkdirTemp/RemoveAll of the private worktree parent (RemoveAll never
+	// follows links inside it). INIT-024 TASK-003 moved the body to
+	// EnterBranchWithLimits and the failure cleanup to removeAddedWorktree.
+	"adapters/git/branchwrite.go:EnterBranchWithLimits": true,
+	"adapters/git/branchwrite.go:removeAddedWorktree":   true,
+	// INIT-024 TASK-003: Clone's Lstat existence check of its own target
+	// (never followed), and the RemoveAll of a clone the checkout budget
+	// refused or whose checkout failed — the clone directory Clone itself
+	// made, or the entries of the empty directory it cloned into.
+	"adapters/git/cli.go:CLIClient.Clone":         true,
+	"adapters/git/cli.go:CLIClient.checkoutClone": true,
+	// INIT-024 TASK-003 review round 2: $GIT_COMMON_DIR/info/attributes, a
+	// git-administrative file located by `git rev-parse --git-common-dir`,
+	// never a working-tree path; Lstat first, a link is never followed.
+	"adapters/git/neutral_attributes.go:readInfoAttributes": true,
+	"adapters/git/neutral_attributes.go:ensureNeutral":      true,
+	// Review round 3: EvalSymlinks of the given directory and of git's own
+	// top-level path, to refuse a directory that is not its repository's
+	// top (nothing opened or written).
+	"adapters/git/neutral_attributes.go:requireRepositoryTop": true,
+	// Codex review round 3 / review round 4: the renormalise marker, a
+	// fixed name in a work tree's own git directory (`git rev-parse
+	// --absolute-git-dir`), never a working-tree path — written as a
+	// temporary file renamed into place (a link is replaced, not
+	// followed), Lstat'd, read and removed; and the index file's own
+	// time (`git rev-parse --git-path index`, Lstat'd, regular only).
+	"adapters/git/neutral_attributes.go:writeRenormaliseRecord":  true,
+	"adapters/git/neutral_attributes.go:readRenormaliseRecord":   true,
+	"adapters/git/neutral_attributes.go:renormalisePending":      true,
+	"adapters/git/neutral_attributes.go:clearRenormalisePending": true,
+	"adapters/git/neutral_attributes.go:forceContentCompare":     true,
 	// MkdirTemp/RemoveAll of the private GIT_INDEX_FILE directory in
 	// os.TempDir (INIT-023 TASK-005): plumbing only, no working tree.
 	"adapters/git/commitbinder.go:CLIClient.CommitFilesOnto": true,
