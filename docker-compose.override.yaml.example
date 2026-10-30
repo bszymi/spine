@@ -19,6 +19,9 @@
 # delete that carries the ref's current object id lands on it, and once
 # the ref is packed (git gc, git pack-refs) a plain git push does too.
 # git's refusal to update the checked-out branch does not catch it.
+# Since INIT-024 TASK-005 the git endpoint detects such storage and
+# refuses pushes to the repository (clones still work), so pushes do not
+# work over this bind mount on those hosts.
 # Serve pushes only from the shipped named volume (repo:/repo) or a Linux
 # host directory. See KNOWN-LIMITATIONS.md -> Security Notes ("Git Push
 # Gate: Served Repositories Need Case- and Normalization-Sensitive

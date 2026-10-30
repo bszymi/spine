@@ -6,6 +6,62 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-002 TASK-005: standalone push-gate races)
+
+Closes review findings N-8, N-9 and N-13 (P3, standalone git endpoint). No runtime schema change;
+SMP embeds none of this code (its own gateway's parity is an SMP companion follow-up).
+
+### Security
+
+- **Receive-pack refused on case- or normalization-folding storage (N-8).** Branch protection
+  matches ref names byte for byte, so on storage that folds names a push to `refs/heads/MAIN` could
+  move `main`. With `SPINE_GIT_RECEIVE_PACK_ENABLED` on, the git endpoint now probes each served
+  repository once, on its first push request (three name pairs — ASCII case, Unicode NFC/NFD, the
+  Kelvin sign — in a private directory under `refs/heads` that git never lists), and refuses
+  receive-pack for one whose storage folds any of them: `403` naming the requirement on the push
+  advertisement and the push, before the body is read, and `http.receivepack=false` in that
+  repository. Clones and fetches are unaffected and never wait on the probe. A probe that cannot
+  answer refuses pushes (`500 push gate unavailable`) for 30 seconds before a push probes again.
+- **Push admission re-checked when the push is applied (N-9).** Admission was decided when the
+  command section was parsed, so a push whose pack was held back until its run step had been
+  submitted, reassigned or turned into a review step still landed. The checkout-budget pre-receive
+  hook now also asks the server, after the pack is in and before any ref moves, to admit every
+  update again against the store as it is then; the push is refused unless the server admits all of
+  them, and refused if the hook cannot reach it (fail closed). The channel is a per-push Unix socket
+  in a private directory plus a one-time token, passed in that push's CGI environment only. An update
+  the command section did not announce is refused too.
+- **Fair git slots and a command-read deadline (N-13).** One process-wide semaphore of 5, taken
+  before a push's body was read, let one authenticated member starve git for every tenant. A request
+  now takes a slot per principal ((workspace, actor), or (workspace, peer) for a token-less read),
+  per workspace and process-wide (defaults 2 / 4 / 8 in shared mode; 8 / 8 / 8 on a
+  single-workspace server), and a push takes it only after its command section has arrived —
+  within `SPINE_GIT_COMMAND_READ_TIMEOUT` (default `10s`) — and been admitted, so a stalled client
+  holds none. The pushes in their command section and admission at once are capped at twice the
+  slot caps, per principal and per workspace (`503` beyond).
+
+### Changed (operators)
+
+- New variables: `SPINE_GIT_HTTP_MAX_CONCURRENT` (8), `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_WORKSPACE`
+  (4 in shared mode, the process-wide cap on a single-workspace server),
+  `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_ACTOR` (2 in shared mode, the process-wide cap on a
+  single-workspace server), each a whole number from 1 to 1024, and `SPINE_GIT_COMMAND_READ_TIMEOUT`
+  (`10s`), a positive duration; an invalid value refuses to start. A single-workspace server now has
+  8 git slots (it had 5) and its capacity follows `SPINE_GIT_HTTP_MAX_CONCURRENT`; an explicitly
+  lower per-workspace cap binds, and a process-wide cap set above it logs a startup warning. In
+  shared mode runners that share one token share one actor's 2 slots: raise
+  `SPINE_GIT_HTTP_MAX_CONCURRENT_PER_ACTOR` if they clone in parallel.
+- A deployment that serves pushes from case- or normalization-insensitive storage (native
+  macOS/Windows, a Docker Desktop bind mount such as the `./:/repo` override example, SMB, a
+  case-sensitive APFS volume) — against the documented requirement — has receive-pack refused for
+  those repositories after the upgrade.
+- A push's override audit event (`branch_protection.override`) is written once the push holds its
+  slot, hook and re-check, just before git runs (a push answered `503` writes none, as before).
+- The hook now needs the server's temporary directory to be writable for the re-check socket
+  (`/tmp` when `TMPDIR` is longer than 64 bytes; a relative `TMPDIR` refuses every push — set an
+  absolute one). A reftable repository on folding storage is refused too (fail closed).
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-002 TASK-004: read-path robustness)
 
 Closes review findings N-6, N-10, N-11 and N-12 (P3), plus two carried items: `Diff` now reports

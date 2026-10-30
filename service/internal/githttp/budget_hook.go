@@ -40,6 +40,10 @@ package githttp
 //
 // The hook is on whenever receive-pack is (INIT-024 owner question 3):
 // there is no switch to turn it off, only larger limits.
+//
+// The same hook also carries the apply-time admission re-check (INIT-024
+// TASK-005, review finding N-9; admission_recheck.go): one hook, two
+// jobs, one install path.
 
 import (
 	"bufio"
@@ -211,19 +215,7 @@ func (h *Handler) installBudgetHook(ctx context.Context, repoPath string) (strin
 	if err != nil {
 		return "", err
 	}
-	// G702: repoPath is server-resolved from the workspace registry.
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir") //nolint:gosec // G204: fixed argv
-	cmd.Dir = repoPath
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("locate the git directory: %w", err)
-	}
-	common := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(repoPath, common)
-	}
-	common, err = filepath.Abs(common)
+	common, err := gitCommonDir(ctx, repoPath)
 	if err != nil {
 		return "", err
 	}
@@ -359,11 +351,22 @@ var errHookRefused = errors.New("push refused by the checkout-budget pre-receive
 // within the budget; otherwise it writes one line per refusal to stderr
 // (git relays it as "remote: ...") and returns an error, and the caller
 // exits non-zero. Anything it cannot read or measure is a refusal.
+//
+// Its second job (INIT-024 TASK-005, admission_recheck.go): when the
+// push is served by this package's endpoint, the environment names the
+// push's re-check channel, and once the budget has passed the hook asks
+// the server to admit every update again — at apply time — and refuses
+// the push unless it does (fail closed when the server cannot be
+// reached).
 func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, stderr io.Writer) error {
 	refuse := func(format string, a ...any) error {
 		_, _ = fmt.Fprintf(stderr, "spine: push refused: "+format+"\n", a...)
 		return errHookRefused
 	}
+	// The apply-time admission re-check's channel (INIT-024 TASK-005,
+	// admission_recheck.go) is taken out of the environment first, so no
+	// git process below inherits its token.
+	recheck, recheckErr := recheckFromEnv()
 	flags := flag.NewFlagSet("pre-receive", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	maxEntries := flags.Int64("max-entries", 0, "")
@@ -375,6 +378,9 @@ func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, std
 	}
 	if *timeout <= 0 {
 		*timeout = defaultHookTimeout
+	}
+	if recheckErr != nil {
+		return refuse("the push-admission re-check channel is malformed; refused (fail closed)")
 	}
 	budget := git.TreeBudget{MaxEntries: *maxEntries, MaxTotalBytes: *maxBytes, MaxPathBytesTotal: *maxPath}.Effective()
 	if ctx == nil {
@@ -389,8 +395,8 @@ func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, std
 	in := &io.LimitedReader{R: stdin, N: maxHookInputBytes + 1}
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 4096), maxHookLineBytes)
-	type tip struct{ oid, ref string }
-	var tips []tip
+	var tips []hookTip
+	var lines []string // every update, deletes included, for the re-check
 	seen := map[string]bool{}
 	n := 0
 	for sc.Scan() {
@@ -399,12 +405,13 @@ func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, std
 		if len(f) != 3 || !git.IsFullObjectName(f[0]) || !git.IsFullObjectName(f[1]) || f[2] == "" {
 			return refuse("ref update %d is malformed", n)
 		}
+		lines = append(lines, sc.Text())
 		newOID, ref := f[1], f[2]
 		if strings.Trim(newOID, "0") == "" || seen[newOID] {
 			continue // a delete writes nothing; a repeated tip is typed once
 		}
 		seen[newOID] = true
-		tips = append(tips, tip{newOID, ref})
+		tips = append(tips, hookTip{newOID, ref})
 	}
 	if in.N <= 0 {
 		return refuse("the ref updates exceed %d bytes", maxHookInputBytes)
@@ -412,6 +419,30 @@ func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, std
 	if err := sc.Err(); err != nil {
 		return refuse("cannot read the ref updates: %v", err)
 	}
+	if err := measureTips(ctx, c, budget, tips, *timeout, refuse); err != nil {
+		return err
+	}
+	if recheck == nil {
+		return nil
+	}
+	// Last, as close to the ref update as the hook gets: the server
+	// decides admission again for every update git is about to apply.
+	msgs, err := recheck.check(ctx, lines)
+	if err != nil {
+		return refuse("the push-admission re-check could not be completed with the server; refused (fail closed)")
+	}
+	for _, m := range msgs {
+		_, _ = fmt.Fprintf(stderr, "spine: push refused: %s\n", m)
+	}
+	if len(msgs) > 0 {
+		return errHookRefused
+	}
+	return nil
+}
+
+// measureTips holds the tree of every pushed tip to the budget, within
+// the hook's deadline (TASK-003). refuse writes the refusal.
+func measureTips(ctx context.Context, c *git.CLIClient, budget git.TreeBudget, tips []hookTip, timeout time.Duration, refuse func(string, ...any) error) error {
 	if len(tips) == 0 {
 		return nil
 	}
@@ -447,12 +478,15 @@ func PreReceiveHookMain(ctx context.Context, args []string, stdin io.Reader, std
 			if errors.As(err, &ge) && ge.Message == git.TreeObjectTooLargeMessage {
 				return refuse("%q: %s", t.ref, git.TreeObjectTooLargeMessage)
 			}
-			return refuse("%q: the pushed tree could not be measured against the checkout budget within %s; refused (fail closed)", t.ref, *timeout)
+			return refuse("%q: the pushed tree could not be measured against the checkout budget within %s; refused (fail closed)", t.ref, timeout)
 		}
 		measured[tree] = true
 	}
 	return nil
 }
+
+// hookTip is a pushed tip the hook measures.
+type hookTip struct{ oid, ref string }
 
 // measureHookForTest, when set, is called before each tree the hook
 // measures.

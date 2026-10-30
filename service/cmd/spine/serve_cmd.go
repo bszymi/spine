@@ -82,6 +82,12 @@ func serveCmd() *cobra.Command {
 			if err := gitTrusted.checkMode(sharedWorkspaceResolverEnv()); err != nil {
 				return err
 			}
+			// The git endpoint's slot caps and command-read deadline
+			// (INIT-024 TASK-005, N-13): a malformed value refuses startup.
+			gitHTTPLimits, err := loadGitHTTPLimits()
+			if err != nil {
+				return err
+			}
 
 			// SMP_ADMIN_TOKEN strength gate (INIT-023 TASK-013): checked
 			// before any store, secret or listener is opened.
@@ -254,6 +260,7 @@ func serveCmd() *cobra.Command {
 				TrustedGitHTTPCIDRs:        gitTrustedByWorkspace,
 				GitHTTPDevNoAuth:           gitDevNoAuth,
 				GitReceivePackEnabled:      parseGitReceivePackEnabled(os.Getenv("SPINE_GIT_RECEIVE_PACK_ENABLED")),
+				GitHTTPLimits:              gitHTTPLimits,
 				EventDeliveryOn:            deliveryCfg.Enabled,
 				SMPEventURL:                deliveryCfg.SMPEventURL,
 				SMPWorkspaceID:             os.Getenv("SMP_WORKSPACE_ID"),

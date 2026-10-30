@@ -100,8 +100,13 @@ func TestNewHandler_Defaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cap(h.sem) != 5 {
-		t.Errorf("expected default MaxConcurrent=5, got %d", cap(h.sem))
+	// INIT-024 TASK-005 (owner question 1): 2 per principal, 4 per
+	// workspace, 8 in all; a 10s command-read deadline.
+	if h.slots.global != 8 || h.slots.perWorkspace != 4 || h.slots.perPrincipal != 2 {
+		t.Errorf("expected default caps 2/4/8, got %d/%d/%d", h.slots.perPrincipal, h.slots.perWorkspace, h.slots.global)
+	}
+	if h.commandReadTimeout != 10*time.Second {
+		t.Errorf("expected default CommandReadTimeout=10s, got %v", h.commandReadTimeout)
 	}
 	if h.opTimeout != 30*time.Second {
 		t.Errorf("expected default OpTimeout=30s, got %v", h.opTimeout)
@@ -110,16 +115,22 @@ func TestNewHandler_Defaults(t *testing.T) {
 
 func TestNewHandler_CustomConfig(t *testing.T) {
 	h, err := NewHandler(Config{
-		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
-		MaxConcurrent:   10,
-		OpTimeout:       60 * time.Second,
+		ResolveRepoPath:           func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
+		MaxConcurrent:             10,
+		MaxConcurrentPerWorkspace: 6,
+		MaxConcurrentPerActor:     3,
+		CommandReadTimeout:        2 * time.Second,
+		OpTimeout:                 60 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if cap(h.sem) != 10 {
-		t.Errorf("expected MaxConcurrent=10, got %d", cap(h.sem))
+	if h.slots.global != 10 || h.slots.perWorkspace != 6 || h.slots.perPrincipal != 3 {
+		t.Errorf("expected caps 3/6/10, got %d/%d/%d", h.slots.perPrincipal, h.slots.perWorkspace, h.slots.global)
+	}
+	if h.commandReadTimeout != 2*time.Second {
+		t.Errorf("expected CommandReadTimeout=2s, got %v", h.commandReadTimeout)
 	}
 	if h.opTimeout != 60*time.Second {
 		t.Errorf("expected OpTimeout=60s, got %v", h.opTimeout)
@@ -1145,11 +1156,17 @@ func TestServeHTTP_ConcurrencyLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Fill the semaphore.
-	h.sem <- struct{}{}
+	// Fill the process-wide ceiling with another principal's slot.
+	release, _ := h.slots.acquire(slotPrincipal{workspace: "ws-other", id: "someone"})
+	if release == nil {
+		t.Fatal("could not take the only slot")
+	}
+	defer release()
 
 	req := httptest.NewRequest("GET", "/info/refs?service=git-upload-pack", nil)
-	ctx := WithRepoPath(req.Context(), "/tmp/repo")
+	// The repository is aligned before a slot is taken (INIT-024
+	// TASK-005), so it must be one.
+	ctx := WithRepoPath(req.Context(), initBareIshRepo(t))
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
@@ -1158,9 +1175,9 @@ func TestServeHTTP_ConcurrencyLimit(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 when concurrency limit reached, got %d", w.Code)
 	}
-
-	// Drain the semaphore.
-	<-h.sem
+	if w.Header().Get("Retry-After") == "" {
+		t.Error("503 without Retry-After")
+	}
 }
 
 func TestWithRepoPath_RoundTrip(t *testing.T) {

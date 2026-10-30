@@ -160,7 +160,7 @@ func TestBuildGitHTTPHandler_WarnsWhenRunBranchesAreOperatorOnly(t *testing.T) {
 		t.Helper()
 		var buf bytes.Buffer
 		log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-		if h := buildGitHTTPHandler(resolver, nil, receivePack, branchprotect.NewPermissive(), runs, defs, perWorkspace, log); h == nil {
+		if h := buildGitHTTPHandler(resolver, nil, receivePack, branchprotect.NewPermissive(), runs, defs, perWorkspace, gitHTTPLimits{}, log); h == nil {
 			t.Skip("git-http-backend unavailable")
 		}
 		return buf.String()
