@@ -137,9 +137,17 @@ func claimBranch(repoDir, ref string) (release func(), ok bool) {
 // adds no process to EnterBranch — from the layouts a repository root
 // has: .git a directory; .git a file naming the git directory of a linked
 // worktree, whose commondir file names the common one; or a bare
-// repository. Anything else keys by the canonical repoDir, which still
+// repository. Anything else — including a .git that is a symbolic link,
+// which is never followed — keys by the canonical repoDir, which still
 // serialises every entry made through that path (git's own guard covers
-// the rest, as before).
+// the rest, as before). A wrong key can only weaken the claim to git's
+// own guard, never refuse an entry another repository's scope holds: two
+// repositories never share a common directory or a root.
+//
+// Only git-administrative entries are read (the root's .git, the git
+// directory's commondir, a bare root's HEAD and objects), each Lstat'd
+// first and opened only when it is a regular file (no link followed, no
+// FIFO or device opened), at most 4 KiB (core/worktreefs scan allowlist).
 func repoClaimKey(repoDir string) string {
 	root := canonicalTreeKey(repoDir)
 	gitDir := gitDirOf(root)
@@ -162,7 +170,7 @@ func repoClaimKey(repoDir string) string {
 // "" when root has none of the layouts repoClaimKey reads.
 func gitDirOf(root string) string {
 	dotgit := filepath.Join(root, ".git")
-	if fi, err := os.Stat(dotgit); err == nil {
+	if fi, err := os.Lstat(dotgit); err == nil {
 		switch {
 		case fi.IsDir():
 			return dotgit
@@ -185,8 +193,8 @@ func gitDirOf(root string) string {
 		return ""
 	}
 	// A bare repository is its own git directory.
-	head, errH := os.Stat(filepath.Join(root, "HEAD"))
-	objects, errO := os.Stat(filepath.Join(root, "objects"))
+	head, errH := os.Lstat(filepath.Join(root, "HEAD"))
+	objects, errO := os.Lstat(filepath.Join(root, "objects"))
 	if errH == nil && head.Mode().IsRegular() && errO == nil && objects.IsDir() {
 		return root
 	}
@@ -194,8 +202,12 @@ func gitDirOf(root string) string {
 }
 
 // readSmallFile reads at most 4 KiB of path (a .git or commondir file is
-// one short line).
+// one short line), and only when path is a regular file: a link, FIFO or
+// device is reported as unreadable, never followed or opened.
 func readSmallFile(path string) (string, bool) {
+	if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
+		return "", false
+	}
 	f, err := os.Open(path) //nolint:gosec // G304: a repository's own .git / commondir file, under an operator-chosen repoDir
 	if err != nil {
 		return "", false

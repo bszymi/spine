@@ -84,6 +84,15 @@ var allowed = map[string]bool{
 	// restore (read-only, never followed, never removed).
 	"adapters/git/treelock.go:treeReal":              true,
 	"adapters/git/treelock.go:CLIClient.restoreHeld": true,
+	// INIT-024 TASK-011: the branch claim's key, a repository's git common
+	// directory, derived without running git — Lstat of the root's .git
+	// (a directory, or a regular file naming a linked worktree's git
+	// directory) and of a bare root's HEAD and objects, and a read of at
+	// most 4 KiB of the .git file and of the git directory's commondir,
+	// each only when it is a regular file (no link followed, nothing
+	// written). Git-administrative entries only, never a working-tree file.
+	"adapters/git/checkout_admission.go:gitDirOf":      true,
+	"adapters/git/checkout_admission.go:readSmallFile": true,
 }
 
 func set(names ...string) map[string]bool {
