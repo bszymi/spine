@@ -442,14 +442,15 @@ controls:
 - **Every caller is authenticated for the workspace, or is a trusted runner bound to it**
   (INIT-024 TASK-006, review finding N-2). A token-less read is allowed only to a directly
   connected peer whose address `SPINE_GIT_HTTP_TRUSTED_CIDRS` binds to the workspace the request
-  resolved to; in shared mode only the per-workspace form is accepted at start. Every other caller
-  without a valid token for that workspace gets one uniform `401`, whether or not the workspace
-  exists (the one exception: a single-mode server with no auth service answers `503` to a caller
-  that presents a bearer). Pushes always need a bearer.
+  resolved to (or, with `SPINE_ENV=development` only, to any client under
+  `SPINE_GIT_HTTP_DEV_NO_AUTH`); in shared mode only the per-workspace form is accepted at start.
+  Every other caller without a valid token for that workspace gets one uniform `401`, whether or
+  not the workspace exists (the one exception: a single-mode server with no auth service answers
+  `503` to a caller that presents a bearer). Pushes always need a bearer.
 - **What a push can make the server write is bounded** (INIT-024 TASK-003, review finding N-1).
   The tree of every pushed commit is measured at pre-receive — entries, blob bytes and summed path
-  bytes — and an over-budget push is refused before any ref moves. Every tree the server itself checks
-  out, merges, restores or clones is measured the same way before anything is written, and its
+  bytes — and an over-budget push is refused before any ref moves. Every tree the server itself
+  checks out, merges, restores or clones is measured the same way before anything is written, and its
   repositories carry neutral checkout attributes, so a checkout writes exactly the stored bytes
   that were measured. The budget is on in `spine serve` with no off switch; in the embedded
   library it is opt-in (`git.WithTreeBudget`, `git.TreeBudget.Check`).
