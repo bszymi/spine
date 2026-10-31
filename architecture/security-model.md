@@ -453,9 +453,9 @@ controls:
   checks out, merges, restores or clones is measured the same way before anything is written, and its
   repositories carry neutral checkout attributes, so a checkout writes exactly the stored bytes
   that were measured. The budget bounds each checkout, merge and push on its own; the total of
-  the checkouts in flight at the same time is not bounded (a recorded residual). The budget is on
-  in `spine serve` with no off switch; in the embedded library it is opt-in (`git.WithTreeBudget`,
-  `git.TreeBudget.Check`).
+  the checkouts in flight at the same time is not bounded (a recorded residual; INIT-024
+  TASK-011). The budget is on in `spine serve` with no off switch; in the embedded library it is
+  opt-in (`git.WithTreeBudget`, `git.TreeBudget.Check`).
 - **Pushes need case- and normalization-sensitive storage** (INIT-024 TASK-005, N-8). Branch
   protection matches ref names byte for byte, so a repository whose storage folds names has
   receive-pack refused (reads are still served).

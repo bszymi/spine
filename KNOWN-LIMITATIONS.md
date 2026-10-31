@@ -1532,8 +1532,7 @@ The following limitations have been resolved:
   burst of them needs a multiple of the budget on that filesystem. There is no per-tenant disk
   quota either. Operator levers: a lower `SPINE_GIT_TREE_MAX_BYTES`, and `TMPDIR` on its own
   size-limited (quota'd) filesystem rather than a memory-backed tmpfs. Bounding the bytes in
-  flight (one entry per branch, a process-wide byte allowance) is the follow-up (INIT-024
-  TASK-010's close notes).
+  flight (one writer per branch, a process-wide byte allowance) is INIT-024 TASK-011.
 - **Mutate deadline.** On expiry the command is SIGTERMed (git removes its locks) and the call
   fails with a permanent error wrapping `git.MutateTimeoutError`. With a deadline, `EnterBranch`
   adds the worktree `--no-checkout` and runs the `reset --hard` that fills it itself, because
