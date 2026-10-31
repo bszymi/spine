@@ -7,7 +7,7 @@ epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-005-close-out/epi
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-30
+last_updated: 2026-10-31
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-005-close-out/epic.md
@@ -119,3 +119,273 @@ until GitHub CI runs green on the pushed closing commit.
 
 - This task edits the shared docs (`KNOWN-LIMITATIONS.md`, `CHANGELOG.md`, `security-model.md`) to
   reconcile what each task wrote. It makes no code change.
+
+---
+
+## Implementation Notes
+
+Close run on branch `init/INIT-024-TASK-010-initiative-close`, cut from Spine local `main`
+`854a1e08`. Close makes no code change: its commits are this artifact and a doc-only
+reconciliation. Commits (all prefixed `INIT-024 EPIC-005 TASK-010:`): `55ef529c` start (status In
+Progress); `fa68a2f1`, `1cdcb2f6`, `918af609` and `ab41a1be` docs (step 5; the last two from the
+cross-task review); then this notes commit. Nothing is pushed.
+
+### The closing commit
+
+- **Candidate:** this branch's final head (the notes commit). The orchestrator merges it into
+  Spine `main`; **that merge commit is the INIT-024 closing commit**, the one SMP INIT-027
+  EPIC-005 TASK-018 pins in `.spine-revision`. Its Go tree is `854a1e08`'s: every gate below ran
+  on that code (tree `d332c5ab`, identical to the integration head `a28b3248`); the close adds
+  only Markdown.
+- `854a1e08` = `83d82409` (TASK-001, merged on `main` first) + `Merge init/INIT-024-integration-a`
+  (TASK-002 … TASK-009 and the integration's coordination commits).
+
+### Step 1 — integration (done before this task; record)
+
+| Task | Merged tip | Merge |
+|---|---|---|
+| TASK-001 | `49fad9c0` | `83d82409` on `main` (before integration A; SMP EPIC-004 TASK-012 pinned `49fad9c0`) |
+| TASK-009 | `b8dc7bb3` | `899cd774` |
+| TASK-002 | `07d6ca8a` | `c6bad6c0` |
+| TASK-006 | `96dcea55` | `000c5461` |
+| TASK-007 | `55a67a45` | `e6ab7e81` |
+| TASK-008 | `c6541bd5` | `8a0a1b29` |
+| TASK-003 | `02334613`, review round 4 `693fb648` | `4f502b7e`, `23330ab7` |
+| TASK-004 | `d18a9471` | `557e78cb` |
+| TASK-005 | `80240088` | `e1f24c05` |
+| integration A | `a28b3248` | `854a1e08` on `main` |
+
+Each task's "Integration A" section records its overlaps, coordination commits and the phase
+gates; nothing was rewritten.
+
+### Step 2 — cross-task review
+
+Two independent skeptics reviewed the two P2s across tasks (N-1: TASK-003 with TASK-004's read
+paths; N-2: TASK-006 with TASK-005/007/008), read-only on the same tree (`i23/s24-T003`, detached at
+`a28b3248`); their reports go to the orchestrator (SMP repo `tmp/init027-orchestration/i24/t010/`).
+
+- **Skeptic A: no P1 or P2.** Both PoCs reproduce at the pre-fix base `49fad9c0` and are refused
+  at the closing tree for the right reason, on the host git and on git 2.39.5: N-1 with
+  `ErrTreeTooLarge` (total bytes) and no worktree directory written, the two-level bomb writing
+  nothing; N-2 with the uniform `401` for the workspace the runner is not bound to, on every `/git`
+  spelling tried. Six mutations of the central checks were killed.
+  - **P3, recorded as a residual and a follow-up (no code change here).** The budget bounds each
+    checkout, merge and push, but not the total bytes of checkouts in flight at once: concurrent
+    branch-scoped writes, to one branch or to several, each write a full within-budget tree to
+    the server's temporary directory, including writes git then refuses. `KNOWN-LIMITATIONS.md`
+    stated a narrower premise (different branches only); `918af609` corrects it at defect level
+    and names the operator levers. The fix is INIT-024 TASK-011 (one writer per branch, a
+    process-wide allowance on measured bytes in flight).
+  - **P4:** under concurrent entries git's own in-use guard can let several linked worktrees
+    attach to one branch; the ref compare-and-swap turns that into failed writes, never lost
+    updates (the P3 fix closes it). **P4:** `SPINE_GIT_HTTP_DEV_NO_AUTH` is not workspace-scoped
+    and is accepted in shared mode under `SPINE_ENV=development` (already a documented residual;
+    option: refuse it in shared mode).
+- **Skeptic B:** its report had not reached this close when these notes were written; the
+  orchestrator records it with AC 2.
+
+### Step 3 — gates at the closing tree
+
+Logs: SMP repo `tmp/init027-orchestration/i24/t010/`. Heavy legs ran under the shared heavy-suite
+lock. Go `go1.26.10` (go.mod's toolchain) for every Spine leg on the host.
+
+| Gate | Command | Result |
+|---|---|---|
+| CI `boundary-lint` | `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| CI `build` | `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | rc 0; "engine constructed and exercised; library surface is sound." (binaries deleted) |
+| CI `test` | `go test -p 4 -count=1 ./...` | rc 0, 41 packages ok, 0 failures |
+| CI `scenario-git-http` | every run step of the job, against an own PostgreSQL **18.6** database on `i23-pg` (the job's `postgres:18-bookworm` is 18.6 too) | every step rc 0, 0 skips; every required `--- PASS` present: `TestGitHTTP_*` 90, `TestBootstrapInternalAdmin_*` 26, `TestWorkflowLifecycle_*` 154, workflow policy 1, step CAS 12, step evidence 24, status lifecycle 37 + 1, governance 19 + 1, shared-mode scheduler 1 |
+| CI `git-floor` | `docker run --pull=never` of the local `golang:1.26-bookworm` (git 2.39.5; its own Go is 1.26.8), with the module cache's `go1.26.10` linux-arm64 toolchain copied into a tmpfs as `GOROOT` (`GOTOOLCHAIN=local`, `GOPROXY=off`, worktree and module cache read-only); the pinned `golang:1.26.10-bookworm` image is not present and was not pulled | `go1.26.10 linux/arm64`, `git version 2.39.5`. Both CI steps rc 0, plus: `gitpool`, `projection`, `worktreefs`, `githttp`, `gateway`, `dev/pincheck` in full; TASK-003/005/006 hook, budget, slot, probe and trusted-CIDR tests in `cmd/spine` and `workspace`; every `TestNeutralAttributes_*` path shape — all rc 0. Container removed. |
+| CI `vuln` | `GOFLAGS=-mod=readonly go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...` (needs the network for the vulnerability database; it was reachable) | exit 0, "No vulnerabilities found"; module-level only: chi GO-2026-5774/5775/5777 (`middleware.RealIP`, not imported). Go go1.26.10, DB updated 2026-10-27 21:16:18 UTC. Informational: `-tags integration,scenario -test ./...` also 0 reachable. |
+| CI `toolchain-parity` | `go test -count=1 -v ./dev/pincheck/`; `go run ./dev/pincheck`; `go run ./dev/pincheck -resolve` (registry and `git ls-remote`, no pull) | ok; "OK — toolchain go1.26.10; 3 golang reference(s) on one digest; 10 image(s) and 14 action(s) pinned" (both) |
+| CI `image-build` | `docker build` | **Not run**: building images is not allowed on this host (Docker VM disk). GitHub CI runs it. |
+| `go vet` | plain; `-tags integration`; `-tags scenario`; `-tags integration,scenario`; `GOOS=linux` plain and `-tags integration` | rc 0 ×6 |
+| `-race` | `go test -race -p 4 -count=1` on the 18 packages with Go changes in `49fad9c0..854a1e08` (`adapters/{git,gitpool,projection,scheduler}`, `core/{artifact,branchprotect,engine,evidence,workflow,worktreefs,yamlsafe}`, `dev/pincheck`, `service/cmd/spine`, `service/internal/{cli,gateway,githttp,workspace}`, `workflows`; `service/scenariotest/scenarios` is scenario-tagged only and ran in the suites below) | rc 0, 18 ok |
+| Integration | `go test -tags integration -p 1 -count=1 ./...` (own database plus a migrated registry database) | rc 1 only for the two known pre-existing failures (`TestAWSClient_Contract_LocalStack`, which needs LocalStack, and `TestRunModeDatabaseDefault`, both outside INIT-024's packages); 39 packages ok, 571 s |
+| Scenario | `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (own database plus a migrated registry) | 31 top-level and 59 total `--- FAIL` lines: exactly the known pre-existing set (TASK-001's branch run, TASK-009's base run; nothing new, nothing gone); 1,791 `--- PASS` lines. Every INIT-024 scenario test passes: TASK-001's three `TestScenario_*Starter*`/`PlanningStartWithoutActor*`, the four `TestWorkflowLifecycle_GatewayStarted*`/`*_GuardOn`, `TestRunnerCloneContext_AssignmentPayloadDrivesClone`. |
+| AC regression tests | every AC-named test of TASK-001 … TASK-009 that exists under that name, `go test -count=1 -v -run` by name in its 11 packages | 57 / 57 pass. The six AC names not in the tree are review-scratch PoC names whose committed ports carry other names (`TestZZSA1_*`, `TestGV_SoD_*`, `TestRV_*` ×3; each task's per-AC evidence names the port) and TASK-009's `TestGoModHasToolchain`, which its AC allows as "or a CI assertion" (`dev/pincheck`, above). |
+| golangci-lint v2.11.4 | `--new-from-rev 49fad9c0 ./...` plain / `--build-tags integration` / `--build-tags scenario` | 0 issues ×3 |
+| gosec | `--enable-only=gosec ./...` | 0 issues. With `--build-tags integration` one issue, G602 at `adapters/store/postgres_integration_test.go:1563`, in a file INIT-024 did not touch (0 with `--new-from-rev 49fad9c0`). |
+| gofmt | `gofmt -l` on the 156 Go files changed since `49fad9c0` | clean except `core/artifact/id_allocator.go` and `service/scenariotest/scenarios/planning_run_test.go`, both unformatted at `a560c210` already (left as they are) |
+| Modules | `go mod tidy -diff`; `go mod verify` | no diff; all modules verified |
+
+No gate left a file in the worktree (`git status` clean after each); every database created
+(`s24010_*`) was dropped, and no `ws_*` database or role was left.
+
+### Codex
+
+`codex review --base 49fad9c0` (the INIT-024 diff after TASK-001: 191 files, +32,012 / −941),
+plain, from the worktree; the model confirmed in each review sub-session's JSONL.
+
+| Round | Head | Review sub-session | Model | Result |
+|---|---|---|---|---|
+| 1 | `55ef529c` (code = `854a1e08`) | `01a18f34-3ba2-7612-82b2-1d2d49676772` | `gpt-6.1-sol` | `findings: []`, "patch is correct" (confidence 0.7), 148 s |
+| 2 | `fa68a2f1` (plus the step 5 docs) | `01a18f3d-5019-7cc1-a266-18de397932c5` | `gpt-6.1-sol` | `findings: []`, "patch is correct" (confidence 0.67), 216 s |
+
+Two clean rounds, no P1–P4 to disposition. Both reviews say their own broad test run did not
+finish (codex runs tests inside its time budget); the full suites are the gates above. A clean
+codex round on a 32k-line diff in under four minutes is a shallow review: the depth for this close
+comes from the gates, the skeptics and each task's own review rounds. The later commits
+(`1cdcb2f6`, `918af609`, `ab41a1be` and this notes commit) are Markdown only.
+
+### Step 4 — SMP compatibility at the pair
+
+SMP `21cc2e8a` (SMP local `main`, detached, 0 dirty files before and after; `.spine-revision`
+`49fad9c0`), `../spine` = this worktree (Go code = `854a1e08` throughout; the close commits are
+Markdown only), `GOFLAGS=-mod=readonly`, go1.26.10.
+
+| Leg | Result |
+|---|---|
+| `go build ./...`; `go vet` plain / `-tags integration` / `-tags scenario ./scenariotest/...` / `-tags faultinject` | rc 0 ×5 |
+| `go test -race -p 4 -count=1` on every SMP package importing a Spine package INIT-024 changed (from `go list` imports and test imports: the module root, `cmd/customer-app`, `internal/customer/{executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,spinecore,spineembedded,workspace}`) | 11 ok, 0 failures |
+| ci.yml integration job, "Spine runtime integration suites" (`dev/testgate`, `spinecore`, `spineembedded`, `runner`, `executionreadiness`; platform and spine-runtime databases migrated with `dev/apply-migrations`) | PASS: 2,463 tests, 0 failed, 3 allowed skips (`ru_maxrss` is Linux-only) |
+| githttp suite (`dev/testgate … -tags integration ./internal/customer/githttp/`) | PASS: 590 tests, 0 failed, 1 allowed skip (Linux RSS) |
+
+Known and not a break: SMP's listing limit (`SMP_GIT_MAX_OUTPUT_BYTES`, 16 MiB) is below Spine's
+`git.DefaultMaxListingBytes` and the tree budget — an SMP TASK-018 carry (hand-off below).
+
+### Step 5 — documentation reconciliation (`fa68a2f1`, `1cdcb2f6`, `918af609`, `ab41a1be`; doc-only)
+
+- **`KNOWN-LIMITATIONS.md`.** The git floor bullet still put `spine serve` at git 2.30; it now
+  names 2.38 (TASK-003: the budgeted merge uses `git merge-tree --write-tree`). "Not covered"
+  separates the checkout budget from the mutate deadline and says both are on in `spine serve` and
+  opt-in for embedders. The `IncrementalSync` auto-fallback was described as TASK-010 work; it is a
+  recorded follow-up (below). New residual: a tree on folding storage can stay marked for
+  renormalisation (integration review round 7, P4). From the cross-task review (`918af609`): the
+  "totals bound one tree at a time" residual claimed only concurrent worktrees of different
+  branches; it now states that the total bytes of checkouts in flight are not bounded, per branch or
+  across branches (refused writes included), with the operator levers; `ab41a1be` names INIT-024
+  TASK-011 as its fix.
+- **`architecture/security-model.md` §7.4.** The git HTTP endpoint's controls after INIT-024:
+  workspace-bound token-less reads (N-2), the checkout budget at pre-receive and on every server
+  checkout (N-1), the storage requirement (N-8), the apply-time admission (N-9, §7.3) and fair
+  slots (N-13), with the development read flag (`1cdcb2f6`) and the in-flight residual
+  (`918af609`). The section said nothing about the endpoint before.
+- **`docs/integration-guide.md` §7.** Only the git protocol's own paths reach `git-http-backend`
+  (TASK-004); the route list did not say so.
+- **Beyond the four named documents** (they contradicted shipped behaviour):
+  `architecture/git-integration.md` (reserved and home names no longer fall back by DWIM; `spine
+  serve` needs git 2.38) and `docs/git-push-guide.md` §5 (rows for the folding-storage `403`, the
+  slot `503`, the re-check and command-read refusals, and the further causes of `500 push gate
+  unavailable`).
+- **`CHANGELOG.md`: checked, unchanged.** The nine INIT-024 sections are in landing order (newest
+  first: TASK-005, 004, 003, 008, 007, 006, 002, 009, 001), no section or bullet repeats another,
+  and every cross-reference ("above", "below", `KNOWN-LIMITATIONS.md` section names and items)
+  resolves.
+- Checked and consistent across tasks (no edit needed): the uniform `401` (TASK-006 on `/git`,
+  TASK-007 in shared mode, TASK-008's pool timeouts), the git slot defaults (2 / 4 / 8 shared,
+  8 / 8 / 8 single), the listing and diff limits against the tree budget (TASK-003 × TASK-004),
+  the pre-receive hook's two jobs (TASK-003 × TASK-005), `SPINE_ENV` (TASK-007) in every doc
+  that mentions it, and no remaining "follow-up"/"not yet enforced" text for N-1, N-2, N-8, N-9,
+  N-13 or P3-27.
+
+### SMP hand-off (owner of the bump: SMP INIT-027 EPIC-005 TASK-018)
+
+SMP's `.spine-revision` is `49fad9c0` (SMP EPIC-004 TASK-012: INIT-023 complete + TASK-001).
+SMP TASK-018 bumps it to the closing commit; the range `49fad9c0..closing` holds TASK-002 … TASK-009.
+
+| Spine task | What SMP adopts or verifies at the bump | SMP owner |
+|---|---|---|
+| TASK-001 (N-3) | Already in SMP's pin. Inert while SMP's separation of duties is off; if SMP turns it on, `CreateEntry` puts the member's `human-<uuid>` handle on the context (`domain.WithActor`) before `StartPlanningRun`, or every planning start is refused. Re-run the separation-of-duties tests with it on. | SMP TASK-018 (SMP EPIC-004 TASK-011 owner question 2) |
+| TASK-002 (N-4, N-5, N-7) | **Shared:** `workflow.Parse` refuses a second non-empty YAML document (the projection quarantines the file). Re-run SMP's workflow corpus and projection suites. N-5's backstop matters once SMP turns the guard on (SMP EPIC-004 TASK-010); N-4 is inert (SMP's corpus already uses `invalid`). | SMP TASK-018 |
+| TASK-003 (N-1) | Spine's budget is opt-in for embedders; nothing changes at the bump. SMP's own N-1 half — the byte budget in `gitread.CheckTreeDiff`, the merge result measured in `RealGitOperator.MergeBound`, and the pool's whole-tree measure in `cliWorktree.Add`, which replaced `boundRunBranchCheckout` — landed as SMP TASK-011 (SMP local `main` `21cc2e8a`, not pushed). At the bump: one too-large error identity with `git.ErrTreeTooLarge`, keeping the stricter limit; **one shared Spine constant for the neutral-attributes line** (`git.NeutralCheckoutAttributes`; SMP's `executionmeta.NeutralCheckoutAttributes` carries the same text today) so `info/attributes` never has two writers with different text; optionally a differential test against `git.TreeBudget.Check`, or `git.WithTreeBudget` on SMP's Spine clients. | SMP TASK-011 (landed), SMP TASK-018 |
+| TASK-004 (N-6, N-10, N-11, N-12) | **Shared:** listings refuse less (kept bytes, record ceiling), reserved/home names with no branch are NotFound, `Diff` reports gitlinks hidden by submodule settings, `Log` parses strictly. Re-run `gitread`, `projectionwriter` and `spinecore`. **N-11 in SMP:** SMP's own history reader still delimits with the fixed `---END---` (`internal/customer/spinecore/artifacthistoryreader.go:178`, `:228`) — the defect TASK-004 fixed in Spine; SMP fixes it. **Listing limit:** `gitread.NewClient` passes `SMP_GIT_MAX_OUTPUT_BYTES` (16 MiB), below `git.DefaultMaxListingBytes` (~17.2 MiB) and the tree budget's 16 MiB of path bytes: raise it to at least `git.DefaultMaxListingBytes`, or pass `git.WithTreeBudget` (a carry, not a break). `gitread.resolveRevLikeSpine` documents only rules 1–4 (behaviour correct; doc drift). `CountChangedPaths` is optional (owner question 2 default: SMP keeps counting through `Diff`). | SMP TASK-018 |
+| TASK-005 (N-8, N-9, N-13) | No shared code. Parity for SMP's own `/git/{workspace}` gateway: a storage probe refusing receive-pack on folding storage, the apply-time admission re-check, and fair slots taken after a deadlined command-section read (the pattern is in TASK-005's "SMP parity"). | SMP TASK-018 (parity check; a new SMP task if the gateway lacks them) |
+| TASK-006, TASK-007, TASK-008 | Standalone only (TASK-007's `core/evidence` fields are additive; SMP does not import the package). Gates only. | SMP TASK-018 (range audit) |
+| TASK-009 | **MVS:** Spine's floors (pgx v5.9.2, x/text v0.42.0, x/sync v0.23.0, `go 1.26.0`) equal SMP's selections, so SMP's build list does not move; run `go mod tidy` at the bump to confirm. SMP's own toolchain is SMP TASK-012. | SMP TASK-018, SMP TASK-012 |
+
+### Owner questions
+
+**Initiative §7d** (defaults recorded; answers pending the owner):
+
+1. **Landing and push order — HOLD** (below).
+2. **TASK-001 before INIT-023's close — default taken.** TASK-001 merged on Spine `main`
+   (`83d82409`) before integration A, and SMP EPIC-004 TASK-012 pinned `49fad9c0` (INIT-023
+   complete + TASK-001), so one SMP bump carried both.
+3. **Standalone defaults — applied as stated:** the tree budget has no off switch (only larger
+   limits); the pre-receive hook is on whenever receive-pack is; an unbound trusted-CIDR list
+   refuses to start in shared mode; `SPINE_ENV` is required; SSE streams revalidate on every
+   heartbeat; the scheduler runs in every mode.
+4. **P3-10 and P3-19 stay PARTIAL — default accepted;** no task.
+5. **TASK-008 stays here — default,** labelled functional.
+
+**Per task** (each task's Implementation Notes record its defaults, all pending the owner):
+TASK-001 OQ1 fail closed for unrecorded starters, OQ2 `ErrUnauthorized`; TASK-002 OQ1 N-7 on for
+every reader, OQ2 backstop at any depth, OQ3 backstop always on while the guard is on; TASK-003
+OQ1 200,000 entries / 2 GiB / 16 MiB, OQ2 a 2-minute mutate deadline in `spine serve` (none in the
+library), and the orchestrator ruling that phase 4's fail-closed over-budget HEAD (no line, no
+marker, nothing written) is accepted; TASK-004 OQ1 narrow DWIM, OQ2 `Diff` fallback for operators
+without `ChangedPathCounter`, open question 1 no automatic rebuild fallback (follow-up below);
+TASK-005 OQ1 per the orchestrator ruling — shared mode 2 / 4 / 8 (per principal, per workspace,
+process), single mode 8 / 8 / 8 — OQ2 receive-pack refused on folding storage, reads served, OQ3
+the re-check runs the same admission and freeze; TASK-006 OQ1 refuse to start, OQ2 no job-scoped
+tokens; TASK-007 OQ1 the 30 s heartbeat, OQ2 refuse to start when `SPINE_ENV` is unset, OQ3
+`verified` + `source_ref` + `unverified_repositories`; TASK-008 OQ1 kept, OQ2 4 workspaces, OQ3
+no per-workspace startup recovery, OQ4 an invalid value refuses to start; TASK-009 OQ1 floors equal
+SMP's selections, OQ2 fail on any reachable advisory.
+
+**Owner-only actions** (tracked, not performed): a Spine `main` ruleset (PR and CI required, no
+force push); approval for all outside contributors; "allowed actions: selected" with SHA pinning
+(possible now that TASK-009 pinned every action); revoke the PAT behind SMP's unused
+`SPINE_REPO_TOKEN` secret and delete the secret.
+
+### Follow-ups (recorded, not done here)
+
+- **N-1 is bounded per checkout, merge and push; aggregate concurrency is not bounded** (recorded
+  residual; follow-up task **INIT-024 TASK-011**, "Aggregate checkout bound: one writer per branch,
+  bounded in-flight checkout bytes", on its own branch
+  `init/INIT-024-TASK-011-aggregate-checkout-bound`:
+  `/initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/tasks/TASK-011-aggregate-checkout-bound.md`). The total bytes of checkouts in flight at
+  once, per branch or across branches, need a bound: one writer per (repository, branch) before
+  anything is written, and a process-wide allowance on measured bytes (skeptic A, P3;
+  `KNOWN-LIMITATIONS.md`, "Checkout Budget").
+- `IncrementalSync` falls back to `FullRebuild` on its own when its window's `Diff` is refused as
+  too large (TASK-004 open question 1; today an operator rebuild recovers it).
+- A tree on case- or normalization-insensitive storage can keep a renormalisation marker that has
+  no readable record: treat the paths that survive the rewrite from the index as recorded, Warn
+  once and clear the marker (integration review round 7, P4; residual in `KNOWN-LIMITATIONS.md`).
+- The rest stay where their tasks recorded them: job-scoped clone tokens and the single-mode
+  no-auth `503` (TASK-006), a per-workspace build rate limit or negative cache (TASK-007),
+  per-workspace startup recovery and paged scans (TASK-008), the owner actions above (TASK-009).
+
+### Push decision: HOLD
+
+Nothing from INIT-024 is pushed. Spine is public and these artifacts and fixes describe the N-1 and
+N-2 defects. Owner question 1's preconditions on Spine hold locally (TASK-003 and TASK-006 are on
+Spine local `main` at `854a1e08`), and SMP's own N-1 half is on SMP local `main` (`21cc2e8a`,
+SMP TASK-011), but nothing is pushed on either side, the bump that reconciles SMP with Spine's API is
+SMP TASK-018, and the owner has not approved. The push waits for the owner's approval; Spine's
+commits reach GitHub first, then SMP's (SMP EPIC-004 push rule).
+
+### Statuses
+
+TASK-001 … TASK-009 stay **In Progress**, and so does this task: they move to Completed only after
+GitHub CI runs green on the pushed closing commit (owner-gated), as in INIT-023. The five epics and
+the initiative are left as they are (Pending), as INIT-023's are; they move with the tasks.
+TASK-011, which the cross-task review added, is on its own branch and is not in this closing tree;
+the initiative's exit criteria (§8) include it. Whether the closing commit waits for it is the
+orchestrator's and the owner's call.
+
+### Acceptance criteria at this commit
+
+| AC | State |
+|---|---|
+| 1 | Not yet: statuses are owner-gated (above). |
+| 2 | Skeptic A: no new P1 or P2, both P2 PoCs refused at the closing tree for the right reason (its P3 became Spine INIT-024 TASK-011). Skeptic B: with the orchestrator. |
+| 3 | Done for this close's part: every AC-named regression test in the tree passes by name (57 / 57) and every committed test passes in the gates above (unit, `-race`, integration, scenario, git-floor). The ports of the review PoCs carry their own names (each task's per-AC evidence); the PoCs themselves are the skeptics' (step 2). |
+| 4 | Done: every gate in step 3 passed (known pre-existing failures only) and the SMP pair passed, SMP `21cc2e8a` recorded. `image-build` is GitHub CI's. |
+| 5 | Done (`fa68a2f1`, `1cdcb2f6`, `918af609`, `ab41a1be`). |
+| 6 | The candidate is named above; the closing commit is the orchestrator's merge of this branch. |
+| 7 | Defaults recorded (above and in each task). |
+| 8 | HOLD, with the reason above. |
+
+### Not run
+
+- CI `image-build` (`docker build`): no image builds on this host; GitHub CI runs it.
+- `git-floor` in the exact pinned `golang:1.26.10-bookworm` image: not present locally and not
+  pulled; the job ran in the local `golang:1.26-bookworm` with go.mod's go1.26.10 toolchain as
+  `GOROOT`, so the git (2.39.5) and the Go (1.26.10) are the pinned job's.
+- The SMP gates beyond the compatibility gate (golangci, the `dbstructure` check, the scenario suite,
+  CI images, codex at the pair): SMP TASK-018's, at the bump.
+- The two P2 PoCs and the adversarial cross-task search: the skeptics' (step 2), not repeated here.
+- GitHub CI on a pushed closing commit: owner-gated (push held).
