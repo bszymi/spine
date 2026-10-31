@@ -260,3 +260,28 @@ func CheckBudgetGitVersionOutputForTest(line string) error { return checkBudgetG
 func (c *CLIClient) SetMergeResultHookForTest(hook func(tree string)) {
 	c.mergeResultHook = hook
 }
+
+// InflightHeldForTest returns the summed weight the process's in-flight
+// checkout gate has admitted (INIT-024 TASK-011).
+func InflightHeldForTest() int64 {
+	checkoutsInFlight.mu.Lock()
+	defer checkoutsInFlight.mu.Unlock()
+	return checkoutsInFlight.held
+}
+
+// InflightWaitersForTest returns how many admissions wait in the gate.
+func InflightWaitersForTest() int {
+	checkoutsInFlight.mu.Lock()
+	defer checkoutsInFlight.mu.Unlock()
+	return checkoutsInFlight.waiters.Len()
+}
+
+// AdmitCheckoutForTest weighs weight in the process gate under ceiling,
+// as EnterBranch does for a measured tree (op "worktree").
+func AdmitCheckoutForTest(ctx context.Context, weight, ceiling int64) (func(), error) {
+	return admitCheckout(ctx, "worktree", weight, CheckoutLimits{InflightMaxBytes: ceiling})
+}
+
+// RepoClaimKeyForTest exposes the key EnterBranch claims a branch under:
+// the repository's canonical git common directory.
+func RepoClaimKeyForTest(repoDir string) string { return repoClaimKey(repoDir) }

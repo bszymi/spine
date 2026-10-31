@@ -1,0 +1,62 @@
+package artifact_test
+
+// INIT-024 TASK-011: how the two new EnterBranch refusals reach an API
+// caller through artifact.Service. A branch another write scope holds
+// keeps the classification git's own refusal had (git_error); a wait for
+// room under the in-flight checkout ceiling that ends first is retryable,
+// so unavailable (503).
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/artifact"
+	"github.com/bszymi/spine/core/branchprotect/config"
+	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/testutil"
+)
+
+func TestCreate_CheckoutRefusalsKeepTheirClassification(t *testing.T) {
+	svc, repo, _, _ := newServiceWithEvents(t, []config.Rule{})
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	t.Setenv("TMPDIR", t.TempDir())
+	ctx := context.Background()
+	testutil.WriteFile(t, repo, "notes/seed.md", string(make([]byte, 1024)))
+	claimGit(t, repo, nil, "add", "notes/seed.md")
+	claimGit(t, repo, nil, "commit", "-q", "-m", "seed")
+	claimGit(t, repo, nil, "branch", "spine/run/held", "main")
+	claimGit(t, repo, nil, "branch", "spine/run/other", "main")
+	if err := git.EnsureNeutralCheckoutAttributes(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	st, err := git.MeasureTree(ctx, git.NewCLIClient(repo), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: st.TotalBytes + st.TotalBytes/2})
+	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
+
+	held, err := git.EnterBranch(ctx, repo, "spine/run/held", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Cleanup()
+
+	_, err = svc.Create(artifact.WithWriteContext(operatorCtx(), artifact.WriteContext{Branch: "spine/run/held"}),
+		"governance/held.md", governanceContent)
+	var se *domain.SpineError
+	if !errors.As(err, &se) || se.Code != domain.ErrGit || !strings.Contains(se.Message, git.ErrBranchInUse.Error()) {
+		t.Errorf("held branch: err = %v, want git_error naming the held branch", err)
+	}
+
+	wctx, cancel := context.WithTimeout(artifact.WithWriteContext(operatorCtx(), artifact.WriteContext{Branch: "spine/run/other"}), 200*time.Millisecond)
+	defer cancel()
+	_, err = svc.Create(wctx, "governance/other.md", governanceContent)
+	if !errors.As(err, &se) || se.Code != domain.ErrUnavailable || !strings.Contains(se.Message, git.CheckoutsInFlightMessage) {
+		t.Errorf("ceiling full until the request ended: err = %v, want unavailable", err)
+	}
+}

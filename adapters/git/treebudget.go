@@ -55,6 +55,11 @@ package git
 // in that line. (Review round 2 replaced an attribute scanner that tried
 // to predict git's expansion and kept missing parser corners.)
 //
+// The budget bounds one tree at a time. What concurrent branch-scoped
+// writes have on the shared temporary disk together — one writer per
+// branch, and the in-flight ceiling CheckoutLimits.InflightMaxBytes — is
+// checkout_admission.go (INIT-024 TASK-011).
+//
 // What is not measured (KNOWN-LIMITATIONS.md, "Checkout budget"): the
 // interval between the measure and a checkout of a branch by name: a
 // branch that moves in between is checked out at its new tip. In
@@ -90,8 +95,10 @@ import (
 
 // ErrTreeTooLarge is what every checkout-budget refusal matches with
 // errors.Is: the tree a checkout, merge or restore was about to write
-// exceeds the client's TreeBudget. A retry cannot shrink the tree. It is
-// distinct from ErrBlobTooLarge and ErrOutputTooLarge (read bounds).
+// exceeds the client's TreeBudget, or (EnterBranch) the in-flight
+// checkout ceiling on its own (TreeLimitInflightBytes). A retry cannot
+// shrink the tree. It is distinct from ErrBlobTooLarge and
+// ErrOutputTooLarge (read bounds).
 var ErrTreeTooLarge = errors.New("git: tree exceeds the checkout budget")
 
 // TreeBudget bounds what writing one tree to disk may cost. A field <= 0
@@ -151,6 +158,11 @@ const (
 	TreeLimitEntries    TreeLimit = "entries"
 	TreeLimitTotalBytes TreeLimit = "total_bytes"
 	TreeLimitPathBytes  TreeLimit = "path_bytes"
+	// TreeLimitInflightBytes is the in-flight checkout ceiling
+	// (CheckoutLimits.InflightMaxBytes, INIT-024 TASK-011): a branch
+	// scope's tree larger than the ceiling on its own could never be
+	// admitted. Seen is the tree's measured bytes.
+	TreeLimitInflightBytes TreeLimit = "inflight_bytes"
 )
 
 // TreeTooLargeError is the typed cause of a checkout-budget refusal. It
@@ -181,6 +193,8 @@ func (e *TreeTooLargeError) Error() string {
 		return fmt.Sprintf("the tree's paths total more than %d bytes (checkout budget MaxPathBytesTotal)", e.Max)
 	case TreeLimitTotalBytes:
 		return fmt.Sprintf("the tree's files total more than %d bytes (checkout budget MaxTotalBytes)", e.Max)
+	case TreeLimitInflightBytes:
+		return fmt.Sprintf("the tree's files total more than %d bytes (in-flight checkout ceiling InflightMaxBytes)", e.Max)
 	}
 	return fmt.Sprintf("the tree exceeds the checkout budget (%s > %d)", e.Limit, e.Max)
 }
@@ -220,8 +234,8 @@ func (e *MutateTimeoutError) Unwrap() []error {
 }
 
 // CheckoutLimits is what a client holds its checkouts and merges to.
-// The zero value is none: no budget and no deadline (the library
-// default, today's behaviour).
+// The zero value is none: no budget, no deadline and no in-flight
+// ceiling (the library default, today's behaviour).
 type CheckoutLimits struct {
 	// Budget, when non-nil, is measured before every checkout, merge and
 	// restore (its unset fields mean their defaults).
@@ -229,6 +243,18 @@ type CheckoutLimits struct {
 	// MutateTimeout, when > 0, is the wall-clock deadline of every local
 	// mutating git command.
 	MutateTimeout time.Duration
+	// InflightMaxBytes, when > 0, bounds the summed measured bytes
+	// (TreeStats.TotalBytes) of the trees every branch-scoped write of
+	// the process (EnterBranch with a branch) has on disk at once, from
+	// its admission to its Cleanup (INIT-024 TASK-011,
+	// checkout_admission.go). An entry waits, under its context and the
+	// mutate deadline, until its tree fits; a tree over the ceiling on its
+	// own is refused. The weight is the measure, so a ceiling brings the
+	// default Budget with it when none is set. 0 (the default) is no
+	// aggregate bound. Other checkouts (Checkout, Merge, the shared tree's
+	// restore, Clone) rewrite or create a workspace's own tree, not a
+	// temporary one, and are not weighed.
+	InflightMaxBytes int64
 }
 
 func (l CheckoutLimits) clone() CheckoutLimits {
@@ -238,6 +264,19 @@ func (l CheckoutLimits) clone() CheckoutLimits {
 	}
 	if l.MutateTimeout < 0 {
 		l.MutateTimeout = 0
+	}
+	if l.InflightMaxBytes < 0 {
+		l.InflightMaxBytes = 0
+	}
+	return l.withCeilingBudget()
+}
+
+// withCeilingBudget gives limits with an in-flight ceiling and no budget
+// the default budget: the ceiling weighs each tree by its measure.
+func (l CheckoutLimits) withCeilingBudget() CheckoutLimits {
+	if l.InflightMaxBytes > 0 && l.Budget == nil {
+		b := DefaultTreeBudget()
+		l.Budget = &b
 	}
 	return l
 }
@@ -253,7 +292,10 @@ func (l CheckoutLimits) over(base CheckoutLimits) CheckoutLimits {
 	if l.MutateTimeout > 0 {
 		out.MutateTimeout = l.MutateTimeout
 	}
-	return out
+	if l.InflightMaxBytes > 0 {
+		out.InflightMaxBytes = l.InflightMaxBytes
+	}
+	return out.withCeilingBudget()
 }
 
 // processCheckoutLimits is the process default (SetDefaultCheckoutLimits).
@@ -261,12 +303,14 @@ var processCheckoutLimits atomic.Pointer[CheckoutLimits]
 
 // SetDefaultCheckoutLimits installs the checkout budget and mutate
 // deadline of every CLIClient in this process that sets neither itself,
-// including clients built before the call, and of EnterBranch. Each
+// including clients built before the call, and of EnterBranch (with the
+// in-flight ceiling, which only EnterBranch applies). Each
 // limit a client sets (WithTreeBudget, WithMutateTimeout) replaces the
 // default one; no option removes it, so a process that sets a budget
 // has no client without one. `spine serve` calls it once at startup with
-// the SPINE_GIT_TREE_* and SPINE_GIT_MUTATE_TIMEOUT values. A process
-// that never calls it — an embedder — keeps today's behaviour.
+// the SPINE_GIT_TREE_*, SPINE_GIT_MUTATE_TIMEOUT and
+// SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES values. A process that never
+// calls it — an embedder — keeps today's behaviour.
 func SetDefaultCheckoutLimits(l CheckoutLimits) {
 	cp := l.clone()
 	processCheckoutLimits.Store(&cp)

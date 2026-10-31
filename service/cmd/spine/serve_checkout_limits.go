@@ -17,15 +17,24 @@ import (
 // client (INIT-024 TASK-003).
 const EnvGitMutateTimeout = "SPINE_GIT_MUTATE_TIMEOUT"
 
-// loadCheckoutLimits reads the checkout budget and the mutate deadline of
-// `spine serve` (INIT-024 TASK-003, review finding N-1). Both are on by
-// default in standalone (INIT-024 owner question 3): an unset or empty
-// variable means its default (git.DefaultTreeMaxEntries,
+// EnvGitCheckoutInflightMaxBytes is the in-flight checkout ceiling of
+// `spine serve` (INIT-024 TASK-011): the most measured bytes the trees of
+// its concurrent branch-scoped writes may have on the temporary disk at
+// once (git.CheckoutLimits.InflightMaxBytes).
+const EnvGitCheckoutInflightMaxBytes = "SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES"
+
+// loadCheckoutLimits reads the checkout budget, the mutate deadline and
+// the in-flight checkout ceiling of `spine serve` (INIT-024 TASK-003,
+// review finding N-1; TASK-011 for the ceiling). All are on by default in
+// standalone (INIT-024 owner question 3): an unset or empty variable
+// means its default (git.DefaultTreeMaxEntries,
 // git.DefaultTreeMaxTotalBytes, git.DefaultTreeMaxPathBytesTotal,
-// git.DefaultMutateTimeout); a positive integer (bytes, for the byte
-// limits) or a positive Go duration replaces it. Anything else — zero, a
-// negative number, a unit suffix, a typo — refuses startup: there is no
-// off switch, only other limits, and a typo must not silently mean the
+// git.DefaultMutateTimeout; for the ceiling, the effective per-tree byte
+// limit, so at most one maximal tree is in flight and smaller ones
+// proceed together); a positive integer (bytes, for the byte limits) or a
+// positive Go duration replaces it. Anything else — zero, a negative
+// number, a unit suffix, a typo — refuses startup: there is no off
+// switch, only other limits, and a typo must not silently mean the
 // default.
 func loadCheckoutLimits() (git.CheckoutLimits, error) {
 	var b git.TreeBudget
@@ -56,7 +65,15 @@ func loadCheckoutLimits() (git.CheckoutLimits, error) {
 		}
 		d = parsed
 	}
-	return git.CheckoutLimits{Budget: &b, MutateTimeout: d}, nil
+	ceiling := b.MaxTotalBytes
+	if raw := strings.TrimSpace(os.Getenv(EnvGitCheckoutInflightMaxBytes)); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n <= 0 {
+			return git.CheckoutLimits{}, fmt.Errorf("%s=%q: want a positive integer of bytes (the in-flight checkout ceiling has no off switch; set a larger one instead)", EnvGitCheckoutInflightMaxBytes, raw)
+		}
+		ceiling = n
+	}
+	return git.CheckoutLimits{Budget: &b, MutateTimeout: d, InflightMaxBytes: ceiling}, nil
 }
 
 // installCheckoutLimits loads the limits and makes them the process
@@ -83,6 +100,16 @@ func installCheckoutLimits(log *slog.Logger) error {
 		"max_entries", l.Budget.MaxEntries,
 		"max_total_bytes", l.Budget.MaxTotalBytes,
 		"max_path_bytes", l.Budget.MaxPathBytesTotal,
-		"mutate_timeout", l.MutateTimeout.String())
+		"mutate_timeout", l.MutateTimeout.String(),
+		"inflight_max_bytes", l.InflightMaxBytes)
+	if l.InflightMaxBytes < l.Budget.MaxTotalBytes {
+		// Coherent but easy to miss: a branch-scoped write of a tree
+		// between the two is refused, although the budget admits it.
+		log.Warn("the in-flight checkout ceiling is below the per-tree byte limit: a branch-scoped write of a larger tree is refused",
+			"inflight_max_bytes", l.InflightMaxBytes,
+			"max_total_bytes", l.Budget.MaxTotalBytes,
+			"ceiling_var", EnvGitCheckoutInflightMaxBytes,
+			"tree_var", githttp.EnvTreeMaxBytes)
+	}
 	return nil
 }
