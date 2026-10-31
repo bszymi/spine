@@ -15,28 +15,39 @@ concurrent writes to different branches each got the full budget. No runtime sch
 
 ### Security
 
-- **One write scope per branch.** `git.EnterBranch` claims the branch for the repository (its git
-  common directory) in-process before it looks the branch up, measures it or creates the temporary
-  directory, and holds the claim until the scope's Cleanup has removed the worktree. A second
-  concurrent write to the branch is refused at once, before any git process runs and before anything
-  is written (it used to write the tree and then be refused by git's "already checked out" guard,
-  which could also let several worktrees attach to one branch).
-- **Bounded in-flight checkout bytes.** `spine serve` admits a branch-scoped write only while the
-  measured trees of every open branch-scoped write stay within `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`
-  (default: the per-tree byte limit, so at most one maximal tree at a time while smaller trees
-  proceed together). A write that does not fit waits in arrival order; one still waiting when its
-  request ends or after the mutate deadline fails `503` (retryable); a tree larger than the ceiling
-  on its own is refused. The weight is returned only after the worktree is gone.
+- **One write scope per branch.** `git.EnterBranch` claims the branch for the repository in-process
+  before it looks the branch up, measures it or creates the temporary directory, and holds the claim
+  until the scope's Cleanup has removed the worktree. The repository is identified by its git common
+  directory's device and inode (found upward from the given directory, as git does), so every
+  spelling of its path is one repository. A second concurrent write to the branch is refused at
+  once, before any git process runs and before anything is written (it used to write the tree and
+  then be refused by git's "already checked out" guard, which could also let several worktrees
+  attach to one branch).
+- **Bounded, fair in-flight checkout weight.** `spine serve` admits a branch-scoped write only while
+  the weights of every open branch-scoped write stay within `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`.
+  A tree weighs its file bytes plus 4096 per entry, so trees of many empty files or directories are
+  bounded too. Admission is fair across repositories (workspaces in shared mode): each has its own
+  queue, served in turn, and holds at most half the ceiling (one tree heavier than half only while
+  it has nothing else in flight), so one workspace's waiting writes never hold up another's that
+  fits. A write that does not fit waits; one still waiting when its request ends or after the mutate
+  deadline fails `503` (retryable); a tree heavier than the ceiling on its own is refused. The weight
+  is returned only after the worktree is gone, and a branch-scoped write now pushes to origin after
+  its scope is released.
 
 ### Changed (operators)
 
 - New variable `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`: a positive integer of bytes; anything else
-  refuses to start; a value below `SPINE_GIT_TREE_MAX_BYTES` logs a startup warning (a branch-scoped
-  write of a tree between the two is refused). The bound is per process; replicas sharing a
+  refuses to start. Unset, it is twice `SPINE_GIT_TREE_MAX_BYTES`, raised to one maximal tree's
+  weight (`SPINE_GIT_TREE_MAX_BYTES` + 4096 x `SPINE_GIT_TREE_MAX_ENTRIES`) when that is heavier:
+  4 GiB with the defaults. A value below a maximal tree's weight logs a startup warning (a
+  branch-scoped write of a heavier tree is refused). The bound is per process; replicas sharing a
   temporary disk each have their own.
 - Concurrent writes with a run's write context to the same run branch: one proceeds and the others
   fail `git_error` at once, where before git refused most of them after writing (and sometimes let
   two through, one of which then failed at commit). Retry after the first has finished.
+- One workspace can no longer fill the in-flight room: it holds at most half of it, and its waiting
+  writes do not delay other workspaces'. A large tree can still wait behind a steady stream of other
+  workspaces' smaller writes until its deadline (no reservation).
 
 ### Changed (embedders)
 
@@ -48,13 +59,19 @@ concurrent writes to different branches each got the full budget. No runtime sch
   `git_error`). The claim's key is derived in-process (no extra git process). `WriteScope.Cleanup`
   of a branch scope now runs its removal once however often it is called.
 - **New limit field, opt-in.** `git.CheckoutLimits.InflightMaxBytes` (0, the default: no aggregate
-  bound) weighs every branch scope of the process in one FIFO gate, from admission to Cleanup. A
-  ceiling set without a `Budget` brings the default budget (the weight is the measure). New API:
-  `ErrBranchInUse`; `ErrCheckoutsInFlight` with the typed cause `*InflightWaitError{Weight, Ceiling,
-  Err}` (matches the context's error) inside `*GitError{Kind: ErrKindTransient, Message:
-  CheckoutsInFlightMessage}`, which the artifact and workflow services report as `unavailable`;
-  `TreeLimitInflightBytes` (a tree over the ceiling: `ErrTreeTooLarge`, permanent). No interface
-  gains a method.
+  bound) weighs every branch scope of the process in one gate — a queue per repository served
+  round-robin, at most half the ceiling per repository — from admission to Cleanup. With a ceiling
+  and no `Budget`, `EnterBranch` alone measures against the default budget to weigh its tree; the
+  process default and other clients are unchanged. New API: `ErrBranchInUse`; `ErrCheckoutsInFlight`
+  with the typed cause `*InflightWaitError{Weight, Ceiling, Err}` (matches the context's error)
+  inside `*GitError{Kind: ErrKindTransient, Message: CheckoutsInFlightMessage}`, which the artifact
+  and workflow services report as `unavailable`; `TreeLimitInflightBytes` (a tree over the ceiling:
+  `ErrTreeTooLarge`, permanent); `InflightEntryWeight`, `InflightWeight(TreeStats)` and
+  `TreeBudget.MaxInflightWeight()` (an embedder can weigh its own checkouts the same way). No
+  interface gains a method.
+- `artifact.Service` pushes a branch-scoped write to origin after releasing the write scope (the
+  branch is read inside it); the push and its error handling are otherwise unchanged, and an
+  in-place write pushes inside its scope as before.
 
 ---
 

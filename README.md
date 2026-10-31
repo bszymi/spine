@@ -60,7 +60,7 @@ spine validate --all
 | `SPINE_GIT_HTTP_DEV_NO_AUTH` | Development only: `/git` clones and fetches need no token. Refused at startup unless `SPINE_ENV=development`; pushes always need a token. |
 | `SPINE_GIT_TREE_MAX_ENTRIES`, `SPINE_GIT_TREE_MAX_BYTES`, `SPINE_GIT_TREE_MAX_PATH_BYTES` | Checkout budget (defaults 200000 entries, 2147483648 bytes, 16777216 path bytes): a tree over it is never checked out, merged, cloned or accepted in a push. Positive integers only (no off switch); an invalid value refuses to start. Needs git >= 2.38. See `KNOWN-LIMITATIONS.md` "Checkout Budget". |
 | `SPINE_GIT_MUTATE_TIMEOUT` | Deadline of every local mutating git command (default `2m`; a positive Go duration). |
-| `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES` | Most measured bytes the trees of concurrent branch-scoped writes may hold on the temporary disk at once (default: the per-tree byte limit; a positive integer). A write that does not fit waits; one still waiting at the end of its request or the mutate deadline fails `503`. See `KNOWN-LIMITATIONS.md` "Checkout Budget". |
+| `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES` | Most weight (file bytes plus 4096 per entry) the trees of concurrent branch-scoped writes may hold on the temporary disk at once (default: twice the per-tree byte limit, or one maximal tree's weight if heavier — 4 GiB with the defaults; a positive integer). Fair across workspaces: each holds at most half. A write that does not fit waits; one still waiting at the end of its request or the mutate deadline fails `503`. See `KNOWN-LIMITATIONS.md` "Checkout Budget". |
 
 ### Integrations
 
