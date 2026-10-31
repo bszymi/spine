@@ -921,3 +921,119 @@ func TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved(t *testing.T) {
 		t.Errorf("gate holds %d, want 0", h)
 	}
 }
+
+// installBranchMover puts a git wrapper first on PATH that moves ref of
+// repo when git runs "<cmd1> <cmd2>": to the next commit of commits on
+// every such run (round-robin), before it execs the real git.
+func installBranchMover(t *testing.T, repo, ref, cmd1, cmd2 string, commits ...string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("git not on PATH: %v", err)
+	}
+	if realGit, err = filepath.Abs(realGit); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	state := filepath.Join(dir, "n")
+	script := `#!/bin/sh
+if [ "$1" = "$MOVER_CMD1" ] && [ "$2" = "$MOVER_CMD2" ]; then
+  n=$(cat "$MOVER_STATE" 2>/dev/null || echo 0)
+  i=0; target=""
+  for c in $MOVER_COMMITS; do
+    if [ $i -eq $((n % MOVER_COUNT)) ]; then target=$c; fi
+    i=$((i + 1))
+  done
+  echo $((n + 1)) > "$MOVER_STATE"
+  "$MOVER_REAL" -C "$MOVER_REPO" update-ref "$MOVER_REF" "$target"
+fi
+exec "$MOVER_REAL" "$@"
+`
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: the wrapper must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("MOVER_REAL", realGit)
+	t.Setenv("MOVER_STATE", state)
+	t.Setenv("MOVER_REPO", repo)
+	t.Setenv("MOVER_REF", ref)
+	t.Setenv("MOVER_CMD1", cmd1)
+	t.Setenv("MOVER_CMD2", cmd2)
+	t.Setenv("MOVER_COMMITS", strings.Join(commits, " "))
+	t.Setenv("MOVER_COUNT", fmt.Sprint(len(commits)))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// requireBranchMoved fails unless err is the retryable moved-branch refusal.
+func requireBranchMoved(t *testing.T, err error) {
+	t.Helper()
+	if !errors.Is(err, git.ErrBranchMoved) || !errors.Is(err, git.ErrCheckoutsInFlight) {
+		t.Fatalf("err = %v, want ErrBranchMoved (and ErrCheckoutsInFlight)", err)
+	}
+	var ge *git.GitError
+	if !errors.As(err, &ge) || ge.Kind != git.ErrKindTransient || !ge.IsRetryable() || ge.Message != git.BranchMovedMessage {
+		t.Fatalf("err = %#v, want a retryable *GitError %q", err, git.BranchMovedMessage)
+	}
+}
+
+// TestEnterBranch_BranchMovedDuringCheckoutIsRefused (codex review round
+// 3, P1): with a ceiling, a branch that moves after the tip was re-read —
+// here while `git worktree add` runs, so `switch` checks out another tree
+// than the one weighed — is refused with the retryable ErrBranchMoved and
+// nothing is left: no directory, no worktree, no weight, no claim.
+func TestEnterBranch_BranchMovedDuringCheckoutIsRefused(t *testing.T) {
+	ctx := context.Background()
+	repo, run := claimRepo(t)
+	other := tbGit(t, repo, nil, "rev-parse", "main")
+	weight := treeWeight(t, repo, run)
+	b := git.DefaultTreeBudget()
+	limits := git.CheckoutLimits{Budget: &b, InflightMaxBytes: 4 * weight}
+	tmp := isolateTempDir(t)
+
+	installBranchMover(t, repo, "refs/heads/"+run, "worktree", "add", other)
+	_, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits)
+	requireBranchMoved(t, err)
+	assertEmptyDir(t, tmp)
+	if n := worktreeCount(t, repo); n != 1 {
+		t.Errorf("worktree list has %d entries, want 1", n)
+	}
+	if h := git.InflightHeldForTest(); h != 0 {
+		t.Errorf("gate holds %d, want 0", h)
+	}
+	t.Setenv("MOVER_CMD1", "none")
+	s, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits)
+	if err != nil {
+		t.Fatalf("the refused entry kept the claim: %v", err)
+	}
+	s.Cleanup()
+}
+
+// TestEnterBranch_BranchThatKeepsMovingIsRefused (codex review round 3,
+// P1): a branch that moves again every time it is measured — so every
+// re-read after the admission finds another tip — is re-weighed a bounded
+// number of times and then refused with ErrBranchMoved, holding nothing.
+// With no ceiling nothing is re-read: the entry proceeds as before the
+// task.
+func TestEnterBranch_BranchThatKeepsMovingIsRefused(t *testing.T) {
+	ctx := context.Background()
+	repo, run := claimRepo(t)
+	a := tbGit(t, repo, nil, "rev-parse", run)
+	bTip := tbGit(t, repo, nil, "rev-parse", "main")
+	weight := treeWeight(t, repo, run)
+	b := git.DefaultTreeBudget()
+	limits := git.CheckoutLimits{Budget: &b, InflightMaxBytes: 4 * weight}
+	tmp := isolateTempDir(t)
+
+	installBranchMover(t, repo, "refs/heads/"+run, "ls-tree", "-r", bTip, a)
+	_, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits)
+	requireBranchMoved(t, err)
+	assertEmptyDir(t, tmp)
+	if h := git.InflightHeldForTest(); h != 0 {
+		t.Errorf("gate holds %d, want 0", h)
+	}
+
+	s, err := git.EnterBranchWithLimits(ctx, repo, run, nil, git.CheckoutLimits{Budget: &b})
+	if err != nil {
+		t.Fatalf("no ceiling: %v", err)
+	}
+	s.Cleanup()
+}

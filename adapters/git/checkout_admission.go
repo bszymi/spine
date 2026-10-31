@@ -84,15 +84,36 @@ var ErrBranchInUse = errors.New("git: the branch is checked out by another write
 // ErrCheckoutsInFlight matches (errors.Is) an EnterBranch refused because
 // the in-flight checkout ceiling (CheckoutLimits.InflightMaxBytes) left no
 // room for its tree, or its repository's share of the ceiling was taken,
-// until its context ended (or its mutate deadline passed). It is
-// returned inside *GitError{Kind: ErrKindTransient, Message:
-// CheckoutsInFlightMessage}, so IsRetryable is true; errors.As reaches
-// the *InflightWaitError. Nothing was created or written.
+// until its context ended (or its mutate deadline passed) — or because its
+// branch kept moving while it was being admitted (ErrBranchMoved, which
+// matches too). It is returned inside *GitError{Kind: ErrKindTransient},
+// so IsRetryable is true; errors.As reaches the *InflightWaitError.
+// Nothing is left on disk.
 var ErrCheckoutsInFlight = errors.New("git: the in-flight checkout ceiling is full")
 
 // CheckoutsInFlightMessage is the GitError.Message of an
-// ErrCheckoutsInFlight refusal.
+// ErrCheckoutsInFlight refusal for want of room.
 const CheckoutsInFlightMessage = "other checkouts in flight fill the checkout ceiling; retry later"
+
+// ErrBranchMoved matches (errors.Is) an EnterBranch with an in-flight
+// ceiling refused because its branch moved between the measure that
+// weighed its tree and the checkout, and kept moving (codex review round
+// 3): the tree checked out must be the tree weighed, or the ceiling would
+// account for less than is on disk. It also matches ErrCheckoutsInFlight;
+// the *GitError's Message is BranchMovedMessage. Retryable.
+var ErrBranchMoved = errors.New("git: the branch moved while its checkout was being admitted")
+
+// BranchMovedMessage is the GitError.Message of an ErrBranchMoved refusal.
+const BranchMovedMessage = "the branch moved while its checkout was being admitted; retry"
+
+// branchMovedAttempts is how often EnterBranch re-measures and re-admits a
+// branch that moved while it waited before it refuses with ErrBranchMoved.
+const branchMovedAttempts = 3
+
+func branchMoved(op string, weight, ceiling int64) error {
+	return &GitError{Kind: ErrKindTransient, Op: op, Message: BranchMovedMessage,
+		Err: &InflightWaitError{Weight: weight, Ceiling: ceiling, Err: ErrBranchMoved}}
+}
 
 // InflightWaitError is the typed cause of an ErrCheckoutsInFlight
 // refusal: the tree's weight, the ceiling it waited under, and the error
@@ -438,27 +459,35 @@ func (g *inflightGate) release(s *repoShare, weight int64) {
 	g.mu.Unlock()
 }
 
-// admitLocked serves the repositories with waiters round-robin: each pass
+// admitLocked serves the repositories with waiters round-robin. Each pass
 // offers every such repository's head one turn, in the order of the turn
-// list, and moves the repository to the back after its turn, so no
-// repository is served twice before every other has had a turn. A head
-// that does not fit blocks only its own repository's queue. Passes repeat
-// while one admits something.
+// list. A repository that is served goes behind every other — it had its
+// turn; one whose head does not fit KEEPS its place (codex review round 3:
+// rotating it too restored the original order after every pass, so one
+// repository's backlog could take each freed slot before another
+// repository waiting for the same room). So the room that frees next goes
+// first to the repository that has waited longest since it was last
+// served. A head that does not fit blocks only its own repository's
+// queue. Passes repeat while one admits something.
 func (g *inflightGate) admitLocked() {
 	for {
 		admitted := false
-		for n := g.turns.Len(); n > 0; n-- {
-			e := g.turns.Front()
+		pass := make([]*list.Element, 0, g.turns.Len())
+		for e := g.turns.Front(); e != nil; e = e.Next() {
+			pass = append(pass, e)
+		}
+		for _, e := range pass {
 			s := e.Value.(*repoShare)
 			head := s.waiters.Front()
 			w := head.Value.(*inflightWaiter)
-			if g.fits(s, w.weight, w.ceiling) {
-				g.held += w.weight
-				s.held += w.weight
-				s.waiters.Remove(head)
-				close(w.ready)
-				admitted = true
+			if !g.fits(s, w.weight, w.ceiling) {
+				continue
 			}
+			g.held += w.weight
+			s.held += w.weight
+			s.waiters.Remove(head)
+			close(w.ready)
+			admitted = true
 			if s.waiters.Len() == 0 {
 				g.turns.Remove(e)
 				s.turn = nil

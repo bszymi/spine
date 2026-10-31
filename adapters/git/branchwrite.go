@@ -234,22 +234,45 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 		budget = &b
 	}
 	var weight int64
-	if budget != nil {
-		stats, err := (&CLIClient{repoPath: repoDir}).measureTree(ctx, oid, budget.Effective())
-		if err != nil {
-			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, relabel(err, "worktree"))
+	for attempt := 1; ; attempt++ {
+		if budget != nil {
+			stats, err := (&CLIClient{repoPath: repoDir}).measureTree(ctx, oid, budget.Effective())
+			if err != nil {
+				return nil, fmt.Errorf("add worktree for branch %s: %w", branch, relabel(err, "worktree"))
+			}
+			weight = InflightWeight(stats)
 		}
-		weight = InflightWeight(stats)
-	}
-	// The in-flight ceiling, still before anything exists on disk: the
-	// tree waits for room among the other scopes' trees, and for its
-	// repository's share.
-	if limits.InflightMaxBytes > 0 {
+		if limits.InflightMaxBytes <= 0 {
+			break
+		}
+		// The in-flight ceiling, still before anything exists on disk: the
+		// tree waits for room among the other scopes' trees, and for its
+		// repository's share.
 		release, err := admitCheckout(ctx, "worktree", repoKey, weight, limits)
 		if err != nil {
 			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
 		}
 		releaseWeight = release
+		// The wait can be long, and the branch can move meanwhile (a push):
+		// `switch` would then check out a tree nobody weighed (codex review
+		// round 3). Re-read the tip; when it moved, give the weight back and
+		// weigh the new tip, a bounded number of times.
+		cur, found, err := lookupBranch(ctx, repoDir, "worktree", short)
+		if err != nil {
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
+		}
+		if !found {
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, branchNotFound("worktree", "branch", branch))
+		}
+		if cur == oid {
+			break
+		}
+		releaseWeight()
+		releaseWeight = func() {}
+		if attempt == branchMovedAttempts {
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, branchMoved("worktree", weight, limits.InflightMaxBytes))
+		}
+		oid = cur
 	}
 	// The mutate deadline bounds the two commands that write the tree.
 	parentCtx := ctx
@@ -332,6 +355,21 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 	if out, err := sym.Output(); err != nil || strings.TrimSpace(string(out)) != headsPrefix+short {
 		removeWorktree()
 		return nil, fmt.Errorf("add worktree for branch %s: worktree is not on %s%s", branch, headsPrefix, short)
+	}
+	// With an in-flight ceiling, the tree on disk must be the tree weighed:
+	// `switch` checks the branch out by name, so a move after the re-read
+	// above would have written another tree. Refuse, with nothing left on
+	// disk, rather than hold a weight that undercounts it.
+	if limits.InflightMaxBytes > 0 {
+		head := newGitCmd(ctx, "rev-parse", "--verify", "-q", "HEAD")
+		head.Dir = worktreeDir
+		if out, err := head.Output(); err != nil || strings.TrimSpace(string(out)) != oid {
+			removeWorktree()
+			if err != nil {
+				return nil, fmt.Errorf("add worktree for branch %s: read the checked-out commit: %w", branch, err)
+			}
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, branchMoved("worktree", weight, limits.InflightMaxBytes))
+		}
 	}
 
 	entered = true
