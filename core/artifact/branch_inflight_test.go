@@ -46,7 +46,11 @@ func TestCreate_CheckoutRefusalsKeepTheirClassification(t *testing.T) {
 	}
 	defer held.Cleanup()
 
-	_, err = svc.Create(artifact.WithWriteContext(operatorCtx(), artifact.WriteContext{Branch: "spine/run/held"}),
+	// The 10 s context only keeps a refusal that waits from hanging the
+	// test; the refusal must come at once.
+	hctx, hcancel := context.WithTimeout(artifact.WithWriteContext(operatorCtx(), artifact.WriteContext{Branch: "spine/run/held"}), 10*time.Second)
+	defer hcancel()
+	_, err = svc.Create(hctx,
 		"governance/held.md", governanceContent)
 	var se *domain.SpineError
 	if !errors.As(err, &se) || se.Code != domain.ErrGit || !strings.Contains(se.Message, git.ErrBranchInUse.Error()) {

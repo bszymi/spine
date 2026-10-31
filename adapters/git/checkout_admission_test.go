@@ -332,8 +332,11 @@ func TestEnterBranch_InflightWaitEndsWithRetryableError(t *testing.T) {
 
 	bounded := limits
 	bounded.MutateTimeout = 300 * time.Millisecond
+	// The 20 s context only keeps a broken bound from hanging the test.
+	safety, cancelSafety := context.WithTimeout(ctx, 20*time.Second)
 	begun = time.Now()
-	_, err = git.EnterBranchWithLimits(ctx, repo, "b1", nil, bounded)
+	_, err = git.EnterBranchWithLimits(safety, repo, "b1", nil, bounded)
+	cancelSafety()
 	requireInflightWait(t, err, weight, ceiling, context.DeadlineExceeded)
 	if d := time.Since(begun); d > 10*time.Second {
 		t.Errorf("the mutate deadline did not bound the wait: %s", d)
@@ -390,8 +393,12 @@ func TestEnterBranch_TreeOverTheInflightCeilingIsRefused(t *testing.T) {
 	limits := git.CheckoutLimits{Budget: &b, InflightMaxBytes: weight / 2}
 	tmp := isolateTempDir(t)
 
+	// The 10 s context only keeps a refusal that waits from hanging the
+	// test; the refusal must come at once.
+	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	begun := time.Now()
-	s, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits)
+	s, err := git.EnterBranchWithLimits(wctx, repo, run, nil, limits)
 	if err == nil {
 		s.Cleanup()
 		t.Fatal("a tree over the ceiling was admitted")
@@ -549,7 +556,9 @@ func TestInflightGate_FIFOAndCancellation(t *testing.T) {
 	if _, err := git.AdmitCheckoutForTest(done, 1, ceiling); !errors.Is(err, git.ErrCheckoutsInFlight) {
 		t.Errorf("a done context with room: err = %v, want the refusal", err)
 	}
-	if _, err := git.AdmitCheckoutForTest(ctx, ceiling+1, ceiling); !errors.Is(err, git.ErrTreeTooLarge) {
+	short, cancelShort := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelShort()
+	if _, err := git.AdmitCheckoutForTest(short, ceiling+1, ceiling); !errors.Is(err, git.ErrTreeTooLarge) {
 		t.Errorf("a weight over the ceiling: err = %v, want ErrTreeTooLarge", err)
 	}
 
