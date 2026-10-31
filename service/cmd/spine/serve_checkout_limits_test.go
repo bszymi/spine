@@ -84,12 +84,15 @@ func TestInstallCheckoutLimits_ReachesEveryClient(t *testing.T) {
 	}
 }
 
-// TestLoadCheckoutLimits_InflightCeiling (INIT-024 TASK-011): the
-// in-flight checkout ceiling is on by default at the effective per-tree
-// byte limit (so it follows SPINE_GIT_TREE_MAX_BYTES), a positive integer
-// of bytes replaces it, and anything else refuses to start naming the
-// variable. Installed, it is the process default EnterBranch applies; a
-// ceiling below the per-tree limit is accepted with a startup warning.
+// TestLoadCheckoutLimits_InflightCeiling (INIT-024 TASK-011, review round
+// 1): the in-flight checkout ceiling is on by default at twice the
+// effective per-tree byte limit, raised to one maximal tree's weight (the
+// byte limit plus 4 KiB per allowed entry) when that is heavier — so it
+// follows SPINE_GIT_TREE_MAX_BYTES and SPINE_GIT_TREE_MAX_ENTRIES; a
+// positive integer of bytes replaces it, and anything else refuses to
+// start naming the variable. Installed, it is the process default
+// EnterBranch applies; a ceiling below a maximal tree's weight is accepted
+// with a startup warning.
 func TestLoadCheckoutLimits_InflightCeiling(t *testing.T) {
 	vars := []string{"SPINE_GIT_TREE_MAX_ENTRIES", "SPINE_GIT_TREE_MAX_BYTES", "SPINE_GIT_TREE_MAX_PATH_BYTES", EnvGitMutateTimeout, EnvGitCheckoutInflightMaxBytes}
 	unsetAll := func() {
@@ -107,13 +110,21 @@ func TestLoadCheckoutLimits_InflightCeiling(t *testing.T) {
 	}
 
 	unsetAll()
-	if l := load(); l.InflightMaxBytes != git.DefaultTreeMaxTotalBytes {
-		t.Errorf("default ceiling = %d, want the per-tree byte limit %d", l.InflightMaxBytes, int64(git.DefaultTreeMaxTotalBytes))
+	// max(2 x 2 GiB, 2 GiB + 200,000 x 4 KiB) = 4 GiB.
+	if l := load(); l.InflightMaxBytes != 4<<30 {
+		t.Errorf("default ceiling = %d, want twice the per-tree byte limit %d", l.InflightMaxBytes, int64(4<<30))
 	}
 	t.Setenv("SPINE_GIT_TREE_MAX_BYTES", "8589934592")
-	if l := load(); l.InflightMaxBytes != 8<<30 {
-		t.Errorf("ceiling with a raised tree limit = %d, want it to follow (%d)", l.InflightMaxBytes, int64(8<<30))
+	if l := load(); l.InflightMaxBytes != 16<<30 {
+		t.Errorf("ceiling with a raised tree limit = %d, want it to follow (%d)", l.InflightMaxBytes, int64(16<<30))
 	}
+	// A small byte limit with the default entry allowance: the maximal
+	// tree's weight (1 MiB + 200,000 x 4 KiB) is heavier than twice 1 MiB.
+	t.Setenv("SPINE_GIT_TREE_MAX_BYTES", "1048576")
+	if l := load(); l.InflightMaxBytes != 1<<20+200000*4096 || l.InflightMaxBytes != l.Budget.MaxInflightWeight() {
+		t.Errorf("ceiling with a small byte limit = %d, want one maximal tree's weight %d", l.InflightMaxBytes, int64(1<<20+200000*4096))
+	}
+	t.Setenv("SPINE_GIT_TREE_MAX_BYTES", "8589934592")
 	t.Setenv(EnvGitCheckoutInflightMaxBytes, " 1073741824 ")
 	if l := load(); l.InflightMaxBytes != 1<<30 || l.Budget.MaxTotalBytes != 8<<30 {
 		t.Errorf("explicit ceiling = %d (tree %d), want %d", l.InflightMaxBytes, l.Budget.MaxTotalBytes, int64(1<<30))
@@ -132,7 +143,7 @@ func TestLoadCheckoutLimits_InflightCeiling(t *testing.T) {
 		want     int64
 		warnings int
 	}{
-		{"", git.DefaultTreeMaxTotalBytes, 0},
+		{"", 4 << 30, 0},
 		{"4294967296", 4 << 30, 0},
 		{"1048576", 1 << 20, 1},
 	} {

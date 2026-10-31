@@ -37,7 +37,8 @@ func TestCreate_CheckoutRefusalsKeepTheirClassification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: st.TotalBytes + st.TotalBytes/2})
+	w := git.InflightWeight(st)
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: w + w/2})
 	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
 
 	held, err := git.EnterBranch(ctx, repo, "spine/run/held", nil)

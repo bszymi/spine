@@ -15,10 +15,11 @@ import (
 
 // TestRepoClaimKey_ReadsOnlyRegularAdministrativeFiles (INIT-024 TASK-011):
 // the claim key is derived from git-administrative entries only, and none
-// is followed or opened unless it is a regular file. A .git that is a
-// symbolic link is not followed (the root is the key), and a commondir
-// that is a FIFO is never opened — opening it would block the entry — so
-// the key falls back to the worktree's git directory.
+// is opened unless what it names is a regular file. A .git that is a
+// symbolic link to the repository's git directory is the same repository
+// (stat'ed, review round 1: one identity for every spelling), and a
+// commondir that is a FIFO is never opened — opening it would block the
+// entry — so the key falls back to the worktree's git directory.
 func TestRepoClaimKey_ReadsOnlyRegularAdministrativeFiles(t *testing.T) {
 	repo, _, _, _ := tbRepo(t)
 
@@ -26,8 +27,8 @@ func TestRepoClaimKey_ReadsOnlyRegularAdministrativeFiles(t *testing.T) {
 	if err := os.Symlink(filepath.Join(repo, ".git"), filepath.Join(linked, ".git")); err != nil {
 		t.Fatal(err)
 	}
-	if got := git.RepoClaimKeyForTest(linked); got != canonical(t, linked) {
-		t.Errorf(".git symbolic link: key %q, want the root (not followed)", got)
+	if got, want := git.RepoClaimKeyForTest(linked), git.RepoClaimKeyForTest(repo); got != want {
+		t.Errorf(".git symbolic link: key %q, want the repository's %q", got, want)
 	}
 
 	lw := filepath.Join(t.TempDir(), "lw")
@@ -44,8 +45,8 @@ func TestRepoClaimKey_ReadsOnlyRegularAdministrativeFiles(t *testing.T) {
 	go func() { got <- git.RepoClaimKeyForTest(lw) }()
 	select {
 	case k := <-got:
-		if k != canonical(t, gitDir) {
-			t.Errorf("FIFO commondir: key %q, want the worktree's git directory %q", k, canonical(t, gitDir))
+		if want := git.PathIdentityForTest(gitDir); k != want {
+			t.Errorf("FIFO commondir: key %q, want the worktree's git directory %q", k, want)
 		}
 	case <-time.After(10 * time.Second):
 		// Unblock the open so the goroutine can end, then fail.

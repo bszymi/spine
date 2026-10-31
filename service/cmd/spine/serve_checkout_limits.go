@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -18,10 +19,30 @@ import (
 const EnvGitMutateTimeout = "SPINE_GIT_MUTATE_TIMEOUT"
 
 // EnvGitCheckoutInflightMaxBytes is the in-flight checkout ceiling of
-// `spine serve` (INIT-024 TASK-011): the most measured bytes the trees of
-// its concurrent branch-scoped writes may have on the temporary disk at
-// once (git.CheckoutLimits.InflightMaxBytes).
+// `spine serve` (INIT-024 TASK-011): the most weight (file bytes plus
+// git.InflightEntryWeight per entry) the trees of its concurrent
+// branch-scoped writes may have on the temporary disk at once
+// (git.CheckoutLimits.InflightMaxBytes).
 const EnvGitCheckoutInflightMaxBytes = "SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES"
+
+// defaultInflightCeiling is `spine serve`'s ceiling when the variable is
+// unset (INIT-024 TASK-011 review round 1): twice the per-tree byte limit,
+// raised to one maximal tree's weight (the byte limit plus
+// git.InflightEntryWeight per allowed entry) when the entry allowance
+// makes that heavier. So a maximal tree is always admitted, and — with the
+// gate's half-ceiling share per repository — one workspace's maximal tree
+// leaves room for every other workspace's writes. With the defaults:
+// max(2 x 2 GiB, 2 GiB + 200,000 x 4 KiB) = 4 GiB.
+func defaultInflightCeiling(b git.TreeBudget) int64 {
+	b = b.Effective()
+	twice := b.MaxTotalBytes
+	if twice <= math.MaxInt64/2 {
+		twice *= 2
+	} else {
+		twice = math.MaxInt64
+	}
+	return max(twice, b.MaxInflightWeight())
+}
 
 // loadCheckoutLimits reads the checkout budget, the mutate deadline and
 // the in-flight checkout ceiling of `spine serve` (INIT-024 TASK-003,
@@ -29,9 +50,8 @@ const EnvGitCheckoutInflightMaxBytes = "SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES"
 // standalone (INIT-024 owner question 3): an unset or empty variable
 // means its default (git.DefaultTreeMaxEntries,
 // git.DefaultTreeMaxTotalBytes, git.DefaultTreeMaxPathBytesTotal,
-// git.DefaultMutateTimeout; for the ceiling, the effective per-tree byte
-// limit, so at most one maximal tree is in flight and smaller ones
-// proceed together); a positive integer (bytes, for the byte limits) or a
+// git.DefaultMutateTimeout; for the ceiling, defaultInflightCeiling); a
+// positive integer (bytes, for the byte limits) or a
 // positive Go duration replaces it. Anything else — zero, a negative
 // number, a unit suffix, a typo — refuses startup: there is no off
 // switch, only other limits, and a typo must not silently mean the
@@ -65,7 +85,7 @@ func loadCheckoutLimits() (git.CheckoutLimits, error) {
 		}
 		d = parsed
 	}
-	ceiling := b.MaxTotalBytes
+	ceiling := defaultInflightCeiling(b)
 	if raw := strings.TrimSpace(os.Getenv(EnvGitCheckoutInflightMaxBytes)); raw != "" {
 		n, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || n <= 0 {
@@ -102,14 +122,15 @@ func installCheckoutLimits(log *slog.Logger) error {
 		"max_path_bytes", l.Budget.MaxPathBytesTotal,
 		"mutate_timeout", l.MutateTimeout.String(),
 		"inflight_max_bytes", l.InflightMaxBytes)
-	if l.InflightMaxBytes < l.Budget.MaxTotalBytes {
-		// Coherent but easy to miss: a branch-scoped write of a tree
-		// between the two is refused, although the budget admits it.
-		log.Warn("the in-flight checkout ceiling is below the per-tree byte limit: a branch-scoped write of a larger tree is refused",
+	if heaviest := l.Budget.MaxInflightWeight(); l.InflightMaxBytes < heaviest {
+		// Coherent but easy to miss: a branch-scoped write of a tree the
+		// budget admits but whose weight (its bytes plus
+		// git.InflightEntryWeight per entry) exceeds the ceiling is refused.
+		log.Warn("the in-flight checkout ceiling is below the weight of a maximal tree: a branch-scoped write of a heavier tree is refused",
 			"inflight_max_bytes", l.InflightMaxBytes,
-			"max_total_bytes", l.Budget.MaxTotalBytes,
+			"max_tree_weight", heaviest,
 			"ceiling_var", EnvGitCheckoutInflightMaxBytes,
-			"tree_var", githttp.EnvTreeMaxBytes)
+			"tree_vars", githttp.EnvTreeMaxBytes+", "+githttp.EnvTreeMaxEntries)
 	}
 	return nil
 }

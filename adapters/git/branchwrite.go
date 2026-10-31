@@ -187,21 +187,31 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 	}
 
 	// One writer per branch, claimed before the lookup, the measure and
-	// the temporary directory (checkout_admission.go). Every failure below
-	// returns the claim and any admitted weight, after the worktree and its
-	// directory are gone (the deferred release runs after the removal each
-	// error path makes before it returns); a returned scope hands both to
-	// its Cleanup.
-	releaseClaim, ok := claimBranch(repoDir, headsPrefix+short)
+	// the temporary directory (checkout_admission.go). The repository's
+	// key (its git common directory's identity) is also its share of the
+	// in-flight gate. Every failure below returns the claim and any
+	// admitted weight, after the worktree and its directory are gone (the
+	// deferred release runs after the removal each error path makes before
+	// it returns); a returned scope hands both to its Cleanup, which
+	// releases them after its own removal.
+	repoKey := repoClaimKey(repoDir)
+	releaseClaim, ok := claimBranch(repoKey, headsPrefix+short)
 	if !ok {
 		return nil, fmt.Errorf("add worktree for branch %s: %w", branch, ErrBranchInUse)
 	}
 	releaseWeight := func() {}
+	var parent, worktreeDir string
+	release := func() {
+		if h := scopeReleaseHook.Load(); h != nil {
+			(*h)(repoDir, parent, worktreeDir)
+		}
+		releaseWeight()
+		releaseClaim()
+	}
 	entered := false
 	defer func() {
 		if !entered {
-			releaseWeight()
-			releaseClaim()
+			release()
 		}
 	}()
 
@@ -213,19 +223,29 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 		return nil, fmt.Errorf("add worktree for branch %s: %w", branch, branchNotFound("worktree", "branch", branch))
 	}
 	// The checkout budget, before anything exists on disk. The measure
-	// uses the same exact object id the worktree is added at.
+	// uses the same exact object id the worktree is added at. An
+	// in-flight ceiling weighs the tree by its measure, so a ceiling set
+	// without a budget measures against the default budget — here only:
+	// the process default and every other client keep exactly the limits
+	// they were given (review round 1).
+	budget := limits.Budget
+	if budget == nil && limits.InflightMaxBytes > 0 {
+		b := DefaultTreeBudget()
+		budget = &b
+	}
 	var weight int64
-	if limits.Budget != nil {
-		stats, err := (&CLIClient{repoPath: repoDir}).measureTree(ctx, oid, limits.Budget.Effective())
+	if budget != nil {
+		stats, err := (&CLIClient{repoPath: repoDir}).measureTree(ctx, oid, budget.Effective())
 		if err != nil {
 			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, relabel(err, "worktree"))
 		}
-		weight = stats.TotalBytes
+		weight = InflightWeight(stats)
 	}
 	// The in-flight ceiling, still before anything exists on disk: the
-	// measured tree waits for room among the other scopes' trees.
+	// tree waits for room among the other scopes' trees, and for its
+	// repository's share.
 	if limits.InflightMaxBytes > 0 {
-		release, err := admitCheckout(ctx, "worktree", weight, limits)
+		release, err := admitCheckout(ctx, "worktree", repoKey, weight, limits)
 		if err != nil {
 			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
 		}
@@ -248,11 +268,12 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 	// another local user could reinsert a symlink between the Remove and
 	// the add. By keeping the parent and pointing git at a fresh child
 	// name that never existed, there is no remove-then-recreate window.
-	parent, err := os.MkdirTemp("", "spine-wt-parent-*")
+	parent, err = os.MkdirTemp("", "spine-wt-parent-*")
 	if err != nil {
+		parent = ""
 		return nil, fmt.Errorf("create worktree parent dir: %w", err)
 	}
-	worktreeDir := filepath.Join(parent, "wt")
+	worktreeDir = filepath.Join(parent, "wt")
 
 	// With a mutate deadline the checkout is split out of `worktree add`:
 	// worktree add writes the tree in a CHILD git (`reset --hard`), which
@@ -325,10 +346,9 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 				// the worktree must still be removed or we leak it on disk.
 				removeAddedWorktree(repoDir, worktreeDir, parent)
 				// Only now, with the tree off the disk and the worktree
-				// unregistered, may another scope take its bytes or its
+				// unregistered, may another scope take its weight or its
 				// branch.
-				releaseWeight()
-				releaseClaim()
+				release()
 			})
 		},
 	}, nil

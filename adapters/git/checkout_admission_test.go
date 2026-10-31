@@ -9,7 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,17 +20,21 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/testutil"
 )
 
-// treeWeight is what EnterBranch weighs branch's tree at: its measured
-// TotalBytes.
+// treeWeight is what EnterBranch weighs branch's tree at:
+// git.InflightWeight of its measure (bytes plus 4 KiB per entry).
 func treeWeight(t *testing.T, repo, branch string) int64 {
 	t.Helper()
 	st, err := git.MeasureTree(context.Background(), git.NewCLIClient(repo), branch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return st.TotalBytes
+	if w := st.TotalBytes + st.Entries*git.InflightEntryWeight; git.InflightWeight(st) != w {
+		t.Fatalf("InflightWeight(%+v) = %d, want %d", st, git.InflightWeight(st), w)
+	}
+	return git.InflightWeight(st)
 }
 
 // waitUntil polls cond for up to 10 s.
@@ -111,7 +117,22 @@ func TestEnterBranch_BranchClaimIsPerRepository(t *testing.T) {
 	}
 	lw := filepath.Join(t.TempDir(), "lw")
 	tbGit(t, repoA, nil, "worktree", "add", "-q", "-b", "lw-branch", lw, "main")
-	for name, dir := range map[string]string{"symbolic link": link, "linked worktree": lw, "same path": repoA} {
+	sub := filepath.Join(repoA, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dotgitLink := t.TempDir()
+	if err := os.Symlink(filepath.Join(repoA, ".git"), filepath.Join(dotgitLink, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	spellings := map[string]string{"symbolic link": link, "linked worktree": lw, "same path": repoA,
+		"subdirectory": sub, "symlinked .git": dotgitLink}
+	// A case variant of the path, where the storage folds case (macOS's
+	// default APFS): the same directory, the same key (review round 1).
+	if v := caseVariant(repoA); v != "" {
+		spellings["case variant"] = v
+	}
+	for name, dir := range spellings {
 		if s, err := git.EnterBranch(ctx, dir, run, nil); !errors.Is(err, git.ErrBranchInUse) {
 			if err == nil {
 				s.Cleanup()
@@ -135,9 +156,10 @@ func TestEnterBranch_BranchClaimIsPerRepository(t *testing.T) {
 	bheld.Cleanup()
 }
 
-// TestRepoClaimKey_MatchesGitCommonDir: the in-process key is the
-// directory `git rev-parse --git-common-dir` names, for every layout
-// EnterBranch is given; a directory that is no repository keys by itself.
+// TestRepoClaimKey_MatchesGitCommonDir: the in-process key is the identity
+// of the directory `git rev-parse --git-common-dir` names, for every
+// layout and spelling EnterBranch is given (a subdirectory is found
+// upward, as git does); a directory in no repository keys by itself.
 func TestRepoClaimKey_MatchesGitCommonDir(t *testing.T) {
 	repo, _, _, _ := tbRepo(t)
 	link := filepath.Join(t.TempDir(), "link")
@@ -160,17 +182,53 @@ func TestRepoClaimKey_MatchesGitCommonDir(t *testing.T) {
 	}
 	bare := filepath.Join(t.TempDir(), "bare.git")
 	tbGit(t, repo, nil, "clone", "-q", "--bare", repo, bare)
+	sub := filepath.Join(repo, "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dotgitLink := t.TempDir()
+	if err := os.Symlink(filepath.Join(repo, ".git"), filepath.Join(dotgitLink, ".git")); err != nil {
+		t.Fatal(err)
+	}
 
-	for name, dir := range map[string]string{"main tree": repo, "symbolic link": link, "linked worktree": lw, "relative gitdir": rel, "bare": bare} {
-		want := canonical(t, gitAbs(t, dir, tbGit(t, dir, nil, "rev-parse", "--git-common-dir")))
+	layouts := map[string]string{"main tree": repo, "symbolic link": link, "linked worktree": lw, "relative gitdir": rel,
+		"bare": bare, "subdirectory": sub, "symlinked .git": dotgitLink}
+	if v := caseVariant(repo); v != "" {
+		layouts["case variant"] = v
+	} else {
+		t.Log("case-sensitive storage: the case-variant spelling is not exercised here")
+	}
+	for name, dir := range layouts {
+		want := git.PathIdentityForTest(gitAbs(t, dir, tbGit(t, dir, nil, "rev-parse", "--git-common-dir")))
 		if got := git.RepoClaimKeyForTest(dir); got != want {
-			t.Errorf("%s: key %q, want git's common dir %q", name, got, want)
+			t.Errorf("%s: key %q, want the identity of git's common dir %q", name, got, want)
 		}
 	}
 	plain := t.TempDir()
-	if got := git.RepoClaimKeyForTest(plain); got != canonical(t, plain) {
-		t.Errorf("not a repository: key %q, want the directory", got)
+	if got := git.RepoClaimKeyForTest(plain); got != git.PathIdentityForTest(plain) {
+		t.Errorf("not a repository: key %q, want the directory's identity", got)
 	}
+}
+
+// caseVariant returns repo's path with one component's case flipped when
+// the storage resolves it to the same directory (case-insensitive), or "".
+func caseVariant(repo string) string {
+	dir := filepath.Dir(repo)
+	base := filepath.Base(dir)
+	flipped := strings.ToUpper(base)
+	if flipped == base {
+		flipped = strings.ToLower(base)
+	}
+	if flipped == base {
+		return ""
+	}
+	v := filepath.Join(filepath.Dir(dir), flipped, filepath.Base(repo))
+	a, errA := os.Stat(repo)
+	b, errB := os.Stat(v)
+	if errA != nil || errB != nil || !os.SameFile(a, b) {
+		return ""
+	}
+	return v
 }
 
 func gitAbs(t *testing.T, dir, p string) string {
@@ -227,20 +285,20 @@ func TestEnterBranch_BranchInUseKeepsTheRefusalClass(t *testing.T) {
 // --- the in-flight ceiling (AC 3) ---
 
 // TestEnterBranch_InflightCeilingBoundsDifferentBranches is AC 3: with a
-// ceiling of 2.5 trees, six concurrent entries on six branches never hold
-// more than the ceiling in measured bytes (at most two scopes at once,
-// and the bytes under TMPDIR never above the ceiling); smaller trees
-// still proceed together, every entry is admitted in the end, and the
-// gate is empty afterwards.
+// ceiling of 2.5 trees, six concurrent entries on the run branches of six
+// repositories never hold more than the ceiling in weight (at most two
+// scopes at once, and the bytes under TMPDIR never above the ceiling);
+// trees that fit together proceed together, every entry is admitted in
+// the end, and the gate is empty afterwards.
 func TestEnterBranch_InflightCeilingBoundsDifferentBranches(t *testing.T) {
 	ctx := context.Background()
-	repo, run := claimRepo(t)
-	tip := tbGit(t, repo, nil, "rev-parse", run)
 	const branches = 6
+	repos := make([]string, branches)
+	var run string
 	for i := range branches {
-		tbGit(t, repo, nil, "branch", fmt.Sprintf("b%d", i), tip)
+		repos[i], run = claimRepo(t)
 	}
-	weight := treeWeight(t, repo, run)
+	weight := treeWeight(t, repos[0], run)
 	ceiling := 2*weight + weight/2
 	b := git.DefaultTreeBudget()
 	limits := git.CheckoutLimits{Budget: &b, MutateTimeout: git.DefaultMutateTimeout, InflightMaxBytes: ceiling}
@@ -256,7 +314,7 @@ func TestEnterBranch_InflightCeilingBoundsDifferentBranches(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			s, err := git.EnterBranchWithLimits(ctx, repo, fmt.Sprintf("b%d", i), nil, limits)
+			s, err := git.EnterBranchWithLimits(ctx, repos[i], run, nil, limits)
 			if err != nil {
 				errs[i] = err
 				return
@@ -278,7 +336,7 @@ func TestEnterBranch_InflightCeilingBoundsDifferentBranches(t *testing.T) {
 
 	for i, err := range errs {
 		if err != nil {
-			t.Errorf("entry b%d: %v (every entry fits on its own and must be admitted in the end)", i, err)
+			t.Errorf("repository %d: %v (every entry fits on its own and must be admitted in the end)", i, err)
 		}
 	}
 	if m := maxInScope.Load(); m > 2 {
@@ -306,17 +364,17 @@ func TestEnterBranch_InflightCeilingBoundsDifferentBranches(t *testing.T) {
 // room.
 func TestEnterBranch_InflightWaitEndsWithRetryableError(t *testing.T) {
 	ctx := context.Background()
-	repo, run := claimRepo(t)
-	tip := tbGit(t, repo, nil, "rev-parse", run)
-	tbGit(t, repo, nil, "branch", "b0", tip)
-	tbGit(t, repo, nil, "branch", "b1", tip)
+	repoA, run := claimRepo(t)
+	repo, _ := claimRepo(t)
+	tbGit(t, repo, nil, "branch", "b1", run)
 	weight := treeWeight(t, repo, run)
 	ceiling := weight + weight/2
 	b := git.DefaultTreeBudget()
 	limits := git.CheckoutLimits{Budget: &b, InflightMaxBytes: ceiling}
 	tmp := isolateTempDir(t)
 
-	held, err := git.EnterBranchWithLimits(ctx, repo, "b0", nil, limits)
+	// Another repository's tree leaves less than one tree of room.
+	held, err := git.EnterBranchWithLimits(ctx, repoA, run, nil, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,8 +403,8 @@ func TestEnterBranch_InflightWaitEndsWithRetryableError(t *testing.T) {
 	if p := worktreeParents(t, tmp); len(p) != 1 {
 		t.Errorf("worktree parents = %v, want only the held scope's", p)
 	}
-	if n := worktreeCount(t, repo); n != 2 {
-		t.Errorf("worktree list has %d entries, want 2 (main and the held scope)", n)
+	if n := worktreeCount(t, repo); n != 1 {
+		t.Errorf("worktree list has %d entries, want 1 (nothing added for the refused entries)", n)
 	}
 	if h, w := git.InflightHeldForTest(), git.InflightWaitersForTest(); h != weight || w != 0 {
 		t.Errorf("gate holds %d with %d waiters, want %d and none", h, w, weight)
@@ -492,60 +550,83 @@ func TestEnterBranch_InflightWeightIsReturnedOnEveryExit(t *testing.T) {
 
 // --- the gate ---
 
-// TestInflightGate_FIFOAndCancellation: admission is first come, first
-// served — a small weight that would fit waits behind a large one at the
-// head, so the large one is never starved — and a waiter whose context
-// ends leaves the queue with the retryable refusal, letting the next one
-// in. A context that is already done never acquires, even with room.
-func TestInflightGate_FIFOAndCancellation(t *testing.T) {
-	// The gate is process-wide: t.Context() ends every wait this test
-	// leaves behind, and each admitted weight is released at Cleanup
-	// (releases are idempotent), so a failure here cannot block the gate
-	// for the tests after it.
-	ctx := t.Context()
-	const ceiling = 100
-	release60, err := git.AdmitCheckoutForTest(ctx, 60, ceiling)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(release60)
+type gateAdmission struct {
+	release func()
+	err     error
+}
 
-	type admitted struct {
-		release func()
-		err     error
+// admitAsync asks the gate for weight on behalf of repo in a goroutine.
+// The gate is process-wide: t.Context() (pass a context derived from it)
+// ends every wait a failed test leaves behind, and an admitted weight is
+// released at Cleanup (releases are idempotent).
+func admitAsync(t *testing.T, ctx context.Context, repo string, weight, ceiling int64) chan gateAdmission {
+	t.Helper()
+	ch := make(chan gateAdmission, 1)
+	go func() {
+		r, err := git.AdmitCheckoutForTest(ctx, repo, weight, ceiling)
+		if r != nil {
+			t.Cleanup(r)
+		}
+		ch <- gateAdmission{r, err}
+	}()
+	return ch
+}
+
+func admitNow(t *testing.T, ctx context.Context, repo string, weight, ceiling int64) func() {
+	t.Helper()
+	r, err := git.AdmitCheckoutForTest(ctx, repo, weight, ceiling)
+	if err != nil {
+		t.Fatalf("admit %s %d/%d: %v", repo, weight, ceiling, err)
 	}
-	admit := func(ctx context.Context, w int64) chan admitted {
-		ch := make(chan admitted, 1)
-		go func() {
-			r, err := git.AdmitCheckoutForTest(ctx, w, ceiling)
-			if r != nil {
-				t.Cleanup(r)
-			}
-			ch <- admitted{r, err}
-		}()
-		return ch
+	t.Cleanup(r)
+	return r
+}
+
+func receive(t *testing.T, what string, ch chan gateAdmission) gateAdmission {
+	t.Helper()
+	select {
+	case a := <-ch:
+		return a
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: not admitted or refused within 10 s", what)
 	}
+	return gateAdmission{}
+}
+
+func requireEmptyGate(t *testing.T) {
+	t.Helper()
+	if h, w, r := git.InflightHeldForTest(), git.InflightWaitersForTest(), git.InflightReposForTest(); h != 0 || w != 0 || r != 0 {
+		t.Errorf("gate holds %d with %d waiters over %d repositories at the end, want an empty gate", h, w, r)
+	}
+}
+
+// TestInflightGate_FIFOWithinARepositoryAndCancellation: one repository's
+// entries are served in arrival order — a small weight that would fit
+// waits behind a large one at the head of its repository's queue, so the
+// large one is never starved by its own repository — and a waiter whose
+// context ends leaves the queue with the retryable refusal, letting the
+// next one in. A context that is already done never acquires, even with
+// room; a weight over the ceiling is refused at once.
+func TestInflightGate_FIFOWithinARepositoryAndCancellation(t *testing.T) {
+	ctx := t.Context()
+	const ceiling = 200 // half: 100 per repository
+	release60 := admitNow(t, ctx, "r1", 60, ceiling)
+
 	bigCtx, cancelBig := context.WithCancel(ctx)
-	big := admit(bigCtx, 80)
+	big := admitAsync(t, bigCtx, "r1", 80, ceiling) // 140 > 100: waits for r1's share
 	waitUntil(t, "the large weight to queue", func() bool { return git.InflightWaitersForTest() == 1 })
-	small := admit(ctx, 10)
+	small := admitAsync(t, ctx, "r1", 10, ceiling) // would fit (70), queues behind it
 	waitUntil(t, "the small weight to queue", func() bool { return git.InflightWaitersForTest() == 2 })
 	time.Sleep(50 * time.Millisecond)
 	if h, w := git.InflightHeldForTest(), git.InflightWaitersForTest(); h != 60 || w != 2 {
-		t.Fatalf("held %d with %d waiters; the small weight must not pass the large one at the head", h, w)
+		t.Fatalf("held %d with %d waiters; the small weight must not pass its repository's head", h, w)
 	}
 
 	cancelBig()
-	r := <-big
-	requireInflightWait(t, r.err, 80, ceiling, context.Canceled)
-	var s admitted
-	select {
-	case s = <-small:
-	case <-time.After(10 * time.Second):
-		t.Fatal("removing the cancelled head did not admit the next waiter")
-	}
-	if s.err != nil {
-		t.Fatal(s.err)
+	requireInflightWait(t, receive(t, "cancelled head", big).err, 80, ceiling, context.Canceled)
+	sm := receive(t, "the waiter behind the cancelled head", small)
+	if sm.err != nil {
+		t.Fatal(sm.err)
 	}
 	if h := git.InflightHeldForTest(); h != 70 {
 		t.Errorf("held %d, want 70", h)
@@ -553,70 +634,290 @@ func TestInflightGate_FIFOAndCancellation(t *testing.T) {
 
 	done, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := git.AdmitCheckoutForTest(done, 1, ceiling); !errors.Is(err, git.ErrCheckoutsInFlight) {
+	if _, err := git.AdmitCheckoutForTest(done, "r2", 1, ceiling); !errors.Is(err, git.ErrCheckoutsInFlight) {
 		t.Errorf("a done context with room: err = %v, want the refusal", err)
 	}
 	short, cancelShort := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelShort()
-	if _, err := git.AdmitCheckoutForTest(short, ceiling+1, ceiling); !errors.Is(err, git.ErrTreeTooLarge) {
+	if _, err := git.AdmitCheckoutForTest(short, "r2", ceiling+1, ceiling); !errors.Is(err, git.ErrTreeTooLarge) {
 		t.Errorf("a weight over the ceiling: err = %v, want ErrTreeTooLarge", err)
 	}
 
-	// Releases admit every waiter that fits, in order (w2 alone would fit
-	// now; it queues behind w1).
-	w1 := admit(ctx, 40)
-	waitUntil(t, "the first waiter", func() bool { return git.InflightWaitersForTest() == 1 })
-	w2 := admit(ctx, 20)
-	waitUntil(t, "two waiters", func() bool { return git.InflightWaitersForTest() == 2 })
 	release60()
 	release60() // idempotent
-	for _, ch := range []chan admitted{w1, w2} {
-		a := <-ch
-		if a.err != nil {
-			t.Fatal(a.err)
-		}
-		a.release()
+	sm.release()
+	requireEmptyGate(t)
+}
+
+// TestInflightGate_HalfTheCeilingPerRepository (review round 1, P3-1): a
+// repository holds at most half the ceiling — its next weight waits even
+// with room under the ceiling, while another repository's is admitted —
+// and a single weight over half is admitted only while its repository
+// holds nothing.
+func TestInflightGate_HalfTheCeilingPerRepository(t *testing.T) {
+	ctx := t.Context()
+	const ceiling = 100
+	relA := admitNow(t, ctx, "a", 40, ceiling)
+	a2 := admitAsync(t, ctx, "a", 20, ceiling) // 60 > 50: waits although 60 <= 100
+	waitUntil(t, "a's second weight to queue", func() bool { return git.InflightWaitersForTest() == 1 })
+	relB := admitNow(t, ctx, "b", 50, ceiling) // b's half, beside a's 40
+	if h := git.InflightHeldForTest(); h != 90 {
+		t.Fatalf("held %d, want 90", h)
 	}
-	s.release()
-	if h, w := git.InflightHeldForTest(), git.InflightWaitersForTest(); h != 0 || w != 0 {
-		t.Errorf("held %d with %d waiters at the end, want an empty gate", h, w)
+	relB()
+	time.Sleep(20 * time.Millisecond)
+	if w := git.InflightWaitersForTest(); w != 1 {
+		t.Fatalf("a's second weight was admitted over a's half (waiters %d)", w)
+	}
+	relA() // a holds nothing: its 20 fits its half
+	if r := receive(t, "a's second weight", a2); r.err != nil {
+		t.Fatal(r.err)
+	} else {
+		r.release()
+	}
+
+	// Over half on its own: only while the repository holds nothing.
+	relSmall := admitNow(t, ctx, "c", 10, ceiling)
+	big := admitAsync(t, ctx, "c", 70, ceiling)
+	waitUntil(t, "c's 70 to queue", func() bool { return git.InflightWaitersForTest() == 1 })
+	relSmall()
+	if r := receive(t, "c's 70 once c holds nothing", big); r.err != nil {
+		t.Fatal(r.err)
+	} else {
+		r.release()
+	}
+	requireEmptyGate(t)
+}
+
+// TestInflightGate_RoundRobinAcrossRepositories (review round 1, P3-1):
+// when room frees, the waiting repositories are served in turn — the
+// head of each before the second of any — so a repository with many
+// waiters cannot take the room another repository is waiting for.
+func TestInflightGate_RoundRobinAcrossRepositories(t *testing.T) {
+	ctx := t.Context()
+	const ceiling = 100
+	relX := admitNow(t, ctx, "x", 100, ceiling)
+	b1 := admitAsync(t, ctx, "b", 30, ceiling)
+	waitUntil(t, "b1", func() bool { return git.InflightWaitersForTest() == 1 })
+	b2 := admitAsync(t, ctx, "b", 20, ceiling)
+	waitUntil(t, "b2", func() bool { return git.InflightWaitersForTest() == 2 })
+	c1 := admitAsync(t, ctx, "c", 60, ceiling)
+	waitUntil(t, "c1", func() bool { return git.InflightWaitersForTest() == 3 })
+
+	relX()
+	// Round-robin: b1 (30), then c1 (60) = 90; b2 (20) no longer fits.
+	// Draining b first would have admitted b1 and b2 (50) and left c1 out.
+	var releases []func()
+	for name, ch := range map[string]chan gateAdmission{"b1": b1, "c1": c1} {
+		r := receive(t, name, ch)
+		if r.err != nil {
+			t.Fatalf("%s: %v", name, r.err)
+		}
+		releases = append(releases, r.release)
+	}
+	defer func() {
+		for _, r := range releases {
+			r()
+		}
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if h, w := git.InflightHeldForTest(), git.InflightWaitersForTest(); h != 90 || w != 1 {
+		t.Fatalf("held %d with %d waiters, want 90 and b2 waiting", h, w)
+	}
+	select {
+	case r := <-b2:
+		t.Fatalf("b2 admitted (%v) beyond the room c1 was given", r.err)
+	default:
+	}
+	t.Cleanup(requireEmptyGateLater(t, b2))
+}
+
+// requireEmptyGateLater returns a Cleanup that drains a pending admission
+// and checks the gate empties.
+func requireEmptyGateLater(t *testing.T, pending chan gateAdmission) func() {
+	return func() {
+		select {
+		case r := <-pending:
+			if r.release != nil {
+				r.release()
+			}
+		case <-time.After(10 * time.Second):
+		}
 	}
 }
 
-// TestCheckoutLimits_InflightCeiling: the library default has no
-// ceiling; a ceiling set alone brings the default budget (its weight is
-// the measure); a negative one is none; EnterBranchWithLimits' own
+// TestInflightGate_ForgetsIdleRepositories: a repository that holds and
+// waits for nothing is dropped, so the gate's state is bounded by the
+// repositories in flight.
+func TestInflightGate_ForgetsIdleRepositories(t *testing.T) {
+	ctx := t.Context()
+	for i := range 50 {
+		admitNow(t, ctx, fmt.Sprintf("idle-%d", i), 1, 100)()
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	relHold := admitNow(t, ctx, "holder", 100, 100)
+	w := admitAsync(t, cctx, "cancelled", 10, 100)
+	waitUntil(t, "a waiter", func() bool { return git.InflightWaitersForTest() == 1 })
+	cancel()
+	if r := receive(t, "cancelled waiter", w); r.err == nil {
+		t.Fatal("a cancelled waiter was admitted")
+	}
+	relHold()
+	requireEmptyGate(t)
+}
+
+// TestInflightWeight_CountsEntries (review round 1, P3-2): the weight is
+// the bytes plus InflightEntryWeight per entry, saturating; the heaviest
+// tree a budget admits weighs its byte limit plus its entry allowance.
+func TestInflightWeight_CountsEntries(t *testing.T) {
+	if git.InflightEntryWeight != 4096 {
+		t.Fatalf("InflightEntryWeight = %d, want 4096", git.InflightEntryWeight)
+	}
+	for _, tc := range []struct {
+		st   git.TreeStats
+		want int64
+	}{
+		{git.TreeStats{}, 0},
+		{git.TreeStats{TotalBytes: 10, Entries: 3, Blobs: 2, Trees: 1}, 10 + 3*4096},
+		{git.TreeStats{Entries: 40000, Blobs: 20000, Trees: 20000}, 40000 * 4096},
+		{git.TreeStats{TotalBytes: math.MaxInt64 - 1, Entries: 2}, math.MaxInt64},
+		{git.TreeStats{TotalBytes: 1, Entries: math.MaxInt64}, math.MaxInt64},
+	} {
+		if got := git.InflightWeight(tc.st); got != tc.want {
+			t.Errorf("InflightWeight(%+v) = %d, want %d", tc.st, got, tc.want)
+		}
+	}
+	if got, want := git.DefaultTreeBudget().MaxInflightWeight(), int64(git.DefaultTreeMaxTotalBytes)+int64(git.DefaultTreeMaxEntries)*4096; got != want {
+		t.Errorf("default MaxInflightWeight = %d, want %d", got, want)
+	}
+	if got := (git.TreeBudget{MaxTotalBytes: 100, MaxEntries: 2}).MaxInflightWeight(); got != 100+2*4096 {
+		t.Errorf("MaxInflightWeight = %d", got)
+	}
+}
+
+// TestCheckoutLimits_InflightCeiling (review round 1, P4-4): the library
+// default has no ceiling; a ceiling set alone stays alone in the process
+// default and in every client's limits (no implied budget: a client's
+// Checkout of a repository without the neutral attributes line is not
+// refused) — EnterBranch alone measures, against the default budget, to
+// weigh its tree; a negative ceiling is none; EnterBranchWithLimits' own
 // ceiling replaces the process default and a zero one keeps it.
 func TestCheckoutLimits_InflightCeiling(t *testing.T) {
 	t.Cleanup(git.ResetDefaultCheckoutLimitsForTest)
+	ctx := context.Background()
 	if l := git.DefaultCheckoutLimits(); l.InflightMaxBytes != 0 || l.Budget != nil {
 		t.Fatalf("library default = %+v, want none", l)
 	}
-	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: 1 << 20})
+	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: 1 << 30})
+	plain := testutil.NewTempRepo(t) // no neutral attributes line
+	plainClient := git.NewCLIClient(plain)
 	for name, l := range map[string]git.CheckoutLimits{
 		"DefaultCheckoutLimits":    git.DefaultCheckoutLimits(),
-		"CLIClient.CheckoutLimits": git.NewCLIClient(t.TempDir()).CheckoutLimits(),
+		"CLIClient.CheckoutLimits": plainClient.CheckoutLimits(),
 	} {
-		if l.InflightMaxBytes != 1<<20 || l.Budget == nil || *l.Budget != git.DefaultTreeBudget() {
-			t.Errorf("%s = %+v %+v, want the ceiling and the default budget", name, l, l.Budget)
+		if l.InflightMaxBytes != 1<<30 || l.Budget != nil {
+			t.Errorf("%s = %+v %+v, want the ceiling and no budget", name, l, l.Budget)
 		}
 	}
+	tbGit(t, plain, nil, "branch", "other", "main")
+	if err := plainClient.Checkout(ctx, "other"); err != nil {
+		t.Errorf("a client's Checkout under a ceiling-only default: %v (no budget is implied for it)", err)
+	}
+
+	repo, run := claimRepo(t)
+	weight := treeWeight(t, repo, run)
+	isolateTempDir(t)
+	s, err := git.EnterBranch(ctx, repo, run, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := git.InflightHeldForTest(); h != weight {
+		t.Errorf("EnterBranch under a ceiling-only default holds %d, want the measured weight %d", h, weight)
+	}
+	s.Cleanup()
+
 	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: -5})
 	if l := git.DefaultCheckoutLimits(); l.InflightMaxBytes != 0 || l.Budget != nil {
 		t.Errorf("negative ceiling = %+v, want none", l)
 	}
 
-	ctx := context.Background()
-	repo, run := claimRepo(t)
-	weight := treeWeight(t, repo, run)
-	isolateTempDir(t)
 	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: weight / 2})
 	if _, err := git.EnterBranchWithLimits(ctx, repo, run, nil, git.CheckoutLimits{}); !errors.Is(err, git.ErrTreeTooLarge) {
 		t.Errorf("zero limits over a default ceiling: err = %v, want the default's refusal", err)
 	}
-	s, err := git.EnterBranchWithLimits(ctx, repo, run, nil, git.CheckoutLimits{InflightMaxBytes: 2 * weight})
+	s, err = git.EnterBranchWithLimits(ctx, repo, run, nil, git.CheckoutLimits{InflightMaxBytes: 2 * weight})
 	if err != nil {
 		t.Fatalf("own ceiling over the default: %v", err)
 	}
 	s.Cleanup()
+}
+
+// TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved (review round
+// 1, P4-1): whenever a branch scope returns its weight and its claim —
+// its Cleanup, a failure after the worktree was added, a failure before
+// anything was created — its private parent directory no longer exists
+// and git no longer lists its worktree.
+func TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved(t *testing.T) {
+	ctx := context.Background()
+	repo, run := claimRepo(t)
+	weight := treeWeight(t, repo, run)
+	tmp := isolateTempDir(t)
+	b := git.DefaultTreeBudget()
+	limits := git.CheckoutLimits{Budget: &b, InflightMaxBytes: 4 * weight}
+
+	var mu sync.Mutex
+	var releases int
+	var violations []string
+	restore := git.SetScopeReleaseHookForTest(func(repoDir, parent, worktreeDir string) {
+		mu.Lock()
+		defer mu.Unlock()
+		releases++
+		if parent != "" {
+			if _, err := os.Lstat(parent); err == nil {
+				violations = append(violations, "released while "+parent+" exists")
+			}
+			cmd := exec.Command("git", "worktree", "list", "--porcelain")
+			cmd.Dir = repoDir
+			out, err := cmd.Output()
+			if err != nil {
+				violations = append(violations, "git worktree list: "+err.Error())
+			} else if strings.Contains(string(out), filepath.Base(parent)) {
+				violations = append(violations, "released while git lists "+worktreeDir)
+			}
+		}
+	})
+	defer restore()
+
+	s, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Cleanup()
+
+	tip := tbGit(t, repo, nil, "rev-parse", run)
+	tbGit(t, repo, nil, "branch", "here", tip)
+	tbGit(t, repo, nil, "switch", "-q", "here")
+	if s, err := git.EnterBranchWithLimits(ctx, repo, "here", nil, limits); err == nil {
+		s.Cleanup()
+		t.Fatal("a branch checked out in the main worktree was entered")
+	}
+	tbGit(t, repo, nil, "switch", "-q", "main")
+
+	t.Setenv("TMPDIR", filepath.Join(tmp, "missing"))
+	if _, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits); err == nil {
+		t.Fatal("EnterBranch with no temporary directory succeeded")
+	}
+	t.Setenv("TMPDIR", tmp)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if releases != 3 {
+		t.Errorf("%d releases observed, want 3", releases)
+	}
+	for _, v := range violations {
+		t.Error(v)
+	}
+	if h := git.InflightHeldForTest(); h != 0 {
+		t.Errorf("gate holds %d, want 0", h)
+	}
 }

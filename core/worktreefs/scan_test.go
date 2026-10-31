@@ -85,14 +85,18 @@ var allowed = map[string]bool{
 	"adapters/git/treelock.go:treeReal":              true,
 	"adapters/git/treelock.go:CLIClient.restoreHeld": true,
 	// INIT-024 TASK-011: the branch claim's key, a repository's git common
-	// directory, derived without running git — Lstat of the root's .git
-	// (a directory, or a regular file naming a linked worktree's git
-	// directory) and of a bare root's HEAD and objects, and a read of at
-	// most 4 KiB of the .git file and of the git directory's commondir,
-	// each only when it is a regular file (no link followed, nothing
-	// written). Git-administrative entries only, never a working-tree file.
-	"adapters/git/checkout_admission.go:gitDirOf":      true,
-	"adapters/git/checkout_admission.go:readSmallFile": true,
+	// directory, derived without running git — Stat of a .git (a
+	// directory, or a regular file naming a linked worktree's git
+	// directory) and of a bare directory's HEAD and objects, from the
+	// given directory upward as git discovers them, and a read of at most
+	// 4 KiB of a .git file and of a git directory's commondir, each only
+	// when what it names is a regular file (no FIFO or device opened,
+	// nothing written); review round 1: the common directory's (device,
+	// inode) from Stat. Git-administrative entries only, never a
+	// working-tree file.
+	"adapters/git/checkout_admission.go:gitDirOf":         true,
+	"adapters/git/checkout_admission.go:readSmallFile":    true,
+	"adapters/git/checkout_identity_unix.go:fileIdentity": true,
 }
 
 func set(names ...string) map[string]bool {
