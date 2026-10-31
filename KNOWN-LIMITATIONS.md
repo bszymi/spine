@@ -1522,8 +1522,18 @@ The following limitations have been resolved:
   cannot move to an over-budget tree there; a merge re-checks the tip it measured, and
   `MergeBound` merges the exact measured commit. A writer outside the process that moves the
   checked-out branch between the merge's last tip check and `git merge` (git refuses pushes to it
-  by default), or that edits `info/attributes` behind the server, is not covered. The totals bound one tree at a time: concurrent worktrees of
-  different branches each get the full budget (no per-tenant disk quota; out of scope).
+  by default), or that edits `info/attributes` behind the server, is not covered.
+- **The budget bounds each checkout, not the checkouts in flight** (INIT-024 close, cross-task
+  review; follow-up). Every checkout, merge and push is measured on its own, but nothing bounds
+  the total bytes of the checkouts in progress at the same time, for one branch or across
+  branches. Concurrent branch-scoped writes each write a full within-budget tree under the
+  server's temporary directory (`TMPDIR`) before they finish — including concurrent writes to the
+  same run branch, and writes git then refuses because that branch is already checked out — so a
+  burst of them needs a multiple of the budget on that filesystem. There is no per-tenant disk
+  quota either. Operator levers: a lower `SPINE_GIT_TREE_MAX_BYTES`, and `TMPDIR` on its own
+  size-limited (quota'd) filesystem rather than a memory-backed tmpfs. Bounding the bytes in
+  flight (one entry per branch, a process-wide byte allowance) is the follow-up (INIT-024
+  TASK-010's close notes).
 - **Mutate deadline.** On expiry the command is SIGTERMed (git removes its locks) and the call
   fails with a permanent error wrapping `git.MutateTimeoutError`. With a deadline, `EnterBranch`
   adds the worktree `--no-checkout` and runs the `reset --hard` that fills it itself, because
