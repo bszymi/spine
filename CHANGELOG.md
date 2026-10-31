@@ -30,7 +30,9 @@ concurrent writes to different branches each got the full budget. No runtime sch
   queue, served in turn, and holds at most half the ceiling (one tree heavier than half only while
   it has nothing else in flight), so one workspace's waiting writes never hold up another's that
   fits. A write that does not fit waits; one still waiting when its request ends or after the mutate
-  deadline fails `503` (retryable); a tree heavier than the ceiling on its own is refused. The weight
+  deadline fails `503` (retryable); a tree heavier than the ceiling on its own is refused. The tree
+  checked out is the tree weighed: a branch that moved while its write waited is measured and
+  admitted again, and one that keeps moving (or moves during the checkout) fails `503`. The weight
   is returned only after the worktree is gone, and a branch-scoped write now pushes to origin after
   its scope is released.
 
@@ -65,7 +67,9 @@ concurrent writes to different branches each got the full budget. No runtime sch
   process default and other clients are unchanged. New API: `ErrBranchInUse`; `ErrCheckoutsInFlight`
   with the typed cause `*InflightWaitError{Weight, Ceiling, Err}` (matches the context's error)
   inside `*GitError{Kind: ErrKindTransient, Message: CheckoutsInFlightMessage}`, which the artifact
-  and workflow services report as `unavailable`; `TreeLimitInflightBytes` (a tree over the ceiling:
+  and workflow services report as `unavailable`; `ErrBranchMoved` (a branch that kept moving while
+  its checkout was admitted; it also matches `ErrCheckoutsInFlight`, with `Message:
+  BranchMovedMessage`); `TreeLimitInflightBytes` (a tree over the ceiling:
   `ErrTreeTooLarge`, permanent); `InflightEntryWeight`, `InflightWeight(TreeStats)` and
   `TreeBudget.MaxInflightWeight()` (an embedder can weigh its own checkouts the same way). No
   interface gains a method.

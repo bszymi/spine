@@ -1567,9 +1567,12 @@ The following limitations have been resolved:
     ceiling is twice `SPINE_GIT_TREE_MAX_BYTES`, raised to one maximal tree's weight
     (`SPINE_GIT_TREE_MAX_BYTES` + 4 KiB x `SPINE_GIT_TREE_MAX_ENTRIES`) when that is heavier: 4 GiB
     with the defaults. The weights of every open branch-scoped write stay within it; a tree heavier
-    than the ceiling on its own is refused permanently (`git_error`, like a budget refusal).
+    than the ceiling on its own is refused permanently (`git_error`, like a budget refusal). The tree
+    checked out is the tree weighed: a branch that moves while its write waits is measured and
+    admitted again, and one that keeps moving (or moves during the checkout) fails as unavailable.
   - *Fair across workspaces.* Each repository (in shared mode, each workspace) has its own queue,
-    served in turn, and holds at most half the ceiling; one tree heavier than half is admitted only
+    served in turn — freed room goes first to the workspace that has waited longest since it was
+    last served — and holds at most half the ceiling; one tree heavier than half is admitted only
     while its repository has nothing else in flight. One workspace's waiting writes never hold up
     another workspace's write that fits. A write that cannot be admitted waits, and one still
     waiting when its request ends or after `SPINE_GIT_MUTATE_TIMEOUT` fails as unavailable (`503`,
