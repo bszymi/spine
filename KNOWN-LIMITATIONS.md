@@ -1553,6 +1553,30 @@ The following limitations have been resolved:
   (retrying cannot shrink the tree); a refused branch-scoped write fails with `git_error`. One
   budget covers every client of the process, code-repository clones and merges included, so a
   code repository larger than the defaults needs the limits raised for the whole deployment.
+- **Concurrent branch-scoped writes are bounded in aggregate (INIT-024 TASK-011).** The budget
+  bounds one tree; what concurrent writes with a run's write context have on the temporary disk
+  together is bounded in-process, before anything is written:
+  - *One write scope per branch.* A write to a run branch that another write of the same process
+    is still writing to is refused at once with `git_error` (the classification of git's own
+    "already checked out" refusal, which came only after the tree was written); retry it once the
+    other write has finished.
+  - *A ceiling on in-flight bytes* (`spine serve`: `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`, default
+    the per-tree byte limit, so at most one maximal tree is written at a time while smaller ones
+    proceed together). The measured trees of every open branch-scoped write stay within it; a write
+    whose tree does not fit waits in arrival order, and one still waiting when its request ends or
+    after `SPINE_GIT_MUTATE_TIMEOUT` fails as unavailable (`503`, retryable). A tree larger than the
+    ceiling on its own is refused permanently (`git_error`, like a budget refusal). Embedders get the
+    one-writer claim at the bump; the ceiling only when they set `git.CheckoutLimits.InflightMaxBytes`
+    (zero, the library default, is no aggregate bound).
+  - *What remains.* The bound is per process: replicas or other processes sharing the temporary disk
+    each have their own. It weighs the blob bytes the measure sums, not filesystem overhead (inodes,
+    directory blocks), so a tree of many empty files weighs little (each tree is still held to
+    `SPINE_GIT_TREE_MAX_ENTRIES`). A branch checked out by something other than a write of this
+    process (a sequence in the shared tree, another process) is still refused by git only after the
+    worktree is written, within the ceiling. Only branch-scoped writes are weighed: checkouts, merges
+    and restores of a workspace's own tree and code-repository clones rewrite or create a persistent
+    tree and are bounded per tree. Operator levers: a lower ceiling or `SPINE_GIT_TREE_MAX_BYTES`, and
+    a `TMPDIR` on its own quota'd filesystem (on a tmpfs the trees are memory).
 
 ### Webhook Signing Secrets: `migrate` Mode Does Not Close the Cross-Workspace Transplant
 - **What:** signing secrets are sealed in the `enc:v2` envelope, bound to the workspace and the

@@ -6,6 +6,58 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-002 TASK-011: aggregate checkout bound)
+
+Closes the P3 the TASK-010 cross-task review found next to N-1: the checkout budget bounded one
+tree at a time, but concurrent branch-scoped writes each put a whole tree on the temporary disk every
+workspace shares, including concurrent writes to one run branch that git then refused, and
+concurrent writes to different branches each got the full budget. No runtime schema change.
+
+### Security
+
+- **One write scope per branch.** `git.EnterBranch` claims the branch for the repository (its git
+  common directory) in-process before it looks the branch up, measures it or creates the temporary
+  directory, and holds the claim until the scope's Cleanup has removed the worktree. A second
+  concurrent write to the branch is refused at once, before any git process runs and before anything
+  is written (it used to write the tree and then be refused by git's "already checked out" guard,
+  which could also let several worktrees attach to one branch).
+- **Bounded in-flight checkout bytes.** `spine serve` admits a branch-scoped write only while the
+  measured trees of every open branch-scoped write stay within `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`
+  (default: the per-tree byte limit, so at most one maximal tree at a time while smaller trees
+  proceed together). A write that does not fit waits in arrival order; one still waiting when its
+  request ends or after the mutate deadline fails `503` (retryable); a tree larger than the ceiling
+  on its own is refused. The weight is returned only after the worktree is gone.
+
+### Changed (operators)
+
+- New variable `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`: a positive integer of bytes; anything else
+  refuses to start; a value below `SPINE_GIT_TREE_MAX_BYTES` logs a startup warning (a branch-scoped
+  write of a tree between the two is refused). The bound is per process; replicas sharing a
+  temporary disk each have their own.
+- Concurrent writes with a run's write context to the same run branch: one proceeds and the others
+  fail `git_error` at once, where before git refused most of them after writing (and sometimes let
+  two through, one of which then failed at commit). Retry after the first has finished.
+
+### Changed (embedders)
+
+- **A concurrent same-branch entry is refused before writing instead of after.** With no limits set
+  (the library default) `git.EnterBranch` still runs the same git commands with the same argv; the
+  only change is that a second scope for a branch this process already holds is refused before any
+  git process, with an untyped error wrapping the new `git.ErrBranchInUse` — not a `*GitError`, like
+  git's refusal it replaces, so callers classify it as before (the artifact and workflow services:
+  `git_error`). The claim's key is derived in-process (no extra git process). `WriteScope.Cleanup`
+  of a branch scope now runs its removal once however often it is called.
+- **New limit field, opt-in.** `git.CheckoutLimits.InflightMaxBytes` (0, the default: no aggregate
+  bound) weighs every branch scope of the process in one FIFO gate, from admission to Cleanup. A
+  ceiling set without a `Budget` brings the default budget (the weight is the measure). New API:
+  `ErrBranchInUse`; `ErrCheckoutsInFlight` with the typed cause `*InflightWaitError{Weight, Ceiling,
+  Err}` (matches the context's error) inside `*GitError{Kind: ErrKindTransient, Message:
+  CheckoutsInFlightMessage}`, which the artifact and workflow services report as `unavailable`;
+  `TreeLimitInflightBytes` (a tree over the ceiling: `ErrTreeTooLarge`, permanent). No interface
+  gains a method.
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-002 TASK-005: standalone push-gate races)
 
 Closes review findings N-8, N-9 and N-13 (P3, standalone git endpoint). No runtime schema change;
