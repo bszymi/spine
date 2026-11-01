@@ -30,7 +30,7 @@ import (
 // admitted at once — B's waiter is not in C's way. When A releases, B is
 // admitted.
 func TestInflightGate_OneRepositoryNeverBlocksAnother(t *testing.T) {
-	ctx := t.Context()
+	ctx := boundedCtx(t, 10*time.Second)
 	const ceiling = 100
 	relA, err := git.AdmitCheckoutForTest(ctx, "repo-a", 60, ceiling)
 	if err != nil {
@@ -118,7 +118,6 @@ func entriesUnder(root string) int64 {
 // such tree refuses it. At e92b45c4 every one weighed 0: all three were
 // admitted together, and so was the tree over the ceiling.
 func TestEnterBranch_EntriesAreWeighed(t *testing.T) {
-	ctx := context.Background()
 	const repos, dirs = 3, 1500
 	type fixture struct{ repo, run string }
 	var fx []fixture
@@ -126,7 +125,7 @@ func TestEnterBranch_EntriesAreWeighed(t *testing.T) {
 		r, b := entryTreeRepo(t, dirs)
 		fx = append(fx, fixture{r, b})
 	}
-	st, err := git.MeasureTree(ctx, git.NewCLIClient(fx[0].repo), fx[0].run)
+	st, err := git.MeasureTree(t.Context(), git.NewCLIClient(fx[0].repo), fx[0].run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +137,9 @@ func TestEnterBranch_EntriesAreWeighed(t *testing.T) {
 	b := git.DefaultTreeBudget()
 	limits := git.CheckoutLimits{Budget: &b, MutateTimeout: git.DefaultMutateTimeout, InflightMaxBytes: ceiling}
 	tmp := isolateTempDir(t)
+	// Two rounds of scopes held 300 ms each; 30 s ends a wait that never
+	// would.
+	ctx := boundedCtx(t, 30*time.Second)
 
 	var inScope, maxInScope, peakEntries atomic.Int64
 	stop, stopped := make(chan struct{}), make(chan struct{})
@@ -194,9 +196,7 @@ func TestEnterBranch_EntriesAreWeighed(t *testing.T) {
 	}
 
 	small := git.CheckoutLimits{Budget: &b, InflightMaxBytes: weight / 2}
-	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	s, err := git.EnterBranchWithLimits(wctx, fx[0].repo, fx[0].run, nil, small)
+	s, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), fx[0].repo, fx[0].run, nil, small)
 	if err == nil {
 		s.Cleanup()
 		t.Fatal("a tree weighing twice the ceiling in entries alone was admitted")

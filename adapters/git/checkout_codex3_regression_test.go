@@ -10,7 +10,6 @@ package git_test
 //     waiting for the same room.
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -23,7 +22,6 @@ import (
 // as heavy as the holder's. Once admitted it holds the NEW tree's weight —
 // the tree it checks out — not the small one it measured first.
 func TestEnterBranch_BranchMovedWhileWaitingIsReweighed(t *testing.T) {
-	ctx := context.Background()
 	holder, run := claimRepo(t)
 
 	repo := tbNeutralRepo(t)
@@ -48,17 +46,25 @@ func TestEnterBranch_BranchMovedWhileWaitingIsReweighed(t *testing.T) {
 	limits := git.CheckoutLimits{Budget: &b, InflightMaxBytes: ceiling}
 	tmp := isolateTempDir(t)
 
-	h, err := git.EnterBranchWithLimits(ctx, holder, run, nil, limits)
+	h, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), holder, run, nil, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupAtEnd(t, h)
 	type result struct {
 		s   *git.WriteScope
 		err error
 	}
 	got := make(chan result, 1)
+	// A wait that never ends is refused at boundedCtx's deadline (the
+	// test fails by name); a scope admitted after a failure is released
+	// at Cleanup.
+	wait := boundedCtx(t, 10*time.Second)
 	go func() {
-		s, err := git.EnterBranchWithLimits(t.Context(), repo, "grow", nil, limits)
+		s, err := git.EnterBranchWithLimits(wait, repo, "grow", nil, limits)
+		if err == nil {
+			cleanupAtEnd(t, s)
+		}
 		got <- result{s, err}
 	}()
 	waitUntil(t, "the entry to wait for room", func() bool { return git.InflightWaitersForTest() == 1 })
@@ -96,7 +102,7 @@ func TestEnterBranch_BranchMovedWhileWaitingIsReweighed(t *testing.T) {
 // waited longest since it was last served gets it: after A is served once,
 // B — not A's next — takes the following slot.
 func TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne(t *testing.T) {
-	ctx := t.Context()
+	ctx := boundedCtx(t, 10*time.Second)
 	const ceiling = 100
 	relX, err := git.AdmitCheckoutForTest(ctx, "x", 70, ceiling)
 	if err != nil {

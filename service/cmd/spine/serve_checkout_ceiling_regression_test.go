@@ -84,13 +84,17 @@ func TestServeCeiling_OneMaximalTreeLeavesRoomForOtherRepositories(t *testing.T)
 	other := ceilRepo(t, "spine/run/v", 1, 10)
 	t.Setenv("TMPDIR", t.TempDir())
 
-	a, err := git.EnterBranch(context.Background(), maximal, "spine/run/a", nil)
+	// The first entry waits in the gate only on a defect: 10 s then fails
+	// the test by name instead of hanging it.
+	actx, acancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer acancel()
+	a, err := git.EnterBranch(actx, maximal, "spine/run/a", nil)
 	if err != nil {
 		t.Fatalf("a tree at the per-tree limit was refused: %v", err)
 	}
 	defer a.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	begun := time.Now()
 	v, err := git.EnterBranch(ctx, other, "spine/run/v", nil)

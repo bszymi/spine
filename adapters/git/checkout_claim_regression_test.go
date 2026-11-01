@@ -69,6 +69,41 @@ func installGitCallLog(t *testing.T) (calls func() []string, reset func()) {
 	return calls, reset
 }
 
+// boundedCtx is a context that ends d from now, or with the test. Every
+// entry and admission that can wait in the process-wide in-flight gate
+// runs under one, so a defect that keeps it waiting fails that test by
+// name — with the refusal the wait ends in — instead of hanging the
+// binary until its -timeout (which names no test, and leaves the rest
+// of the package unrun). It is cancelled at Cleanup.
+func boundedCtx(t *testing.T, d time.Duration) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), d)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// cleanupAtEnd hands s.Cleanup to the test's Cleanup, so a scope a failing
+// test leaves held never carries its claim and its in-flight weight into
+// the next test (Cleanup is idempotent: the test may still call it
+// itself). It waits for it at most 10 s: a gate a defect left locked — a
+// panic while the gate's lock was held — must not deadlock the failing
+// test's report.
+func cleanupAtEnd(t *testing.T, s *git.WriteScope) {
+	t.Helper()
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			s.Cleanup()
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("a scope's Cleanup did not return within 10 s: the in-flight gate is stuck")
+		}
+	})
+}
+
 func countCalls(calls []string, want string) int {
 	n := 0
 	for _, c := range calls {

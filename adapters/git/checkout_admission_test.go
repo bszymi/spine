@@ -291,7 +291,6 @@ func TestEnterBranch_BranchInUseKeepsTheRefusalClass(t *testing.T) {
 // trees that fit together proceed together, every entry is admitted in
 // the end, and the gate is empty afterwards.
 func TestEnterBranch_InflightCeilingBoundsDifferentBranches(t *testing.T) {
-	ctx := context.Background()
 	const branches = 6
 	repos := make([]string, branches)
 	var run string
@@ -303,6 +302,9 @@ func TestEnterBranch_InflightCeilingBoundsDifferentBranches(t *testing.T) {
 	b := git.DefaultTreeBudget()
 	limits := git.CheckoutLimits{Budget: &b, MutateTimeout: git.DefaultMutateTimeout, InflightMaxBytes: ceiling}
 	tmp := isolateTempDir(t)
+	// Three rounds of two scopes held 200 ms each; 30 s ends a wait that
+	// never would.
+	ctx := boundedCtx(t, 30*time.Second)
 
 	watch := watchPeak(tmp)
 	var inScope, maxInScope, gateOver atomic.Int64
@@ -363,7 +365,6 @@ func TestEnterBranch_InflightCeilingBoundsDifferentBranches(t *testing.T) {
 // waiting entry is admitted as soon as the holder's Cleanup returns the
 // room.
 func TestEnterBranch_InflightWaitEndsWithRetryableError(t *testing.T) {
-	ctx := context.Background()
 	repoA, run := claimRepo(t)
 	repo, _ := claimRepo(t)
 	tbGit(t, repo, nil, "branch", "b1", run)
@@ -374,15 +375,19 @@ func TestEnterBranch_InflightWaitEndsWithRetryableError(t *testing.T) {
 	tmp := isolateTempDir(t)
 
 	// Another repository's tree leaves less than one tree of room.
-	held, err := git.EnterBranchWithLimits(ctx, repoA, run, nil, limits)
+	held, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repoA, run, nil, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupAtEnd(t, held)
 
-	wctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	wctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	begun := time.Now()
-	_, err = git.EnterBranchWithLimits(wctx, repo, "b1", nil, limits)
+	s, err := git.EnterBranchWithLimits(wctx, repo, "b1", nil, limits)
 	cancel()
+	if err == nil {
+		s.Cleanup() // admitted beside the held tree: nothing may stay in the gate
+	}
 	requireInflightWait(t, err, weight, ceiling, context.DeadlineExceeded)
 	if d := time.Since(begun); d < 250*time.Millisecond {
 		t.Errorf("refused after %s: it must wait until the context ends", d)
@@ -391,10 +396,13 @@ func TestEnterBranch_InflightWaitEndsWithRetryableError(t *testing.T) {
 	bounded := limits
 	bounded.MutateTimeout = 300 * time.Millisecond
 	// The 20 s context only keeps a broken bound from hanging the test.
-	safety, cancelSafety := context.WithTimeout(ctx, 20*time.Second)
+	safety, cancelSafety := context.WithTimeout(t.Context(), 20*time.Second)
 	begun = time.Now()
-	_, err = git.EnterBranchWithLimits(safety, repo, "b1", nil, bounded)
+	s, err = git.EnterBranchWithLimits(safety, repo, "b1", nil, bounded)
 	cancelSafety()
+	if err == nil {
+		s.Cleanup()
+	}
 	requireInflightWait(t, err, weight, ceiling, context.DeadlineExceeded)
 	if d := time.Since(begun); d > 10*time.Second {
 		t.Errorf("the mutate deadline did not bound the wait: %s", d)
@@ -415,10 +423,15 @@ func TestEnterBranch_InflightWaitEndsWithRetryableError(t *testing.T) {
 		err error
 	}
 	got := make(chan result, 1)
+	// boundedCtx ends with the test, so a failure below never leaves this
+	// wait in the process-wide gate; a scope admitted after one is
+	// released at Cleanup.
+	wait := boundedCtx(t, 10*time.Second)
 	go func() {
-		// t.Context(): a failure below must not leave this wait in the
-		// process-wide gate.
-		s, err := git.EnterBranchWithLimits(t.Context(), repo, "b1", nil, limits)
+		s, err := git.EnterBranchWithLimits(wait, repo, "b1", nil, limits)
+		if err == nil {
+			cleanupAtEnd(t, s)
+		}
 		got <- result{s, err}
 	}()
 	waitUntil(t, "the entry to wait in the gate", func() bool { return git.InflightWaitersForTest() == 1 })
@@ -444,7 +457,6 @@ func TestEnterBranch_InflightWaitEndsWithRetryableError(t *testing.T) {
 // Seen = the measured bytes) — even with the gate empty, and nothing is
 // written; a tree within the ceiling is admitted.
 func TestEnterBranch_TreeOverTheInflightCeilingIsRefused(t *testing.T) {
-	ctx := context.Background()
 	repo, run := claimRepo(t)
 	weight := treeWeight(t, repo, run)
 	b := git.DefaultTreeBudget()
@@ -453,10 +465,8 @@ func TestEnterBranch_TreeOverTheInflightCeilingIsRefused(t *testing.T) {
 
 	// The 10 s context only keeps a refusal that waits from hanging the
 	// test; the refusal must come at once.
-	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 	begun := time.Now()
-	s, err := git.EnterBranchWithLimits(wctx, repo, run, nil, limits)
+	s, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, run, nil, limits)
 	if err == nil {
 		s.Cleanup()
 		t.Fatal("a tree over the ceiling was admitted")
@@ -474,7 +484,7 @@ func TestEnterBranch_TreeOverTheInflightCeilingIsRefused(t *testing.T) {
 	}
 
 	tbGit(t, repo, nil, "branch", "small", "main")
-	ok, err := git.EnterBranchWithLimits(ctx, repo, "small", nil, limits)
+	ok, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, "small", nil, limits)
 	if err != nil {
 		t.Fatalf("a tree within the ceiling: %v", err)
 	}
@@ -488,13 +498,12 @@ func TestEnterBranch_TreeOverTheInflightCeilingIsRefused(t *testing.T) {
 // claim cannot see) and a temporary directory that cannot be created —
 // and the claim with it; zero limits never touch the gate (AC 4).
 func TestEnterBranch_InflightWeightIsReturnedOnEveryExit(t *testing.T) {
-	ctx := context.Background()
 	t.Cleanup(git.ResetDefaultCheckoutLimitsForTest)
 	repo, run := claimRepo(t)
 	weight := treeWeight(t, repo, run)
 	tmp := isolateTempDir(t)
 
-	s, err := git.EnterBranch(ctx, repo, run, nil)
+	s, err := git.EnterBranch(boundedCtx(t, 10*time.Second), repo, run, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +513,7 @@ func TestEnterBranch_InflightWeightIsReturnedOnEveryExit(t *testing.T) {
 	s.Cleanup()
 
 	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: 4 * weight})
-	s, err = git.EnterBranch(ctx, repo, run, nil)
+	s, err = git.EnterBranch(boundedCtx(t, 10*time.Second), repo, run, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +529,7 @@ func TestEnterBranch_InflightWeightIsReturnedOnEveryExit(t *testing.T) {
 	tip := tbGit(t, repo, nil, "rev-parse", run)
 	tbGit(t, repo, nil, "branch", "here", tip)
 	tbGit(t, repo, nil, "switch", "-q", "here")
-	if s, err := git.EnterBranch(ctx, repo, "here", nil); err == nil || errors.Is(err, git.ErrBranchInUse) {
+	if s, err := git.EnterBranch(boundedCtx(t, 10*time.Second), repo, "here", nil); err == nil || errors.Is(err, git.ErrBranchInUse) {
 		if s != nil {
 			s.Cleanup()
 		}
@@ -533,14 +542,15 @@ func TestEnterBranch_InflightWeightIsReturnedOnEveryExit(t *testing.T) {
 	tbGit(t, repo, nil, "switch", "-q", "main")
 
 	t.Setenv("TMPDIR", filepath.Join(tmp, "missing"))
-	if _, err := git.EnterBranch(ctx, repo, run, nil); err == nil {
+	if s, err := git.EnterBranch(boundedCtx(t, 10*time.Second), repo, run, nil); err == nil {
+		s.Cleanup()
 		t.Fatal("EnterBranch with no temporary directory succeeded")
 	}
 	if h := git.InflightHeldForTest(); h != 0 {
 		t.Errorf("after a failed temporary directory: gate holds %d, want 0", h)
 	}
 	t.Setenv("TMPDIR", tmp)
-	s, err = git.EnterBranch(ctx, repo, run, nil)
+	s, err = git.EnterBranch(boundedCtx(t, 10*time.Second), repo, run, nil)
 	if err != nil {
 		t.Fatalf("the failed entry kept the claim or the weight: %v", err)
 	}
@@ -556,9 +566,10 @@ type gateAdmission struct {
 }
 
 // admitAsync asks the gate for weight on behalf of repo in a goroutine.
-// The gate is process-wide: t.Context() (pass a context derived from it)
-// ends every wait a failed test leaves behind, and an admitted weight is
-// released at Cleanup (releases are idempotent).
+// The gate is process-wide: pass a context from boundedCtx, which ends a
+// wait that never would (the test then fails by name) and every wait a
+// failed test leaves behind; an admitted weight is released at Cleanup
+// (releases are idempotent). admitNow is the same, waiting in the test.
 func admitAsync(t *testing.T, ctx context.Context, repo string, weight, ceiling int64) chan gateAdmission {
 	t.Helper()
 	ch := make(chan gateAdmission, 1)
@@ -608,7 +619,7 @@ func requireEmptyGate(t *testing.T) {
 // next one in. A context that is already done never acquires, even with
 // room; a weight over the ceiling is refused at once.
 func TestInflightGate_FIFOWithinARepositoryAndCancellation(t *testing.T) {
-	ctx := t.Context()
+	ctx := boundedCtx(t, 10*time.Second)
 	const ceiling = 200 // half: 100 per repository
 	release60 := admitNow(t, ctx, "r1", 60, ceiling)
 
@@ -634,12 +645,20 @@ func TestInflightGate_FIFOWithinARepositoryAndCancellation(t *testing.T) {
 
 	done, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := git.AdmitCheckoutForTest(done, "r2", 1, ceiling); !errors.Is(err, git.ErrCheckoutsInFlight) {
+	r, err := git.AdmitCheckoutForTest(done, "r2", 1, ceiling)
+	if r != nil {
+		r() // admitted: nothing may stay in the gate
+	}
+	if !errors.Is(err, git.ErrCheckoutsInFlight) {
 		t.Errorf("a done context with room: err = %v, want the refusal", err)
 	}
 	short, cancelShort := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelShort()
-	if _, err := git.AdmitCheckoutForTest(short, "r2", ceiling+1, ceiling); !errors.Is(err, git.ErrTreeTooLarge) {
+	r, err = git.AdmitCheckoutForTest(short, "r2", ceiling+1, ceiling)
+	if r != nil {
+		r()
+	}
+	if !errors.Is(err, git.ErrTreeTooLarge) {
 		t.Errorf("a weight over the ceiling: err = %v, want ErrTreeTooLarge", err)
 	}
 
@@ -655,7 +674,7 @@ func TestInflightGate_FIFOWithinARepositoryAndCancellation(t *testing.T) {
 // and a single weight over half is admitted only while its repository
 // holds nothing.
 func TestInflightGate_HalfTheCeilingPerRepository(t *testing.T) {
-	ctx := t.Context()
+	ctx := boundedCtx(t, 10*time.Second)
 	const ceiling = 100
 	relA := admitNow(t, ctx, "a", 40, ceiling)
 	a2 := admitAsync(t, ctx, "a", 20, ceiling) // 60 > 50: waits although 60 <= 100
@@ -694,7 +713,7 @@ func TestInflightGate_HalfTheCeilingPerRepository(t *testing.T) {
 // head of each before the second of any — so a repository with many
 // waiters cannot take the room another repository is waiting for.
 func TestInflightGate_RoundRobinAcrossRepositories(t *testing.T) {
-	ctx := t.Context()
+	ctx := boundedCtx(t, 10*time.Second)
 	const ceiling = 100
 	relX := admitNow(t, ctx, "x", 100, ceiling)
 	b1 := admitAsync(t, ctx, "b", 30, ceiling)
@@ -750,7 +769,7 @@ func requireEmptyGateLater(t *testing.T, pending chan gateAdmission) func() {
 // waits for nothing is dropped, so the gate's state is bounded by the
 // repositories in flight.
 func TestInflightGate_ForgetsIdleRepositories(t *testing.T) {
-	ctx := t.Context()
+	ctx := boundedCtx(t, 10*time.Second)
 	for i := range 50 {
 		admitNow(t, ctx, fmt.Sprintf("idle-%d", i), 1, 100)()
 	}
@@ -827,7 +846,7 @@ func TestCheckoutLimits_InflightCeiling(t *testing.T) {
 	repo, run := claimRepo(t)
 	weight := treeWeight(t, repo, run)
 	isolateTempDir(t)
-	s, err := git.EnterBranch(ctx, repo, run, nil)
+	s, err := git.EnterBranch(boundedCtx(t, 10*time.Second), repo, run, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,10 +861,16 @@ func TestCheckoutLimits_InflightCeiling(t *testing.T) {
 	}
 
 	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: weight / 2})
-	if _, err := git.EnterBranchWithLimits(ctx, repo, run, nil, git.CheckoutLimits{}); !errors.Is(err, git.ErrTreeTooLarge) {
+	// A tree over the ceiling never fits: a refusal that waits instead
+	// ends with boundedCtx and fails here by name.
+	s, err = git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, run, nil, git.CheckoutLimits{})
+	if err == nil {
+		s.Cleanup()
+	}
+	if !errors.Is(err, git.ErrTreeTooLarge) {
 		t.Errorf("zero limits over a default ceiling: err = %v, want the default's refusal", err)
 	}
-	s, err = git.EnterBranchWithLimits(ctx, repo, run, nil, git.CheckoutLimits{InflightMaxBytes: 2 * weight})
+	s, err = git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, run, nil, git.CheckoutLimits{InflightMaxBytes: 2 * weight})
 	if err != nil {
 		t.Fatalf("own ceiling over the default: %v", err)
 	}
@@ -858,7 +883,6 @@ func TestCheckoutLimits_InflightCeiling(t *testing.T) {
 // anything was created — its private parent directory no longer exists
 // and git no longer lists its worktree.
 func TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved(t *testing.T) {
-	ctx := context.Background()
 	repo, run := claimRepo(t)
 	weight := treeWeight(t, repo, run)
 	tmp := isolateTempDir(t)
@@ -888,7 +912,7 @@ func TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved(t *testing.T) {
 	})
 	defer restore()
 
-	s, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits)
+	s, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, run, nil, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -897,14 +921,15 @@ func TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved(t *testing.T) {
 	tip := tbGit(t, repo, nil, "rev-parse", run)
 	tbGit(t, repo, nil, "branch", "here", tip)
 	tbGit(t, repo, nil, "switch", "-q", "here")
-	if s, err := git.EnterBranchWithLimits(ctx, repo, "here", nil, limits); err == nil {
+	if s, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, "here", nil, limits); err == nil {
 		s.Cleanup()
 		t.Fatal("a branch checked out in the main worktree was entered")
 	}
 	tbGit(t, repo, nil, "switch", "-q", "main")
 
 	t.Setenv("TMPDIR", filepath.Join(tmp, "missing"))
-	if _, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits); err == nil {
+	if s, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, run, nil, limits); err == nil {
+		s.Cleanup()
 		t.Fatal("EnterBranch with no temporary directory succeeded")
 	}
 	t.Setenv("TMPDIR", tmp)
@@ -981,7 +1006,6 @@ func requireBranchMoved(t *testing.T, err error) {
 // than the one weighed — is refused with the retryable ErrBranchMoved and
 // nothing is left: no directory, no worktree, no weight, no claim.
 func TestEnterBranch_BranchMovedDuringCheckoutIsRefused(t *testing.T) {
-	ctx := context.Background()
 	repo, run := claimRepo(t)
 	other := tbGit(t, repo, nil, "rev-parse", "main")
 	weight := treeWeight(t, repo, run)
@@ -990,7 +1014,13 @@ func TestEnterBranch_BranchMovedDuringCheckoutIsRefused(t *testing.T) {
 	tmp := isolateTempDir(t)
 
 	installBranchMover(t, repo, "refs/heads/"+run, "worktree", "add", other)
-	_, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits)
+	s, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, run, nil, limits)
+	if err == nil {
+		// Entered at a tree nobody weighed: release it before failing, so
+		// its claim and weight do not stay in the process for the next
+		// test.
+		s.Cleanup()
+	}
 	requireBranchMoved(t, err)
 	assertEmptyDir(t, tmp)
 	if n := worktreeCount(t, repo); n != 1 {
@@ -1000,7 +1030,7 @@ func TestEnterBranch_BranchMovedDuringCheckoutIsRefused(t *testing.T) {
 		t.Errorf("gate holds %d, want 0", h)
 	}
 	t.Setenv("MOVER_CMD1", "none")
-	s, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits)
+	s, err = git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, run, nil, limits)
 	if err != nil {
 		t.Fatalf("the refused entry kept the claim: %v", err)
 	}
@@ -1014,7 +1044,6 @@ func TestEnterBranch_BranchMovedDuringCheckoutIsRefused(t *testing.T) {
 // With no ceiling nothing is re-read: the entry proceeds as before the
 // task.
 func TestEnterBranch_BranchThatKeepsMovingIsRefused(t *testing.T) {
-	ctx := context.Background()
 	repo, run := claimRepo(t)
 	a := tbGit(t, repo, nil, "rev-parse", run)
 	bTip := tbGit(t, repo, nil, "rev-parse", "main")
@@ -1024,14 +1053,17 @@ func TestEnterBranch_BranchThatKeepsMovingIsRefused(t *testing.T) {
 	tmp := isolateTempDir(t)
 
 	installBranchMover(t, repo, "refs/heads/"+run, "ls-tree", "-r", bTip, a)
-	_, err := git.EnterBranchWithLimits(ctx, repo, run, nil, limits)
+	s, err := git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, run, nil, limits)
+	if err == nil {
+		s.Cleanup() // entered: release it before failing (see above)
+	}
 	requireBranchMoved(t, err)
 	assertEmptyDir(t, tmp)
 	if h := git.InflightHeldForTest(); h != 0 {
 		t.Errorf("gate holds %d, want 0", h)
 	}
 
-	s, err := git.EnterBranchWithLimits(ctx, repo, run, nil, git.CheckoutLimits{Budget: &b})
+	s, err = git.EnterBranchWithLimits(boundedCtx(t, 10*time.Second), repo, run, nil, git.CheckoutLimits{Budget: &b})
 	if err != nil {
 		t.Fatalf("no ceiling: %v", err)
 	}

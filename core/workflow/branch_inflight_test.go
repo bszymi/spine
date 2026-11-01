@@ -38,11 +38,15 @@ func TestCreate_CheckoutRefusalsKeepTheirClassification(t *testing.T) {
 	git.SetDefaultCheckoutLimits(git.CheckoutLimits{InflightMaxBytes: w + w/2})
 	t.Cleanup(func() { git.SetDefaultCheckoutLimits(git.CheckoutLimits{}) })
 
-	held, err := git.EnterBranch(ctx, repo, "spine/run/held", nil)
+	// The holder waits in the gate only on a defect: 10 s then fails the
+	// test by name instead of hanging it.
+	holdCtx, holdCancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer holdCancel()
+	held, err := git.EnterBranch(holdCtx, repo, "spine/run/held", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Cleanup()
+	defer cleanupWithin(t, held, 10*time.Second)
 
 	// The 10 s context only keeps a refusal that waits from hanging the
 	// test; the refusal must come at once.
@@ -60,5 +64,23 @@ func TestCreate_CheckoutRefusalsKeepTheirClassification(t *testing.T) {
 	_, err = svc.Create(wctx, "task-default", fmtYAML("task-default", "1.0"))
 	if !errors.As(err, &se) || se.Code != domain.ErrUnavailable || !strings.Contains(se.Message, git.CheckoutsInFlightMessage) {
 		t.Errorf("ceiling full until the request ended: err = %v, want unavailable", err)
+	}
+}
+
+// cleanupWithin runs s.Cleanup but stops waiting for it after d: a gate a
+// defect left locked (a panic while the gate's lock was held) must fail
+// the test by name — the panic's report — not deadlock it in its deferred
+// Cleanup until the binary's -timeout.
+func cleanupWithin(t *testing.T, s *git.WriteScope, d time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Cleanup()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Errorf("the holder's Cleanup did not return within %s: the in-flight gate is stuck", d)
 	}
 }
