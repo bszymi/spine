@@ -124,6 +124,11 @@ func (s *Service) enterBranch(ctx context.Context) (*git.WriteScope, error) {
 		if _, ok := err.(*domain.SpineError); ok {
 			return nil, err
 		}
+		// The in-flight checkout ceiling stayed full until the request
+		// gave up (INIT-024 TASK-011): retryable, so unavailable (503).
+		if errors.Is(err, git.ErrCheckoutsInFlight) {
+			return nil, domain.NewError(domain.ErrUnavailable, err.Error())
+		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 	return scope, nil

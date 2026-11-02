@@ -84,6 +84,26 @@ var allowed = map[string]bool{
 	// restore (read-only, never followed, never removed).
 	"adapters/git/treelock.go:treeReal":              true,
 	"adapters/git/treelock.go:CLIClient.restoreHeld": true,
+	// INIT-024 TASK-011: the branch claim's key, a repository's git common
+	// directory, derived without running git — Stat of a .git (a
+	// directory, or a regular file naming a linked worktree's git
+	// directory) and of a bare directory's HEAD and objects, from the
+	// given directory upward as git discovers them, and a read of at most
+	// 4 KiB of a .git file and of a git directory's commondir, each only
+	// when what it names is a regular file (no FIFO or device opened,
+	// nothing written); review round 1: the common directory's (device,
+	// inode) from Stat. Git-administrative entries only, never a
+	// working-tree file.
+	"adapters/git/checkout_admission.go:gitDirOf":         true,
+	"adapters/git/checkout_admission.go:readSmallFile":    true,
+	"adapters/git/checkout_identity_unix.go:fileIdentity": true,
+	// INIT-024 TASK-011 delta review (P3-A): with an in-flight ceiling a
+	// branch scope attaches without a checkout and keeps git's "already
+	// used by worktree" guard itself — Stat (never Open) of its own
+	// temporary worktree and of each worktree root `git worktree list`
+	// names for the same branch, only to tell its own apart by file
+	// identity. Nothing is read or written.
+	"adapters/git/checkout_admission.go:branchCheckedOutElsewhere": true,
 }
 
 func set(names ...string) map[string]bool {

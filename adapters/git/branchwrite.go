@@ -126,8 +126,18 @@ var TrailerOrder = []string{
 //     checked out / used by worktree" guard.
 //  3. the post-condition `git symbolic-ref -q HEAD` == refs/heads/<n>.
 //
+// (With an in-flight ceiling, step 2 is an attach without a checkout; see
+// EnterBranchWithLimits.)
+//
 // On any failure the worktree and its parent are removed and an error is
 // returned; a missing branch is a *GitError{Kind: ErrKindNotFound}.
+//
+// One write scope per branch (INIT-024 TASK-011): before the lookup, the
+// branch is claimed in-process for the repository (its git common
+// directory) until Cleanup. While another scope of this process holds
+// it, the entry is refused at once with an error matching ErrBranchInUse
+// and nothing is created or written — the same refusal git gave for a
+// branch already checked out, made before the write instead of after it.
 //
 // It applies the process default checkout limits (SetDefaultCheckoutLimits;
 // none unless the host set them): see EnterBranchWithLimits.
@@ -148,11 +158,30 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 //   - with a mutate deadline, the worktree is added `--no-checkout` and
 //     filled by a `reset --hard` this process runs, so the command that
 //     writes the tree is a direct child the deadline's SIGTERM reaches;
-//     `worktree add`, the reset and `switch` all run under it.
+//     `worktree add`, the reset and `switch` all run under it;
+//   - with an in-flight ceiling (InflightMaxBytes; INIT-024 TASK-011),
+//     the measured tree is admitted to the process-wide gate before the
+//     private parent directory is created, and its weight is held until
+//     Cleanup has removed the worktree: the entry waits (its repository's
+//     queue, served in turn with the others', under ctx and ONE mutate
+//     deadline for every re-weigh) while the trees of the other scopes
+//     leave no room, and a wait that ends first is the transient
+//     ErrCheckoutsInFlight *GitError; a tree over the ceiling on its own
+//     is the ErrTreeTooLarge *GitError (TreeLimitInflightBytes). Nothing
+//     is created or written on either refusal. The tree written is the
+//     tree weighed: the worktree is filled at the weighed commit and
+//     attached to the branch without a checkout (`git symbolic-ref HEAD
+//     refs/heads/<n>` instead of step 2's `switch`), a branch another
+//     worktree has checked out is refused (matching ErrBranchInUse, git's
+//     guard kept), and a branch that moved since it was weighed is the
+//     transient ErrBranchMoved — the worktree removed, the moved tip never
+//     written.
 //
-// With neither (the zero limits and no process default) it is exactly
-// EnterBranch before this change: no extra git process, the caller's
-// context alone.
+// With none of them (the zero limits and no process default) it is
+// exactly EnterBranch before INIT-024 TASK-003 — no extra git process,
+// the caller's context alone — except that a second scope for a branch
+// this process already holds is refused before anything is written
+// (see EnterBranch).
 func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validator func(string) error, limits CheckoutLimits) (*WriteScope, error) {
 	limits = limits.over(DefaultCheckoutLimits())
 	if branch == "" {
@@ -167,6 +196,36 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 	if err != nil {
 		return nil, err
 	}
+
+	// One writer per branch, claimed before the lookup, the measure and
+	// the temporary directory (checkout_admission.go). The repository's
+	// key (its git common directory's identity) is also its share of the
+	// in-flight gate. Every failure below returns the claim and any
+	// admitted weight, after the worktree and its directory are gone (the
+	// deferred release runs after the removal each error path makes before
+	// it returns); a returned scope hands both to its Cleanup, which
+	// releases them after its own removal.
+	repoKey := repoClaimKey(repoDir)
+	releaseClaim, ok := claimBranch(repoKey, headsPrefix+short)
+	if !ok {
+		return nil, fmt.Errorf("add worktree for branch %s: %w", branch, ErrBranchInUse)
+	}
+	releaseWeight := func() {}
+	var parent, worktreeDir string
+	release := func() {
+		if h := scopeReleaseHook.Load(); h != nil {
+			(*h)(repoDir, parent, worktreeDir)
+		}
+		releaseWeight()
+		releaseClaim()
+	}
+	entered := false
+	defer func() {
+		if !entered {
+			release()
+		}
+	}()
+
 	oid, ok, err := lookupBranch(ctx, repoDir, "worktree", short)
 	if err != nil {
 		return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
@@ -175,11 +234,62 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 		return nil, fmt.Errorf("add worktree for branch %s: %w", branch, branchNotFound("worktree", "branch", branch))
 	}
 	// The checkout budget, before anything exists on disk. The measure
-	// uses the same exact object id the worktree is added at.
-	if limits.Budget != nil {
-		if err := limits.Budget.checkRevs(ctx, &CLIClient{repoPath: repoDir}, "worktree", oid); err != nil {
+	// uses the same exact object id the worktree is added at. An
+	// in-flight ceiling weighs the tree by its measure, so a ceiling set
+	// without a budget measures against the default budget — here only:
+	// the process default and every other client keep exactly the limits
+	// they were given (review round 1).
+	budget := limits.Budget
+	if budget == nil && limits.InflightMaxBytes > 0 {
+		b := DefaultTreeBudget()
+		budget = &b
+	}
+	var weight int64
+	// Every wait for room, across the re-weigh attempts below, ends at ONE
+	// deadline: the caller's context capped by a single mutate deadline
+	// taken here (delta review P4-1: a deadline per attempt let an entry
+	// whose branch kept moving hold its claim for up to three of them).
+	waitCtx, cancelWait := withMutateDeadline(ctx, limits.MutateTimeout)
+	defer cancelWait()
+	for attempt := 1; ; attempt++ {
+		if budget != nil {
+			stats, err := (&CLIClient{repoPath: repoDir}).measureTree(ctx, oid, budget.Effective())
+			if err != nil {
+				return nil, fmt.Errorf("add worktree for branch %s: %w", branch, relabel(err, "worktree"))
+			}
+			weight = InflightWeight(stats)
+		}
+		if limits.InflightMaxBytes <= 0 {
+			break
+		}
+		// The in-flight ceiling, still before anything exists on disk: the
+		// tree waits for room among the other scopes' trees, and for its
+		// repository's share.
+		release, err := admitCheckout(waitCtx, "worktree", repoKey, weight, limits.InflightMaxBytes)
+		if err != nil {
 			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
 		}
+		releaseWeight = release
+		// The wait can be long, and the branch can move meanwhile (a push):
+		// `switch` would then check out a tree nobody weighed (codex review
+		// round 3). Re-read the tip; when it moved, give the weight back and
+		// weigh the new tip, a bounded number of times.
+		cur, found, err := lookupBranch(ctx, repoDir, "worktree", short)
+		if err != nil {
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
+		}
+		if !found {
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, branchNotFound("worktree", "branch", branch))
+		}
+		if cur == oid {
+			break
+		}
+		releaseWeight()
+		releaseWeight = func() {}
+		if attempt == branchMovedAttempts {
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, branchMoved("worktree", weight, limits.InflightMaxBytes))
+		}
+		oid = cur
 	}
 	// The mutate deadline bounds the two commands that write the tree.
 	parentCtx := ctx
@@ -198,11 +308,12 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 	// another local user could reinsert a symlink between the Remove and
 	// the add. By keeping the parent and pointing git at a fresh child
 	// name that never existed, there is no remove-then-recreate window.
-	parent, err := os.MkdirTemp("", "spine-wt-parent-*")
+	parent, err = os.MkdirTemp("", "spine-wt-parent-*")
 	if err != nil {
+		parent = ""
 		return nil, fmt.Errorf("create worktree parent dir: %w", err)
 	}
-	worktreeDir := filepath.Join(parent, "wt")
+	worktreeDir = filepath.Join(parent, "wt")
 
 	// With a mutate deadline the checkout is split out of `worktree add`:
 	// worktree add writes the tree in a CHILD git (`reset --hard`), which
@@ -244,14 +355,51 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 		}
 	}
 
-	sw := newGitCmd(mctx, "switch", "--no-guess", "--end-of-options", short)
-	sw.Dir = worktreeDir
-	if out, err := sw.CombinedOutput(); err != nil {
-		removeWorktree()
-		if dErr := deadlineErr(err); dErr != nil {
-			return nil, dErr
+	if limits.InflightMaxBytes > 0 {
+		// With an in-flight ceiling the tree on disk must be the tree
+		// weighed. `switch` checks the branch's CURRENT tip out, so a
+		// branch moved after the re-read above (a push) was written — a
+		// tree nobody weighed — before the check below refused it (delta
+		// review P3-A). The worktree already holds the weighed commit:
+		// attach HEAD to the branch without a checkout (`symbolic-ref`
+		// writes only the worktree's HEAD file), then keep git's
+		// "already used by worktree" guard, which `symbolic-ref` does not
+		// apply, by refusing a branch another worktree has checked out.
+		// The guard runs AFTER the attach, so a worktree that attaches to
+		// the branch at the same moment is seen too (git's own guard,
+		// checked before it attaches, could let both through). A tip that
+		// moved is refused below, with only the weighed tree ever written.
+		ref := headsPrefix + short
+		attach := newGitCmd(mctx, "symbolic-ref", "HEAD", ref)
+		attach.Dir = worktreeDir
+		if out, err := attach.CombinedOutput(); err != nil {
+			removeWorktree()
+			if dErr := deadlineErr(err); dErr != nil {
+				return nil, dErr
+			}
+			return nil, fmt.Errorf("add worktree for branch %s: %s", branch, strings.TrimSpace(string(out)))
 		}
-		return nil, fmt.Errorf("add worktree for branch %s: %s", branch, strings.TrimSpace(string(out)))
+		elsewhere, err := branchCheckedOutElsewhere(mctx, repoDir, worktreeDir, ref)
+		if err != nil || elsewhere {
+			removeWorktree()
+			if err != nil {
+				if dErr := deadlineErr(err); dErr != nil {
+					return nil, dErr
+				}
+				return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
+			}
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, errBranchInAnotherWorktree)
+		}
+	} else {
+		sw := newGitCmd(mctx, "switch", "--no-guess", "--end-of-options", short)
+		sw.Dir = worktreeDir
+		if out, err := sw.CombinedOutput(); err != nil {
+			removeWorktree()
+			if dErr := deadlineErr(err); dErr != nil {
+				return nil, dErr
+			}
+			return nil, fmt.Errorf("add worktree for branch %s: %s", branch, strings.TrimSpace(string(out)))
+		}
 	}
 
 	// Post-condition: the worktree must be ON refs/heads/<short>, never
@@ -262,20 +410,39 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 		removeWorktree()
 		return nil, fmt.Errorf("add worktree for branch %s: worktree is not on %s%s", branch, headsPrefix, short)
 	}
+	// With an in-flight ceiling, the branch HEAD is attached to must still
+	// be at the weighed commit — the commit the worktree holds. A branch
+	// that moved after the re-read above is refused (nothing beyond the
+	// weighed tree was written, and nothing is left), rather than handing
+	// out a worktree whose files are not its HEAD's tree.
+	if limits.InflightMaxBytes > 0 {
+		head := newGitCmd(ctx, "rev-parse", "--verify", "-q", "HEAD")
+		head.Dir = worktreeDir
+		if out, err := head.Output(); err != nil || strings.TrimSpace(string(out)) != oid {
+			removeWorktree()
+			if err != nil {
+				return nil, fmt.Errorf("add worktree for branch %s: read the checked-out commit: %w", branch, err)
+			}
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, branchMoved("worktree", weight, limits.InflightMaxBytes))
+		}
+	}
 
+	entered = true
+	var once sync.Once
 	return &WriteScope{
 		RepoDir: worktreeDir,
 		Branch:  branch,
 		cleanup: func() {
-			// Cleanup uses a fresh bounded context, not the request ctx —
-			// if the request was cancelled (client disconnect, timeout)
-			// the worktree must still be removed or we leak it on disk.
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			rmCmd := newGitCmd(cleanupCtx, "worktree", "remove", "--force", worktreeDir)
-			rmCmd.Dir = repoDir
-			_, _ = rmCmd.CombinedOutput()
-			os.RemoveAll(parent)
+			once.Do(func() {
+				// Cleanup uses a fresh bounded context, not the request ctx —
+				// if the request was cancelled (client disconnect, timeout)
+				// the worktree must still be removed or we leak it on disk.
+				removeAddedWorktree(repoDir, worktreeDir, parent)
+				// Only now, with the tree off the disk and the worktree
+				// unregistered, may another scope take its weight or its
+				// branch.
+				release()
+			})
 		},
 	}, nil
 }
