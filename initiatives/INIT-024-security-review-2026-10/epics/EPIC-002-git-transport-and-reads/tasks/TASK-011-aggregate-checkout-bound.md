@@ -398,3 +398,151 @@ exit is 1 at both revisions only because the gate's `-allow-skip` for `spinecore
   review.
 - The full `make test-scenario` with a registry database, GitHub CI (nothing is pushed), and the tests on Windows
   (vet only).
+
+### Round 2 — delta review fixes (2026-11-02)
+
+*(Delta review of `e92b45c4..7064711a`: 0 P1/P2, 2 P3, 3 P4. Status stays In Progress. The round-1 gate logs are
+archived under `t011/round1/`; this round's are at `t011/`.)* This round supersedes, above: the round-1 serve default
+(max(2 × the byte limit, one maximal tree)), its "below" warning, the per-attempt wait deadline, and the attach by
+`switch` under a ceiling.
+
+| Commit | Change |
+|---|---|
+| `db8545c2` | Code and tests: the attach without a checkout and the other-worktree check (P3-A), the default ceiling (P3-B), one wait deadline (P4-1). |
+| `43bcc31b` | Docs (P4-2): KNOWN-LIMITATIONS, CHANGELOG, the integration guide's variable row, README, `.env.example`, `architecture/git-integration.md`. |
+| `71db73ca` | Test only: the other-worktree check fails closed (a round-2 mutant, N06, survived without it). |
+| (this commit) | These notes. |
+
+#### Dispositions
+
+| ID | Defect | Disposition |
+|---|---|---|
+| P3-A | Under a ceiling the worktree was filled at the weighed commit and then attached with `switch`, which checks the branch's current tip out: a branch moved after the re-read was written (a tree nobody weighed: the reviewer measured 3.0× the gate's weight on disk) before the post-condition refused it. | **Fixed.** Under a ceiling the worktree is attached with `git symbolic-ref HEAD refs/heads/<n>` (writes only the worktree's HEAD file); then `git worktree list --porcelain -z` — a branch another worktree holds is refused with an untyped error matching `ErrBranchInUse` (git_error, the class of git's refusal; the message names no path), the worktree removed; then the post-condition and `HEAD` = the weighed commit, else the worktree removed and `ErrBranchMoved`. The moved tip is never written. A failed listing refuses the entry (fail-closed). Without a ceiling the attach is the `switch` it was (same argv: `TestRefGrammar_ArgvShape` unchanged). Tests: `TestEnterBranch_MoveAfterTheReReadIsNeverWritten` (the reviewer's probe, ported with a deterministic mover; red at `7064711a`), `TestEnterBranch_CeilingAttachesWithoutACheckout` (no `switch`; on the branch, clean, a commit moves the branch; budget-only and library-default modes keep `switch`), `TestEnterBranch_BranchInAnotherWorktreeIsRefused`, `TestEnterBranch_UnreadableWorktreeListRefusesTheEntry`, `TestCreate_UnderACeilingTheWriteIsCommittedAndPushedOnTheBranch` (core/artifact: commit on the run branch, parent = the previous tip, pushed to origin). `TestEnterBranch_InflightWeightIsReturnedOnEveryExit` was updated deliberately: a branch checked out in the main worktree is now refused, under its ceiling, by the other-worktree check (ErrBranchInUse) instead of git's `switch`. |
+| P3-B | The serve default max(2 × bytes, one maximal tree's weight) equalled one maximal tree when the entry allowance dominated, so one entry-heavy tree within the budget filled the ceiling (its repository held nothing, so the half share did not apply); no warning. | **Fixed.** Default = 2 × `MaxInflightWeight()` (saturating; the requested max(2 × `MaxInflightWeight()`, 2 × the byte limit) is the same value, the weight being at least the bytes): 5,933,367,296 bytes with the defaults (was 4 GiB), so a maximal tree always fits within its repository's half. The startup warning fires at a ceiling **at or** below a maximal tree's weight. `TestLoadCheckoutLimits_InflightCeiling` updated deliberately (new defaults; an equal ceiling warns, one byte above does not). Test: `TestServeCeiling_AnEntryHeavyMaximalTreeLeavesRoomForOtherRepositories` (the reviewer's probe; red at `7064711a`). |
+| P4-1 | The wait deadline was per attempt inside the three-attempt re-weigh loop: up to 3 × `SPINE_GIT_MUTATE_TIMEOUT` holding the claim. | **Fixed.** One admission context — the caller's, capped by a single mutate deadline taken before the loop — bounds every wait (`admitCheckout` no longer applies a deadline of its own). The measures and lookups run under the caller's context, as before. Test: `TestEnterBranch_ReweighWaitsShareOneDeadline` (another repository takes the room back for 1 s each time it frees; with a 1.5 s deadline the second wait ends at the deadline; red at `7064711a`: `ErrBranchMoved` after 3.05 s). |
+| P4-2 | Stale KNOWN-LIMITATIONS claims ("the tree checked out is the tree weighed"; "half the ceiling (or one maximal tree) … others share the rest"). | **Fixed** with P3-A / P3-B: the tree written is the tree weighed (filled at the weighed commit, attached without a second checkout, a moved branch refused without its tree written); a maximal tree fits within a half with the default, one heavier than half only with a lower ceiling; the other-worktree check and what it does not see. |
+| P4-3 | Starvation of a tree heavier than half by multi-repository streams. | **No change**: the documented "no reservation" residual stays. |
+
+#### Decisions and deviations
+
+1. **The attach without a checkout applies only under a ceiling.** It is where the weight must match the tree; with
+   zero limits (the library default, AC 4) and with a budget alone the attach stays `switch`, byte-for-byte the
+   argv embedders had. A budget alone keeps TASK-003's behaviour: a branch moved between the measure and `switch`
+   is checked out unmeasured (`spine serve` always has a ceiling, so it is not exposed).
+2. **The other-worktree check runs after the attach, not before** (the review said "before attaching"). Every
+   holder that existed before is still seen, and so is one that attaches between the check and the attach, which a
+   check before could miss (git's own guard, checked before it attaches, has that window). Attaching first writes
+   only the scope's own HEAD file; a refusal removes the worktree.
+3. **The refusal for another worktree is a new message** ("checked out in another worktree of the repository",
+   matching `ErrBranchInUse`), where git's named the other worktree's path; it names no path. `git worktree list`
+   does not show a worktree in the middle of a rebase or bisect of the branch, which git's guard does (documented).
+4. **The listing is `--porcelain -z`** (git ≥ 2.36; the floor is 2.39.5), so no worktree path can forge a "branch"
+   line; the scope's own worktree is told apart by `os.SameFile`. The two `os.Stat` calls are allowlisted in the
+   `core/worktreefs` scan.
+
+#### Red / green
+
+Red = the round-2 tests run against `7064711a`'s production code (`t011/red-r2/`: `red-p3a.log` and `red-p3b.log` at
+the unmodified head; `red-git.log` and `red-serve.log` with `overlay.json` mapping `branchwrite.go`,
+`checkout_admission.go`, `export_test.go`, `checkout_admission_test.go`, `serve_checkout_limits.go` and its test to
+`7064711a`).
+
+| Test | Red at `7064711a` | Green |
+|---|---|---|
+| `TestEnterBranch_MoveAfterTheReReadIsNeverWritten` (both modes) | the worktree held 41,943,040 bytes after a git command against the 10,653,696 weighed; peak under TMPDIR 41,943,198 (3.9×) | PASS |
+| `TestServeCeiling_AnEntryHeavyMaximalTreeLeavesRoomForOtherRepositories` | the 10-byte write waited 3 s and was refused under the 5,144,576-byte default (one maximal tree) | PASS |
+| `TestEnterBranch_ReweighWaitsShareOneDeadline` | `ErrBranchMoved` after 3.05 s (three waits) | PASS |
+| `TestEnterBranch_CeilingAttachesWithoutACheckout` | `switch` ran, no `symbolic-ref HEAD`, no listing (ceiling modes; the no-ceiling modes pass at both) | PASS |
+| `TestEnterBranch_BranchInAnotherWorktreeIsRefused` | git's own refusal, naming the other worktree's path | PASS |
+
+#### Mutations (`t011/mut-r2/`, `run3.sh`, logs `mut-r2/r3/`, `summary-final.txt`)
+
+43 mutants: the 33 of round 1, 29 ported onto the round-2 code with `patch` and 4 re-made by hand where round 2 moved
+their code (F06, K02, S03, S06; `make_r2.py`), plus N01–N10 for the new code (`make_r2.py`). All compile. First run:
+42 killed by named tests, 0 timeouts, 0 build errors; **N06 (a failed listing read as "no holder") survived** →
+`71db73ca` added `TestEnterBranch_UnreadableWorktreeListRefusesTheEntry`, and N06 was then killed. Final: 43 of 43
+killed by name.
+
+| Mutant | Killed by (FAIL by name) |
+|---|---|
+| C01 no branch claim | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestCreate_ConcurrentRunBranchWritesPutOneTreeOnDisk`, `TestEnterBranch_BranchClaimIsPerRepository`, `TestEnterBranch_BranchInUseKeepsTheRefusalClass`, `TestEnterBranch_RacingSameBranchEntriesWriteOneTree`, `TestEnterBranch_SameBranchEntriesAreRefusedBeforeWriting` |
+| C02 claim released when EnterBranch returns | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_BranchClaimIsPerRepository`, `TestEnterBranch_BranchInUseKeepsTheRefusalClass`, `TestEnterBranch_SameBranchEntriesAreRefusedBeforeWriting` |
+| C03 claim key ignores the branch | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_BranchClaimIsPerRepository` |
+| C04 a non-regular administrative file opened | `TestRepoClaimKey_ReadsOnlyRegularAdministrativeFiles` |
+| C05 claim taken after the temporary directory | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_SameBranchEntriesAreRefusedBeforeWriting` |
+| F01 no per-repository share | `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_HalfTheCeilingPerRepository` |
+| F02 per-repository share = the whole ceiling | `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_HalfTheCeilingPerRepository` |
+| F03 one global FIFO | `TestInflightGate_HalfTheCeilingPerRepository`, `TestInflightGate_OneRepositoryNeverBlocksAnother` |
+| F04 a served repository not moved to the back | `TestEnterBranch_MoveAfterTheReReadIsNeverWritten`, `TestInflightGate_OneRepositoryNeverBlocksAnother`, `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| F05 weight = bytes only | `TestCheckoutLimits_InflightCeiling`, `TestEnterBranch_BranchMovedDuringCheckoutIsRefused`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_BranchThatKeepsMovingIsRefused`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_InflightCeilingBoundsDifferentBranches`, `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_MoveAfterTheReReadIsNeverWritten`, `TestEnterBranch_ReweighWaitsShareOneDeadline`, `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved`, `TestEnterBranch_TreeOverTheInflightCeilingIsRefused`, `TestInflightWeight_CountsEntries` |
+| F06 serve default = the per-tree byte limit (re-made) | `TestLoadCheckoutLimits_InflightCeiling`, `TestServeCeiling_AnEntryHeavyMaximalTreeLeavesRoomForOtherRepositories`, `TestServeCeiling_OneMaximalTreeLeavesRoomForOtherRepositories` |
+| F07 released before the worktree is removed | `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved` |
+| F08 claim key by path | `TestEnterBranch_BranchClaimIsPerRepository` |
+| F09 no upward discovery | `TestEnterBranch_BranchClaimIsPerRepository`, `TestRepoClaimKey_MatchesGitCommonDir` |
+| F10 artifact push inside the scope | `TestCreate_PushStartsAfterTheBranchScopeIsReleased` |
+| F11 implied budget process-wide | `TestCheckoutLimits_InflightCeiling` |
+| F12 idle repositories never forgotten | `TestEnterBranch_BranchInAnotherWorktreeIsRefused`, `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_ForgetsIdleRepositories`, `TestInflightGate_HalfTheCeilingPerRepository` |
+| F13 a cancelled last waiter left in the turn list | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_InflightWaitEndsWithRetryableError` (panics under the gate lock; reported by name in all three packages) |
+| F14 MaxInflightWeight without the entry cost | `TestInflightWeight_CountsEntries`, `TestLoadCheckoutLimits_InflightCeiling`, `TestServeCeiling_AnEntryHeavyMaximalTreeLeavesRoomForOtherRepositories` |
+| K01 no tip re-read after admission | `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_ReweighWaitsShareOneDeadline` |
+| K02 no HEAD check after the attach (re-made) | `TestEnterBranch_BranchMovedDuringCheckoutIsRefused`, `TestEnterBranch_MoveAfterTheReReadIsNeverWritten` |
+| K03 a non-fitting repository rotated too | `TestEnterBranch_MoveAfterTheReReadIsNeverWritten`, `TestInflightGate_OneRepositoryNeverBlocksAnother`, `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| N01 **new** `switch` again under a ceiling | `TestEnterBranch_BranchInAnotherWorktreeIsRefused`, `TestEnterBranch_CeilingAttachesWithoutACheckout`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_MoveAfterTheReReadIsNeverWritten` |
+| N02 **new** another worktree's hold ignored | `TestEnterBranch_BranchInAnotherWorktreeIsRefused`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved` |
+| N03 **new** the scope's own worktree counted as another | `TestCheckoutLimits_InflightCeiling`, `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestCreate_UnderACeilingTheWriteIsCommittedAndPushedOnTheBranch`, `TestEnterBranch_BranchInAnotherWorktreeIsRefused`, `TestEnterBranch_BranchMovedDuringCheckoutIsRefused`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_CeilingAttachesWithoutACheckout`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_InflightCeilingBoundsDifferentBranches`, `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_MoveAfterTheReReadIsNeverWritten`, `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved`, `TestEnterBranch_TreeOverTheInflightCeilingIsRefused`, `TestServeCeiling_AnEntryHeavyMaximalTreeLeavesRoomForOtherRepositories`, `TestServeCeiling_OneMaximalTreeLeavesRoomForOtherRepositories` |
+| N04 **new** the other-worktree refusal does not match ErrBranchInUse | `TestEnterBranch_BranchInAnotherWorktreeIsRefused`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit` |
+| N05 **new** `worktree list --porcelain` without `-z` | `TestEnterBranch_BranchInAnotherWorktreeIsRefused`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved` |
+| N06 **new** a failed `worktree list` read as no holder | `TestEnterBranch_UnreadableWorktreeListRefusesTheEntry` — survived the first run; killed after `71db73ca` added the test |
+| N07 **new** a mutate deadline per re-weigh attempt | `TestEnterBranch_ReweighWaitsShareOneDeadline` |
+| N08 **new** the round-1 default (max(2 x bytes, one maximal tree)) | `TestLoadCheckoutLimits_InflightCeiling`, `TestServeCeiling_AnEntryHeavyMaximalTreeLeavesRoomForOtherRepositories` |
+| N09 **new** warn only below a maximal tree's weight | `TestLoadCheckoutLimits_InflightCeiling` |
+| N10 **new** default = one maximal tree's weight | `TestLoadCheckoutLimits_InflightCeiling`, `TestServeCeiling_AnEntryHeavyMaximalTreeLeavesRoomForOtherRepositories` |
+| S01 the gate never waits | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_InflightCeilingBoundsDifferentBranches`, `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestEnterBranch_ReweighWaitsShareOneDeadline`, `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_ForgetsIdleRepositories`, `TestInflightGate_HalfTheCeilingPerRepository`, `TestInflightGate_OneRepositoryNeverBlocksAnother`, `TestInflightGate_RoundRobinAcrossRepositories`, `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| S02 weight released when EnterBranch returns | `TestCheckoutLimits_InflightCeiling`, `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_InflightCeilingBoundsDifferentBranches`, `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit` |
+| S03 no over-ceiling refusal (re-made) | `TestCheckoutLimits_InflightCeiling`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_TreeOverTheInflightCeilingIsRefused`, `TestInflightGate_FIFOWithinARepositoryAndCancellation` |
+| S04 a cancelled waiter left queued | `TestCheckoutLimits_InflightCeiling`, `TestEnterBranch_BranchInAnotherWorktreeIsRefused`, `TestEnterBranch_BranchMovedDuringCheckoutIsRefused`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_BranchThatKeepsMovingIsRefused`, `TestEnterBranch_CeilingAttachesWithoutACheckout`, `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_MoveAfterTheReReadIsNeverWritten`, `TestEnterBranch_ReweighWaitsShareOneDeadline`, `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved`, `TestEnterBranch_TreeOverTheInflightCeilingIsRefused`, `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_ForgetsIdleRepositories`, `TestInflightGate_HalfTheCeilingPerRepository`, `TestInflightGate_OneRepositoryNeverBlocksAnother`, `TestInflightGate_RoundRobinAcrossRepositories`, `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| S05 weight kept on error paths | `TestCheckoutLimits_InflightCeiling`, `TestEnterBranch_BranchInAnotherWorktreeIsRefused`, `TestEnterBranch_BranchMovedDuringCheckoutIsRefused`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_BranchThatKeepsMovingIsRefused`, `TestEnterBranch_CeilingAttachesWithoutACheckout`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_MoveAfterTheReReadIsNeverWritten`, `TestEnterBranch_ReweighWaitsShareOneDeadline`, `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved`, `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_ForgetsIdleRepositories`, `TestInflightGate_HalfTheCeilingPerRepository`, `TestInflightGate_OneRepositoryNeverBlocksAnother`, `TestInflightGate_RoundRobinAcrossRepositories`, `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| S06 waits not bounded by the mutate deadline (re-made on the one deadline) | `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestEnterBranch_ReweighWaitsShareOneDeadline` |
+| S07 a done context acquires | `TestInflightGate_FIFOWithinARepositoryAndCancellation` |
+| S08 no admission pass after a cancel | `TestInflightGate_FIFOWithinARepositoryAndCancellation` |
+| S09 artifact service maps the wait refusal to git_error | `TestCreate_CheckoutRefusalsKeepTheirClassification` |
+| S10 workflow service maps the wait refusal to git_error | `TestCreate_CheckoutRefusalsKeepTheirClassification` |
+| S11 no implied budget inside EnterBranch | `TestCheckoutLimits_InflightCeiling`, `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit` |
+
+#### Gates (final code: `43bcc31b`; `71db73ca` adds one test, run as noted)
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `embed-smoketest` | rc=0; rc=0; rc=0 |
+| `go test -p 4 ./...` (heavy lock) | rc=0 (41 packages ok) |
+| `go vet ./...` plain / `-tags integration` / `-tags scenario`; `GOOS=linux` / `GOOS=windows` vet of the touched packages | rc=0 / 0 / 0; 0 / 0 |
+| `-race -p 4` on `adapters/git/...`, `core/artifact/...`, `core/workflow/...`, `core/worktreefs/...`, `service/cmd/spine/...` | rc=0, no data race (and the `71db73ca` test with the attach tests under `-race`: ok) |
+| `-tags integration` suites of the touched packages (own DB `s24011_ci_final`, dropped) | rc=0 (7 packages ok) |
+| `scenario-git-http` job, every step | rc=0 for all; 90 / 26 / 154 / 1 / 12 + 24 / 37 + 1 / 19 + 1 / 1 passes; 0 skips |
+| `git-floor` (`golang:1.26-bookworm`, git 2.39.5, `--pull=never`; container removed) | STEP1 rc=0, STEP2 rc=0; every TASK-011 test PASS on 2.39.5, the round-2 attach, other-worktree (`--porcelain -z`) and deadline tests included (36 PASS, 0 FAIL) |
+| golangci-lint v2.11.4 `--new-from-rev=854a1e08` on the touched packages; `--enable-only=gosec` | 0 issues; 0 issues (and 0 on `adapters/git` at `71db73ca`) |
+| `gofmt -l` on the changed files | clean |
+
+#### SMP compatibility gate
+
+**Incomplete — the shared PostgreSQL went down during it.** `smp` (SMP main `21cc2e8a`, `../spine` = this worktree at
+`43bcc31b`, left unmodified), 2026-11-02 11:47–12:12 UTC, daytime (`t011/chain1.out`, `t011/smp/`):
+
+| Leg | Result |
+|---|---|
+| `go build ./...`; `go vet` plain / integration / `-tags scenario ./scenariotest/...` / faultinject | rc=0; rc=0 / 0 / 0 / 0 |
+| `go test -race -p 4` over the initiative §5 packages and every SMP importer of `adapters/git`, `core/artifact`, `core/workflow` | rc=0 |
+| `dev/testgate` githttp leg | PASS (590 passed, 1 allowed skip) |
+| `dev/testgate` Spine-runtime leg | **not a valid result**: 2,278 passed, 120 failed — `spineembedded`'s DB-backed tests failed with `connection refused` (187 lines) once the shared `i23-pg` container stopped at 12:07 UTC: its Docker VM disk was full ("could not write to file … No space left on device" at its restart; the container is `Exited (1)`). The first failure, `TestGovernance_SelfApprovalWhenTheAdminHeldTheReview` ("internal_error: load run"), is in the same minute. |
+
+The container was not restarted, reconfigured or pruned (rules). **To finish:** once `i23-pg` is back, re-run
+`t011/smp.sh` in daytime and drop `s24011_smp_it` and `s24011_spine_runtime_it` (left behind: the gate's drop ran
+against the stopped container). Round 2 changes nothing SMP reaches — SMP calls no branch-scoped `EnterBranch` and
+sets no ceiling, so neither the attach nor the serve default applies — and the round-1 gate passed in full
+(2026-11-02 daytime).
+
+#### Not run (round 2)
+
+- The SMP gate's Spine-runtime leg (above; the shared PostgreSQL is down).
+- Codex (the budget is spent): `db8545c2`, `43bcc31b` and `71db73ca` go to the independent delta check.
+- The full `make test-scenario` with a registry database, GitHub CI, the tests on Windows (vet only).
