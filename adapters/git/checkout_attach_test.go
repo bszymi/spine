@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -141,6 +142,58 @@ func TestEnterBranch_BranchInAnotherWorktreeIsRefused(t *testing.T) {
 	if _, err := os.Stat(ext); !os.IsNotExist(err) {
 		t.Errorf("the other worktree is still on disk: %v", err)
 	}
+}
+
+// TestEnterBranch_UnreadableWorktreeListRefusesTheEntry (P3-A, the
+// round-2 mutation N06): the other-worktree check fails closed. When `git
+// worktree list` fails, the entry cannot know whether another worktree
+// holds its branch, so it is refused — with git's failure, not as
+// ErrBranchInUse — and nothing is left: no directory, no registration, no
+// weight, no claim.
+func TestEnterBranch_UnreadableWorktreeListRefusesTheEntry(t *testing.T) {
+	repo, run := claimRepo(t)
+	b := git.DefaultTreeBudget()
+	limits := git.CheckoutLimits{Budget: &b, MutateTimeout: git.DefaultMutateTimeout, InflightMaxBytes: 1 << 30}
+	tmp := isolateTempDir(t)
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("git not on PATH: %v", err)
+	}
+	if realGit, err = filepath.Abs(realGit); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\nif [ \"$1\" = worktree ] && [ \"$2\" = list ]; then echo 'fatal: cannot list' >&2; exit 128; fi\nexec \"$FAILLIST_REAL\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: the wrapper must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("FAILLIST_REAL", realGit)
+	path := os.Getenv("PATH")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+path)
+
+	s, err := git.EnterBranchWithLimits(boundedCtx(t, 30*time.Second), repo, run, nil, limits)
+	if err == nil {
+		s.Cleanup()
+		t.Fatal("entered although the other-worktree check could not run")
+	}
+	if errors.Is(err, git.ErrBranchInUse) || !strings.Contains(err.Error(), "list worktrees") {
+		t.Errorf("err = %v, want the failed worktree listing (not ErrBranchInUse)", err)
+	}
+	assertEmptyDir(t, tmp)
+	if h, r := git.InflightHeldForTest(), git.InflightReposForTest(); h != 0 || r != 0 {
+		t.Errorf("gate holds %d over %d repositories, want an empty gate", h, r)
+	}
+
+	t.Setenv("PATH", path)
+	if n := worktreeCount(t, repo); n != 1 {
+		t.Errorf("worktree list has %d entries, want 1", n)
+	}
+	s, err = git.EnterBranchWithLimits(boundedCtx(t, 30*time.Second), repo, run, nil, limits)
+	if err != nil {
+		t.Fatalf("the refused entry kept the claim or the weight: %v", err)
+	}
+	s.Cleanup()
 }
 
 // TestEnterBranch_ReweighWaitsShareOneDeadline (P4-1): an entry whose
