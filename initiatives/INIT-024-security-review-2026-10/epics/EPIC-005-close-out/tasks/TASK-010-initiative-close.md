@@ -125,20 +125,28 @@ until GitHub CI runs green on the pushed closing commit.
 ## Implementation Notes
 
 Close run on branch `init/INIT-024-TASK-010-initiative-close`, cut from Spine local `main`
-`854a1e08`. Close makes no code change: its commits are this artifact and a doc-only
-reconciliation. Commits (all prefixed `INIT-024 EPIC-005 TASK-010:`): `55ef529c` start (status In
-Progress); `fa68a2f1`, `1cdcb2f6`, `918af609` and `ab41a1be` docs (step 5; the last two from the
-cross-task review); then this notes commit. Nothing is pushed.
+`854a1e08`. Close makes no code change of its own: its commits are this artifact, a doc-only
+reconciliation and one merge of `main` (TASK-011's code arrives with it). Commits (all prefixed
+`INIT-024 EPIC-005 TASK-010:`): `55ef529c` start (status In Progress); `fa68a2f1`, `1cdcb2f6`, `918af609` and `ab41a1be` docs (step 5; the last two from the
+cross-task review); `9c013ce9` notes; `00f7da78` the one allowed merge, `git merge --no-ff main`
+("bring in TASK-011 from main", `main` = `ea77cff6`); then this notes update. Nothing is pushed.
 
 ### The closing commit
 
-- **Candidate:** this branch's final head (the notes commit). The orchestrator merges it into
-  Spine `main`; **that merge commit is the INIT-024 closing commit**, the one SMP INIT-027
-  EPIC-005 TASK-018 pins in `.spine-revision`. Its Go tree is `854a1e08`'s: every gate below ran
-  on that code (tree `d332c5ab`, identical to the integration head `a28b3248`); the close adds
-  only Markdown.
-- `854a1e08` = `83d82409` (TASK-001, merged on `main` first) + `Merge init/INIT-024-integration-a`
-  (TASK-002 … TASK-009 and the integration's coordination commits).
+- **Candidate:** this branch's final head. The orchestrator merges it into Spine `main`; **that
+  merge commit is the INIT-024 closing commit**, the one SMP INIT-027 EPIC-005 TASK-018 pins in
+  `.spine-revision`.
+- **The closing tree includes TASK-011.** Its Go code is `main` `ea77cff6`'s: `854a1e08` +
+  `Merge init/INIT-024-TASK-011-aggregate-checkout-bound`. This branch differs from `ea77cff6` in
+  Markdown only.
+  - `854a1e08` = `83d82409` (TASK-001, merged on `main` first) + `Merge
+    init/INIT-024-integration-a` (TASK-002 … TASK-009 and the integration's coordination commits;
+    tree `d332c5ab`, identical to the integration head `a28b3248`).
+  - The full gate set below (step 3), both codex rounds and the SMP pair (step 4) ran on
+    `854a1e08`'s code. TASK-011 ran its own full gates, codex rounds and SMP compatibility gate on
+    its branch (its Implementation Notes). On the merged head this close re-ran the quick gates
+    ("Quick gates on the merged head" below); no codex round there (orchestrator ruling: the code
+    is `main`'s).
 
 ### Step 1 — integration (done before this task; record)
 
@@ -154,6 +162,7 @@ cross-task review); then this notes commit. Nothing is pushed.
 | TASK-004 | `d18a9471` | `557e78cb` |
 | TASK-005 | `80240088` | `e1f24c05` |
 | integration A | `a28b3248` | `854a1e08` on `main` |
+| TASK-011 (added by the cross-task review) | `fd7f72ef` | `ea77cff6` on `main`; brought into this branch by `00f7da78` |
 
 Each task's "Integration A" section records its overlaps, coordination commits and the phase
 gates; nothing was rewritten.
@@ -174,15 +183,24 @@ paths; N-2: TASK-006 with TASK-005/007/008), read-only on the same tree (`i23/s2
     branch-scoped writes, to one branch or to several, each write a full within-budget tree to
     the server's temporary directory, including writes git then refuses. `KNOWN-LIMITATIONS.md`
     stated a narrower premise (different branches only); `918af609` corrects it at defect level
-    and names the operator levers. The fix is INIT-024 TASK-011 (one writer per branch, a
-    process-wide allowance on measured bytes in flight).
+    and names the operator levers. **Fixed by INIT-024 TASK-011** (one writer per branch, and an
+    in-flight ceiling shared fairly across workspaces, `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`),
+    now in the closing tree; the doc text was updated at the merge.
   - **P4:** under concurrent entries git's own in-use guard can let several linked worktrees
     attach to one branch; the ref compare-and-swap turns that into failed writes, never lost
     updates (the P3 fix closes it). **P4:** `SPINE_GIT_HTTP_DEV_NO_AUTH` is not workspace-scoped
     and is accepted in shared mode under `SPINE_ENV=development` (already a documented residual;
     option: refuse it in shared mode).
-- **Skeptic B:** its report had not reached this close when these notes were written; the
-  orchestrator records it with AC 2.
+- **Skeptic B: N-1 and N-2 closed, no new findings.** Its only P3 is skeptic A's (now TASK-011),
+  seen from more angles: failing requests still wrote the full tree, and the request rate was the
+  only limiter. No new P4. Both PoCs are red at `49fad9c0`. At the closing tree, with `spine
+  serve`'s process default, N-1's shapes are refused with `ErrTreeTooLarge` naming the right limit
+  on `EnterBranch`, `Merge`, `MergeBound` and `Checkout`, with nothing written and `main` unmoved;
+  N-2's other workspace gets the uniform `401`. Both hold on git 2.54 and 2.39.5. The refusals are
+  for the right reason: mutating the `EnterBranch` budget brings N-1's write back, and trusting
+  every workspace brings N-2's clone back. Six mutations were killed.
+- **The two agree:** N-1 and N-2 are closed at the closing tree. Skeptic A's P3 became TASK-011,
+  which is fixed and merged (`ea77cff6`).
 
 ### Step 3 — gates at the closing tree
 
@@ -244,7 +262,7 @@ Markdown only), `GOFLAGS=-mod=readonly`, go1.26.10.
 Known and not a break: SMP's listing limit (`SMP_GIT_MAX_OUTPUT_BYTES`, 16 MiB) is below Spine's
 `git.DefaultMaxListingBytes` and the tree budget — an SMP TASK-018 carry (hand-off below).
 
-### Step 5 — documentation reconciliation (`fa68a2f1`, `1cdcb2f6`, `918af609`, `ab41a1be`; doc-only)
+### Step 5 — documentation reconciliation (`fa68a2f1`, `1cdcb2f6`, `918af609`, `ab41a1be`, `00f7da78`; doc-only)
 
 - **`KNOWN-LIMITATIONS.md`.** The git floor bullet still put `spine serve` at git 2.30; it now
   names 2.38 (TASK-003: the budgeted merge uses `git merge-tree --write-tree`). "Not covered"
@@ -263,6 +281,15 @@ Known and not a break: SMP's listing limit (`SMP_GIT_MAX_OUTPUT_BYTES`, 16 MiB) 
   (`918af609`). The section said nothing about the endpoint before.
 - **`docs/integration-guide.md` §7.** Only the git protocol's own paths reach `git-http-backend`
   (TASK-004); the route list did not say so.
+- **The merge of TASK-011 (`00f7da78`).** `KNOWN-LIMITATIONS.md` had one conflict: TASK-011's new
+  bullet ("Concurrent branch-scoped writes are bounded in aggregate") and this close's
+  folding-storage residual were added at the same spot, and both are kept. The close's in-flight
+  residual now says TASK-011 bounds the checkouts in flight and points to that bullet, and the
+  stale "different branches each get the full budget" sentence is gone. TASK-011's "What remains"
+  gains the stale-worktree-registration residual (TASK-011 round-2 review, P4). `security-model.md`
+  §7.4 says what TASK-011 bounds (one writer per branch and the in-flight ceiling, per process,
+  opt-in for embedders except the claim), as its `CHANGELOG.md` section does. `docs/integration-guide.md`
+  and `architecture/git-integration.md` merged without conflict.
 - **Beyond the four named documents** (they contradicted shipped behaviour):
   `architecture/git-integration.md` (reserved and home names no longer fall back by DWIM; `spine
   serve` needs git 2.38) and `docs/git-push-guide.md` §5 (rows for the folding-storage `403`, the
@@ -279,10 +306,24 @@ Known and not a break: SMP's listing limit (`SMP_GIT_MAX_OUTPUT_BYTES`, 16 MiB) 
   that mentions it, and no remaining "follow-up"/"not yet enforced" text for N-1, N-2, N-8, N-9,
   N-13 or P3-27.
 
+### Quick gates on the merged head
+
+At `00f7da78` (Go code = `main` `ea77cff6`: `git diff --name-only main HEAD -- '*.go'` is empty), go1.26.10:
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | rc 0 (binary deleted) |
+| `go vet ./...` | rc 0 |
+| `go test -p 4 -count=1 ./...` (under the heavy lock) | rc 0, 41 packages ok, 0 failures, 297 s |
+| `gofmt -l` on the 175 Go files changed since `49fad9c0` (TASK-011's included) | clean except the two files already unformatted at `a560c210` |
+| Links and cross-references in the edited docs (`KNOWN-LIMITATIONS.md`, `security-model.md`, `git-integration.md`, `integration-guide.md`, `git-push-guide.md`, this artifact, `initiative.md`): every relative link target and anchor exists; every quoted `KNOWN-LIMITATIONS.md` section name exists as a heading or bold item; "below" and "above" point the right way | OK. The only flag is a pre-existing abbreviation (`"Engine State Writes …"` in `integration-guide.md`, from INIT-023), which names an existing heading. |
+
 ### SMP hand-off (owner of the bump: SMP INIT-027 EPIC-005 TASK-018)
 
 SMP's `.spine-revision` is `49fad9c0` (SMP EPIC-004 TASK-012: INIT-023 complete + TASK-001).
-SMP TASK-018 bumps it to the closing commit; the range `49fad9c0..closing` holds TASK-002 … TASK-009.
+SMP TASK-018 bumps it to the closing commit; the range `49fad9c0..closing` holds TASK-002 … TASK-009
+and TASK-011.
 
 | Spine task | What SMP adopts or verifies at the bump | SMP owner |
 |---|---|---|
@@ -292,6 +333,7 @@ SMP TASK-018 bumps it to the closing commit; the range `49fad9c0..closing` holds
 | TASK-004 (N-6, N-10, N-11, N-12) | **Shared:** listings refuse less (kept bytes, record ceiling), reserved/home names with no branch are NotFound, `Diff` reports gitlinks hidden by submodule settings, `Log` parses strictly. Re-run `gitread`, `projectionwriter` and `spinecore`. **N-11 in SMP:** SMP's own history reader still delimits with the fixed `---END---` (`internal/customer/spinecore/artifacthistoryreader.go:178`, `:228`) — the defect TASK-004 fixed in Spine; SMP fixes it. **Listing limit:** `gitread.NewClient` passes `SMP_GIT_MAX_OUTPUT_BYTES` (16 MiB), below `git.DefaultMaxListingBytes` (~17.2 MiB) and the tree budget's 16 MiB of path bytes: raise it to at least `git.DefaultMaxListingBytes`, or pass `git.WithTreeBudget` (a carry, not a break). `gitread.resolveRevLikeSpine` documents only rules 1–4 (behaviour correct; doc drift). `CountChangedPaths` is optional (owner question 2 default: SMP keeps counting through `Diff`). | SMP TASK-018 |
 | TASK-005 (N-8, N-9, N-13) | No shared code. Parity for SMP's own `/git/{workspace}` gateway: a storage probe refusing receive-pack on folding storage, the apply-time admission re-check, and fair slots taken after a deadlined command-section read (the pattern is in TASK-005's "SMP parity"). | SMP TASK-018 (parity check; a new SMP task if the gateway lacks them) |
 | TASK-006, TASK-007, TASK-008 | Standalone only (TASK-007's `core/evidence` fields are additive; SMP does not import the package). Gates only. | SMP TASK-018 (range audit) |
+| TASK-011 (aggregate checkout bound) | **Shared at the bump:** a second concurrent `EnterBranch` scope for a branch the process already holds is refused before any git process runs (untyped error wrapping `git.ErrBranchInUse`; callers classify it as before). **Opt-in:** the in-flight ceiling (`git.CheckoutLimits.InflightMaxBytes`; zero, the default, means no aggregate bound). SMP calls no branch-scoped `EnterBranch` and sets no ceiling (TASK-011's SMP gate passed). **Parity:** an aggregate gate for SMP's own write scopes (`SMP_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`, follow-ups). | SMP TASK-018 |
 | TASK-009 | **MVS:** Spine's floors (pgx v5.9.2, x/text v0.42.0, x/sync v0.23.0, `go 1.26.0`) equal SMP's selections, so SMP's build list does not move; run `go mod tidy` at the bump to confirm. SMP's own toolchain is SMP TASK-012. | SMP TASK-018, SMP TASK-012 |
 
 ### Owner questions
@@ -331,14 +373,27 @@ force push); approval for all outside contributors; "allowed actions: selected" 
 
 ### Follow-ups (recorded, not done here)
 
-- **N-1 is bounded per checkout, merge and push; aggregate concurrency is not bounded** (recorded
-  residual; follow-up task **INIT-024 TASK-011**, "Aggregate checkout bound: one writer per branch,
-  bounded in-flight checkout bytes", on its own branch
-  `init/INIT-024-TASK-011-aggregate-checkout-bound`:
-  `/initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/tasks/TASK-011-aggregate-checkout-bound.md`). The total bytes of checkouts in flight at
-  once, per branch or across branches, need a bound: one writer per (repository, branch) before
-  anything is written, and a process-wide allowance on measured bytes (skeptic A, P3;
-  `KNOWN-LIMITATIONS.md`, "Checkout Budget").
+- **N-1: bounded per checkout, merge and push, and — since TASK-011 — in aggregate for
+  branch-scoped writes.** The cross-task review's aggregate residual (skeptic A, P3) is fixed by
+  INIT-024 TASK-011
+  (`/initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/tasks/TASK-011-aggregate-checkout-bound.md`).
+  `KNOWN-LIMITATIONS.md` ("Concurrent branch-scoped writes are bounded in aggregate") records
+  what remains: the bound is per process; there is no reservation, so a large tree can wait out
+  its deadline behind a stream of other workspaces' smaller writes; and the worktree listing does
+  not show a worktree in the middle of a rebase or bisect (Spine runs neither).
+- **Stale worktree registrations:** a registration left by a crash between a scope's worktree
+  creation and its removal, or by a temporary directory cleaned under a live registration, keeps
+  its branch refused until `git worktree prune`. This predates TASK-011: git's own guard refused
+  the same. Prune at `spine serve` start, or prune and retry once when the only holder is
+  prunable (TASK-011 round-2 review, P4; now in `KNOWN-LIMITATIONS.md`).
+- **`SPINE_GIT_HTTP_DEV_NO_AUTH` in shared development mode:** it is not workspace-scoped, and
+  `spine serve` accepts it in shared mode under `SPINE_ENV=development`. Option: refuse it in
+  shared mode (a TASK-006 follow-up; skeptic A, P4; already a documented residual).
+- **SMP TASK-018 parity for the aggregate gate:** SMP's write scopes are one per clone and are
+  measured, but scopes of different clones have no aggregate bound. The parity fix is a
+  process-wide weighted gate on the measured bytes, with a ceiling knob mirroring Spine's,
+  suggested name `SMP_GIT_CHECKOUT_INFLIGHT_MAX_BYTES` (TASK-011's "Parity note for SMP
+  TASK-018").
 - `IncrementalSync` falls back to `FullRebuild` on its own when its window's `Diff` is refused as
   too large (TASK-004 open question 1; today an operator rebuild recovers it).
 - A tree on case- or normalization-insensitive storage can keep a renormalisation marker that has
@@ -362,19 +417,18 @@ commits reach GitHub first, then SMP's (SMP EPIC-004 push rule).
 TASK-001 … TASK-009 stay **In Progress**, and so does this task: they move to Completed only after
 GitHub CI runs green on the pushed closing commit (owner-gated), as in INIT-023. The five epics and
 the initiative are left as they are (Pending), as INIT-023's are; they move with the tasks.
-TASK-011, which the cross-task review added, is on its own branch and is not in this closing tree;
-the initiative's exit criteria (§8) include it. Whether the closing commit waits for it is the
-orchestrator's and the owner's call.
+TASK-011, which the cross-task review added, is in the closing tree and stays In Progress like
+the others until GitHub CI.
 
 ### Acceptance criteria at this commit
 
 | AC | State |
 |---|---|
 | 1 | Not yet: statuses are owner-gated (above). |
-| 2 | Skeptic A: no new P1 or P2, both P2 PoCs refused at the closing tree for the right reason (its P3 became Spine INIT-024 TASK-011). Skeptic B: with the orchestrator. |
+| 2 | Done: two skeptics (A, B) agree that N-1 and N-2 are closed; neither found a new P1 or P2, and both P2 PoCs fail at the closing tree for the right reason. A's P3 became TASK-011, which is fixed. |
 | 3 | Done for this close's part: every AC-named regression test in the tree passes by name (57 / 57) and every committed test passes in the gates above (unit, `-race`, integration, scenario, git-floor). The ports of the review PoCs carry their own names (each task's per-AC evidence); the PoCs themselves are the skeptics' (step 2). |
-| 4 | Done: every gate in step 3 passed (known pre-existing failures only) and the SMP pair passed, SMP `21cc2e8a` recorded. `image-build` is GitHub CI's. |
-| 5 | Done (`fa68a2f1`, `1cdcb2f6`, `918af609`, `ab41a1be`). |
+| 4 | Done: every gate in step 3 passed at `854a1e08`'s code (known pre-existing failures only), and the SMP pair passed at SMP `21cc2e8a`. TASK-011's own gates and SMP gate passed on its branch. The quick gates passed on the merged head. `image-build` is GitHub CI's. |
+| 5 | Done (`fa68a2f1`, `1cdcb2f6`, `918af609`, `ab41a1be`, and the merge resolution in `00f7da78`). |
 | 6 | The candidate is named above; the closing commit is the orchestrator's merge of this branch. |
 | 7 | Defaults recorded (above and in each task). |
 | 8 | HOLD, with the reason above. |
@@ -388,4 +442,9 @@ orchestrator's and the owner's call.
 - The SMP gates beyond the compatibility gate (golangci, the `dbstructure` check, the scenario suite,
   CI images, codex at the pair): SMP TASK-018's, at the bump.
 - The two P2 PoCs and the adversarial cross-task search: the skeptics' (step 2), not repeated here.
+- The full gate set, codex and the SMP pair at the merged head: they ran at `854a1e08`'s code, and
+  TASK-011 ran its own on its branch (codex rounds, its last fixes delta-reviewed instead; `-race`,
+  scenario-git-http, git-floor 2.39.5,
+  golangci/gosec, and the SMP gate at SMP `21cc2e8a` with `../spine` = TASK-011's head). Only the
+  quick gates were re-run here (orchestrator ruling: the merged code is `main`'s).
 - GitHub CI on a pushed closing commit: owner-gated (push held).
