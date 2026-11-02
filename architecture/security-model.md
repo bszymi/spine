@@ -434,6 +434,43 @@ Force pushes are prohibited on protected branches (commits are never rewritten, 
 - No other component requires direct Git access
 - Actor access to the repository should be mediated through Spine, not through direct Git operations
 
+**The git HTTP endpoint (standalone `spine serve`; INIT-024).** Runners and operators reach a
+workspace's repository over `/git/{workspace}/…`, which serves only the git protocol's own paths
+at the root of the repository it resolved (`403` for any other path; INIT-024 TASK-004). Its
+controls:
+
+- **Every caller is authenticated for the workspace, or is a trusted runner bound to it**
+  (INIT-024 TASK-006, review finding N-2). A token-less read is allowed only to a directly
+  connected peer whose address `SPINE_GIT_HTTP_TRUSTED_CIDRS` binds to the workspace the request
+  resolved to (or, with `SPINE_ENV=development` only, to any client under
+  `SPINE_GIT_HTTP_DEV_NO_AUTH`); in shared mode only the per-workspace form is accepted at start.
+  Every other caller without a valid token for that workspace gets one uniform `401`, whether or
+  not the workspace exists (the one exception: a single-mode server with no auth service answers
+  `503` to a caller that presents a bearer). Pushes always need a bearer.
+- **What a push can make the server write is bounded** (INIT-024 TASK-003, review finding N-1).
+  The tree of every pushed commit is measured at pre-receive — entries, blob bytes and summed path
+  bytes — and an over-budget push is refused before any ref moves. Every tree the server itself
+  checks out, merges, restores or clones is measured the same way before anything is written, and its
+  repositories carry neutral checkout attributes, so a checkout writes exactly the stored bytes
+  that were measured. The budget bounds each checkout, merge and push on its own; concurrent
+  branch-scoped writes are bounded together too (INIT-024 TASK-011): one writer per branch, and an
+  in-flight ceiling (`SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`) shared fairly across workspaces, per
+  process. Both are on in `spine serve`, with no off switch. In the embedded library the budget
+  and the ceiling are opt-in (`git.WithTreeBudget`, `git.TreeBudget.Check`,
+  `git.CheckoutLimits.InflightMaxBytes`); the one-writer claim applies to every caller
+  (embedders get it at the bump).
+- **Pushes need case- and normalization-sensitive storage** (INIT-024 TASK-005, N-8). Branch
+  protection matches ref names byte for byte, so a repository whose storage folds names has
+  receive-pack refused (reads are still served).
+- **Admission is decided again when the push is applied** (INIT-024 TASK-005, N-9; §7.3).
+- **Capacity is shared fairly** (INIT-024 TASK-005, N-13). A request takes a slot from its
+  principal's, its workspace's and the process's caps, and a push takes one only after its command
+  section has arrived, within a deadline, and been admitted.
+
+The residuals are in `KNOWN-LIMITATIONS.md` ("Git HTTP: Token-Less Clones Are for Direct Peers
+Only", "Checkout Budget", "Git Push Gate: Served Repositories Need Case- and
+Normalization-Sensitive Storage").
+
 ---
 
 ## 8. Sensitive Data Handling

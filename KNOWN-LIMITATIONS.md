@@ -1189,8 +1189,11 @@ The following limitations have been resolved:
   many files at one name resolve it once with `RefSHA` and read by object id
   (`artifact.Service.List` does; SMP's run-artifacts reader is handed off to SMP INIT-027 EPIC-004
   TASK-008).
-- **Git floor:** git 2.30 or newer (`rev-parse --end-of-options`). `spine serve` refuses to start
-  below it; embedders call `git.CheckGitVersion` at boot. Every shipped image runs 2.39.5 or later.
+- **Git floor:** git 2.30 or newer for the git client (`rev-parse --end-of-options`); embedders
+  call `git.CheckGitVersion` at boot. `spine serve` needs git 2.38 or newer and refuses to start
+  below it (INIT-024 TASK-003: a budgeted merge computes its result with `git merge-tree
+  --write-tree`; `git.CheckBudgetGitVersion`; "Checkout Budget"). Every shipped image runs 2.39.5
+  or later.
 - **No DWIM for a missing reserved or home branch** (INIT-024 TASK-004; review finding N-10). A
   bare revision in the reserved namespace (first component a case-fold spelling of `spine`, the
   rule push admission uses: run, planning and divergence branches, `spine/init`) or naming the
@@ -1310,7 +1313,8 @@ The following limitations have been resolved:
   — and later windows sync normally. With a checkout budget (`spine serve`) one merge's diff always
   fits the default limit, so a window over it takes many large merges between two syncs, or an
   embedder whose explicit `WithMaxOutputBytes` is smaller. Falling back to a rebuild automatically
-  is a follow-up (INIT-024 TASK-010).
+  is not done (INIT-024 TASK-004 owner question 1 default) and is a recorded follow-up (INIT-024
+  TASK-010's close notes).
 - **Residual — more governed candidates than the limit.** A tree whose `.md` and workflow paths
   alone exceed the listing limit (or the record ceiling) still fails `FullRebuild` closed. In
   standalone no governed merge can bring one in: the budget bounds both.
@@ -1361,9 +1365,9 @@ The following limitations have been resolved:
   read-only commands parse the commit being merged, which the merge itself then reads without an
   allocation limit.
 - **Not covered:** receive-time inflation (`index-pack` reconstructs a pushed delta to hash it;
-  `receive.maxInputSize` bounds the pack, not the object). Checkout-time inflation and wall-clock
-  deadlines on mutating commands are now bounded by the checkout budget (INIT-024 TASK-003;
-  "Checkout Budget" below).
+  `receive.maxInputSize` bounds the pack, not the object). Checkout-time inflation is now bounded
+  by the checkout budget, and local mutating commands by a wall-clock deadline (INIT-024 TASK-003:
+  both on in `spine serve`, opt-in for embedders; "Checkout Budget" below).
 - **Cost:** a `ReadFile` of a file runs three git processes — the entry probe (`ls-tree -l`), the
   object-type check (`cat-file -t`) and the read (`cat-file blob`) — where it ran one before
   TASK-003 (`show`) and two after it; a miss runs one (two when the revision names no tree). So a
@@ -1518,8 +1522,15 @@ The following limitations have been resolved:
   cannot move to an over-budget tree there; a merge re-checks the tip it measured, and
   `MergeBound` merges the exact measured commit. A writer outside the process that moves the
   checked-out branch between the merge's last tip check and `git merge` (git refuses pushes to it
-  by default), or that edits `info/attributes` behind the server, is not covered. The totals bound one tree at a time: concurrent worktrees of
-  different branches each get the full budget (no per-tenant disk quota; out of scope).
+  by default), or that edits `info/attributes` behind the server, is not covered.
+- **The budget bounds each checkout; TASK-011 bounds the checkouts in flight** (INIT-024
+  TASK-011, from the close's cross-task review). Every checkout, merge and push is measured on
+  its own, and that alone did not bound the total bytes of concurrent branch-scoped writes: each
+  wrote a full within-budget tree under the server's temporary directory (`TMPDIR`), concurrent
+  writes to one run branch included, even those git then refused. TASK-011 bounds them in-process
+  with one writer per branch and an in-flight ceiling shared fairly across workspaces — see
+  "Concurrent branch-scoped writes are bounded in aggregate" below for what remains and the
+  operator levers. There is no per-tenant disk quota.
 - **Mutate deadline.** On expiry the command is SIGTERMed (git removes its locks) and the call
   fails with a permanent error wrapping `git.MutateTimeoutError`. With a deadline, `EnterBranch`
   adds the worktree `--no-checkout` and runs the `reset --hard` that fills it itself, because
@@ -1594,7 +1605,11 @@ The following limitations have been resolved:
     sequence in the shared tree, another process) is still refused only after the worktree is
     filled (at the weighed tree, within the ceiling): by git's guard, or — with a ceiling, where the
     attach runs no checkout — by its own check of `git worktree list`, which does not see a
-    worktree in the middle of a rebase or bisect of the branch (git's guard does). Only branch-scoped writes are weighed: checkouts, merges and
+    worktree in the middle of a rebase or bisect of the branch (git's guard does). A worktree
+    registration left behind — a crash between a scope's worktree creation and its removal, or a
+    temporary directory cleaned under a live registration — keeps its branch refused (`git_error`)
+    until `git worktree prune` runs, as git's own guard did before (pruning at `spine serve` start
+    is a follow-up). Only branch-scoped writes are weighed: checkouts, merges and
     restores of a workspace's own tree and code-repository clones rewrite or create a persistent
     tree and are bounded per tree. Embedders get the one-writer claim at the bump; the ceiling only
     when they set `git.CheckoutLimits.InflightMaxBytes` (zero, the library default, is no aggregate
@@ -1604,6 +1619,18 @@ The following limitations have been resolved:
     tree and so each workspace's turn; `SPINE_GIT_MUTATE_TIMEOUT` bounds how long a write waits; a
     `TMPDIR` on its own quota'd filesystem with inodes to spare contains whatever remains (on a tmpfs
     the trees are memory).
+- **Residual — a tree on folding storage can stay marked** (INIT-024 close; follow-up). On case-
+  or normalization-insensitive storage two tracked names that differ only in case or
+  normalization share one file, so a rewrite from the index can never make both match their
+  blobs. A tree marked for renormalisation whose marker has no readable record, or whose
+  difference appeared after its record, then keeps the marker: every later call takes the tree's
+  hold, quarantines the tracked state again (an unreachable `git stash create` commit each time,
+  until git's garbage collection), rewrites and compares again; a code-repository clone in that
+  state is unavailable on every access, and a workspace build logs an Error each time. The push
+  path never reaches this (folding storage has receive-pack refused, "Git Push Gate: Served
+  Repositories Need Case- and Normalization-Sensitive Storage"). Keep work trees on case- and
+  normalization-sensitive storage; treating the paths that survive the rewrite as recorded, with
+  one Warn, is the follow-up.
 
 ### Webhook Signing Secrets: `migrate` Mode Does Not Close the Cross-Workspace Transplant
 - **What:** signing secrets are sealed in the `enc:v2` envelope, bound to the workspace and the

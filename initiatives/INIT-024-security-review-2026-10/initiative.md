@@ -372,6 +372,12 @@ Each task works with its stated default. Tasks cite these as "INIT-024 owner que
 ## 7e. Progress
 
 - 2026-10-23: scaffolded. All artifacts are Pending. Not pushed (owner question 1).
+- 2026-10-31: TASK-001 … TASK-009 merged on Spine local `main` (`854a1e08`). TASK-010 ran the
+  closing gates, two codex rounds and the SMP compatibility gate at the pair (all green),
+  reconciled the shared docs and recorded the SMP hand-off and the owner-question defaults. The
+  cross-task review (two skeptics: N-1 and N-2 closed) added TASK-011 (aggregate checkout bound),
+  merged on Spine local `main` (`ea77cff6`) and into the close branch. Tasks stay In Progress until
+  GitHub CI runs on the pushed closing commit. Not pushed (owner question 1: hold).
 
 ---
 
