@@ -1564,12 +1564,17 @@ The following limitations have been resolved:
   - *A ceiling on in-flight weight* (`spine serve`: `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`). A tree
     weighs its file bytes plus 4 KiB per entry (file, link or directory: the inode, directory entry
     and index entry a checkout creates), so a tree of many empty files is weighed too. The default
-    ceiling is twice `SPINE_GIT_TREE_MAX_BYTES`, raised to one maximal tree's weight
-    (`SPINE_GIT_TREE_MAX_BYTES` + 4 KiB x `SPINE_GIT_TREE_MAX_ENTRIES`) when that is heavier: 4 GiB
-    with the defaults. The weights of every open branch-scoped write stay within it; a tree heavier
-    than the ceiling on its own is refused permanently (`git_error`, like a budget refusal). The tree
-    checked out is the tree weighed: a branch that moves while its write waits is measured and
-    admitted again, and one that keeps moving (or moves during the checkout) fails as unavailable.
+    ceiling is twice one maximal tree's weight (`SPINE_GIT_TREE_MAX_BYTES` + 4 KiB x
+    `SPINE_GIT_TREE_MAX_ENTRIES`), so a maximal tree fits within one workspace's half whichever
+    allowance makes it heavy: 5,933,367,296 bytes (about 5.5 GiB) with the defaults. A ceiling set at
+    or below one maximal tree's weight logs a startup warning (a heavier tree is refused, and a
+    maximal one leaves no room for other workspaces). The weights of every open branch-scoped write
+    stay within the ceiling; a tree heavier than the ceiling on its own is refused permanently
+    (`git_error`, like a budget refusal). The tree written is the tree weighed: the worktree is
+    filled at the weighed commit and attached to the branch without a second checkout; a branch
+    that moves while its write waits is measured and admitted again (all the waits ending at one
+    `SPINE_GIT_MUTATE_TIMEOUT`), and one that keeps moving, or moves while the worktree is being
+    filled, fails as unavailable with only the weighed tree ever written.
   - *Fair across workspaces.* Each repository (in shared mode, each workspace) has its own queue,
     served in turn — freed room goes first to the workspace that has waited longest since it was
     last served — and holds at most half the ceiling; one tree heavier than half is admitted only
@@ -1578,15 +1583,18 @@ The following limitations have been resolved:
     waiting when its request ends or after `SPINE_GIT_MUTATE_TIMEOUT` fails as unavailable (`503`,
     retryable). A branch-scoped write pushes to origin after its scope is released, so a slow push
     holds neither the branch nor the weight.
-  - *What one workspace can still do to another.* Keep up to half the ceiling (or one maximal tree)
-    in flight while the others share the rest; and, under a steady stream of other workspaces'
+  - *What one workspace can still do to another.* Keep up to half the ceiling in flight while the
+    others share the rest (with a ceiling set below twice a maximal tree's weight, one tree heavier
+    than half while it has nothing else in flight); and, under a steady stream of other workspaces'
     smaller writes, see its own large tree wait — there is no reservation — until its deadline
     refuses it (`503`). The 4 KiB per entry approximates a filesystem's per-file cost; a filesystem
     with larger blocks, or large directories, costs more per entry than it is weighed.
   - *What remains.* The bound is per process: replicas or other processes sharing the temporary disk
     each have their own. A branch checked out by something other than a write of this process (a
-    sequence in the shared tree, another process) is still refused by git only after the worktree
-    is written, within the ceiling. Only branch-scoped writes are weighed: checkouts, merges and
+    sequence in the shared tree, another process) is still refused only after the worktree is
+    filled (at the weighed tree, within the ceiling): by git's guard, or — with a ceiling, where the
+    attach runs no checkout — by its own check of `git worktree list`, which does not see a
+    worktree in the middle of a rebase or bisect of the branch (git's guard does). Only branch-scoped writes are weighed: checkouts, merges and
     restores of a workspace's own tree and code-repository clones rewrite or create a persistent
     tree and are bounded per tree. Embedders get the one-writer claim at the bump; the ceiling only
     when they set `git.CheckoutLimits.InflightMaxBytes` (zero, the library default, is no aggregate

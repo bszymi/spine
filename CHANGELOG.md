@@ -30,19 +30,22 @@ concurrent writes to different branches each got the full budget. No runtime sch
   queue, served in turn, and holds at most half the ceiling (one tree heavier than half only while
   it has nothing else in flight), so one workspace's waiting writes never hold up another's that
   fits. A write that does not fit waits; one still waiting when its request ends or after the mutate
-  deadline fails `503` (retryable); a tree heavier than the ceiling on its own is refused. The tree
-  checked out is the tree weighed: a branch that moved while its write waited is measured and
-  admitted again, and one that keeps moving (or moves during the checkout) fails `503`. The weight
+  deadline (one for all its waits) fails `503` (retryable); a tree heavier than the ceiling on its
+  own is refused. The tree written is the tree weighed: the worktree is filled at the weighed commit
+  and attached to the branch without a second checkout, a branch that moved while its write waited
+  is measured and admitted again, and one that keeps moving, or moves while the worktree is being
+  filled, fails `503` without its new tree ever being written. The weight
   is returned only after the worktree is gone, and a branch-scoped write now pushes to origin after
   its scope is released.
 
 ### Changed (operators)
 
 - New variable `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`: a positive integer of bytes; anything else
-  refuses to start. Unset, it is twice `SPINE_GIT_TREE_MAX_BYTES`, raised to one maximal tree's
-  weight (`SPINE_GIT_TREE_MAX_BYTES` + 4096 x `SPINE_GIT_TREE_MAX_ENTRIES`) when that is heavier:
-  4 GiB with the defaults. A value below a maximal tree's weight logs a startup warning (a
-  branch-scoped write of a heavier tree is refused). The bound is per process; replicas sharing a
+  refuses to start. Unset, it is twice one maximal tree's weight (`SPINE_GIT_TREE_MAX_BYTES` + 4096
+  x `SPINE_GIT_TREE_MAX_ENTRIES`), so a maximal tree fits within one workspace's half:
+  5,933,367,296 bytes (about 5.5 GiB) with the defaults. A value at or below a maximal tree's weight
+  logs a startup warning (a branch-scoped write of a heavier tree is refused, and one of a maximal
+  tree leaves no room for other workspaces). The bound is per process; replicas sharing a
   temporary disk each have their own.
 - Concurrent writes with a run's write context to the same run branch: one proceeds and the others
   fail `git_error` at once, where before git refused most of them after writing (and sometimes let
@@ -73,6 +76,15 @@ concurrent writes to different branches each got the full budget. No runtime sch
   `ErrTreeTooLarge`, permanent); `InflightEntryWeight`, `InflightWeight(TreeStats)` and
   `TreeBudget.MaxInflightWeight()` (an embedder can weigh its own checkouts the same way). No
   interface gains a method.
+- **With a ceiling, a branch scope is attached without a checkout.** `EnterBranch` under
+  `InflightMaxBytes` fills the worktree at the weighed commit and attaches it with `git symbolic-ref
+  HEAD refs/heads/<n>` instead of `git switch`, so a branch that moved after it was weighed is
+  refused (`ErrBranchMoved`) without its new tree being written. The scope is on the branch exactly
+  as before (a commit in it moves the branch). git's "already used by worktree" guard is kept by
+  a `git worktree list --porcelain -z` check: a branch checked out in another worktree is refused
+  with an untyped error matching `ErrBranchInUse` (classified `git_error`, as git's own refusal was;
+  the message names no path). Without a ceiling the attach is the `switch` it was, with the same
+  argv.
 - `artifact.Service` pushes a branch-scoped write to origin after releasing the write scope (the
   branch is read inside it); the push and its error handling are otherwise unchanged, and an
   in-place write pushes inside its scope as before.
