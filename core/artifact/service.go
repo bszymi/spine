@@ -398,12 +398,26 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
-	s.autoPush(sctx, scope.RepoDir)
 	// Release the working tree before emitting (INIT-023 TASK-012): an
 	// event published while the shared tree is held could deadlock with a
 	// queue consumer that needs it. Cleanup is idempotent; the deferred
 	// call is then a no-op.
-	scope.Cleanup()
+	if scope.Branch == "" {
+		// In place: pushed inside the scope, under its context, as before.
+		s.autoPush(sctx, scope.RepoDir)
+		scope.Cleanup()
+	} else {
+		// A branch scope holds the branch's claim and its in-flight
+		// checkout weight until Cleanup (INIT-024 TASK-011), and a push is
+		// network-bound with no deadline of its own: the branch to push is
+		// read inside the scope, the scope released, then the branch pushed
+		// (review round 1). Its failures are still only logged.
+		branch, push := s.autoPushBranch(sctx, scope.RepoDir)
+		scope.Cleanup()
+		if push {
+			s.pushBranch(ctx, branch)
+		}
+	}
 
 	log.Info(op.logAction,
 		"path", path,
@@ -751,6 +765,12 @@ func (s *Service) enterBranch(ctx context.Context) (*git.WriteScope, error) {
 		if _, ok := err.(*domain.SpineError); ok {
 			return nil, err
 		}
+		// The in-flight checkout ceiling stayed full until the request
+		// gave up (INIT-024 TASK-011): retryable, so unavailable (503),
+		// not a git failure.
+		if errors.Is(err, git.ErrCheckoutsInFlight) {
+			return nil, domain.NewError(domain.ErrUnavailable, err.Error())
+		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 	return scope, nil
@@ -772,20 +792,32 @@ func (s *Service) stripArtifactsDir(repoRelPath string) string {
 // Push failures are logged as warnings but do not fail the operation.
 // Disabled when SPINE_GIT_AUTO_PUSH is set to "false".
 func (s *Service) autoPush(ctx context.Context, repoDir string) {
-	if strings.EqualFold(os.Getenv("SPINE_GIT_AUTO_PUSH"), "false") {
-		return
+	if branch, push := s.autoPushBranch(ctx, repoDir); push {
+		s.pushBranch(ctx, branch)
 	}
+}
 
-	log := observe.Logger(ctx)
-
+// autoPushBranch is autoPush's first half: the branch checked out in
+// repoDir, and whether it is to be pushed (auto-push on, branch known; a
+// failure to read it is logged, as before).
+func (s *Service) autoPushBranch(ctx context.Context, repoDir string) (string, bool) {
+	if strings.EqualFold(os.Getenv("SPINE_GIT_AUTO_PUSH"), "false") {
+		return "", false
+	}
 	branch, err := git.CurrentBranch(ctx, repoDir)
 	if err != nil {
-		log.Warn("auto-push: failed to determine current branch", "error", err)
-		return
+		observe.Logger(ctx).Warn("auto-push: failed to determine current branch", "error", err)
+		return "", false
 	}
+	return branch, true
+}
 
+// pushBranch is autoPush's second half: push branch to origin through the
+// main git client (worktrees share its object store and refs); a failure
+// is logged, never returned.
+func (s *Service) pushBranch(ctx context.Context, branch string) {
 	if err := s.git.Push(ctx, "origin", branch); err != nil {
-		log.Warn("auto-push: push failed", "branch", branch, "error", err)
+		observe.Logger(ctx).Warn("auto-push: push failed", "branch", branch, "error", err)
 	}
 }
 

@@ -452,10 +452,13 @@ controls:
   bytes — and an over-budget push is refused before any ref moves. Every tree the server itself
   checks out, merges, restores or clones is measured the same way before anything is written, and its
   repositories carry neutral checkout attributes, so a checkout writes exactly the stored bytes
-  that were measured. The budget bounds each checkout, merge and push on its own; the total of
-  the checkouts in flight at the same time is not bounded (a recorded residual; INIT-024
-  TASK-011). The budget is on in `spine serve` with no off switch; in the embedded library it is
-  opt-in (`git.WithTreeBudget`, `git.TreeBudget.Check`).
+  that were measured. The budget bounds each checkout, merge and push on its own; concurrent
+  branch-scoped writes are bounded together too (INIT-024 TASK-011): one writer per branch, and an
+  in-flight ceiling (`SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`) shared fairly across workspaces, per
+  process. Both are on in `spine serve`, with no off switch. In the embedded library the budget
+  and the ceiling are opt-in (`git.WithTreeBudget`, `git.TreeBudget.Check`,
+  `git.CheckoutLimits.InflightMaxBytes`); the one-writer claim applies to every caller
+  (embedders get it at the bump).
 - **Pushes need case- and normalization-sensitive storage** (INIT-024 TASK-005, N-8). Branch
   protection matches ref names byte for byte, so a repository whose storage folds names has
   receive-pack refused (reads are still served).

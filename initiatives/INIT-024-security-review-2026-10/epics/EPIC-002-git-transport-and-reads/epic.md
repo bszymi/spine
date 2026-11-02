@@ -68,6 +68,7 @@ checks out or merges a pushed tree, or what Spine **keeps** when it lists one.
 | TASK-003 | Checkout and merge amplification budget, pre-receive tree limits, SMP-facing `MeasureTree` | N-1 | 2 | — | `scratch/git/f4/zz_rv_bomb_test.go` `TestRV_CheckoutAmplification` | yes: new API; SMP's own half |
 | TASK-004 | Read-path robustness | N-6, N-10, N-11, N-12 | 3 (soft: TASK-003) | — | `scratch/secrets-delivery-projection/projection/zz_outputcap_wedge_test.go`; `scratch/git/f4/zz_rv_f10_test.go`; `scratch/git/f4/zz_rv_log_test.go` | yes: streamed listings are shared |
 | TASK-005 | Standalone push-gate races | N-8, N-9, N-13 | 3 (soft: TASK-003) | — | `scratch/git/f1` `TestRV_F1_CaseFoldRef`, `TestRV_PushAdmission_FreezeRace` | no (a parity note for SMP's gateway) |
+| TASK-011 | Aggregate checkout bound: one writer per branch, bounded in-flight checkout bytes | X-1 (TASK-010 cross-task review, P3 next to N-1) | close-out follow-up (after TASK-003) | — | the cross-task review's concurrent-entry probes → regression tests in `adapters/git` and `core/artifact` (the task's AC 1–2) | no at the bump (the ceiling is library opt-in; a concurrent same-branch entry is refused before writing instead of after); a parity note for SMP's own branch writes |
 
 ---
 

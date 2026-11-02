@@ -260,3 +260,62 @@ func CheckBudgetGitVersionOutputForTest(line string) error { return checkBudgetG
 func (c *CLIClient) SetMergeResultHookForTest(hook func(tree string)) {
 	c.mergeResultHook = hook
 }
+
+// InflightHeldForTest returns the summed weight the process's in-flight
+// checkout gate has admitted (INIT-024 TASK-011).
+func InflightHeldForTest() int64 {
+	checkoutsInFlight.mu.Lock()
+	defer checkoutsInFlight.mu.Unlock()
+	return checkoutsInFlight.held
+}
+
+// InflightWaitersForTest returns how many admissions wait in the gate,
+// over every repository.
+func InflightWaitersForTest() int {
+	checkoutsInFlight.mu.Lock()
+	defer checkoutsInFlight.mu.Unlock()
+	n := 0
+	for _, s := range checkoutsInFlight.repos {
+		n += s.waiters.Len()
+	}
+	return n
+}
+
+// InflightReposForTest returns how many repositories the gate tracks (it
+// forgets one that holds and waits for nothing).
+func InflightReposForTest() int {
+	checkoutsInFlight.mu.Lock()
+	defer checkoutsInFlight.mu.Unlock()
+	return len(checkoutsInFlight.repos)
+}
+
+// AdmitCheckoutForTest weighs weight for the repository key repo in the
+// process gate under ceiling, as EnterBranch does for a measured tree
+// (op "worktree").
+func AdmitCheckoutForTest(ctx context.Context, repo string, weight, ceiling int64) (func(), error) {
+	return admitCheckout(ctx, "worktree", repo, weight, ceiling)
+}
+
+// RepoClaimKeyForTest exposes the key EnterBranch claims a branch under
+// and weighs it for: the identity of the repository's git common
+// directory.
+func RepoClaimKeyForTest(repoDir string) string { return repoClaimKey(repoDir) }
+
+// PathIdentityForTest is the key repoClaimKey gives the directory at path
+// itself: its (device, inode) where the platform reports them, else its
+// symlink-free path.
+func PathIdentityForTest(path string) string {
+	if id, ok := fileIdentity(path); ok {
+		return id
+	}
+	return canonicalTreeKey(path)
+}
+
+// SetScopeReleaseHookForTest makes f run each time a branch scope is
+// about to return its in-flight weight and its claim (the repository
+// directory, the scope's private parent and worktree; "" when not created
+// yet). The returned func removes it.
+func SetScopeReleaseHookForTest(f func(repoDir, parent, worktreeDir string)) func() {
+	scopeReleaseHook.Store(&f)
+	return func() { scopeReleaseHook.Store(nil) }
+}

@@ -6,6 +6,91 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-002 TASK-011: aggregate checkout bound)
+
+Closes the P3 the TASK-010 cross-task review found next to N-1: the checkout budget bounded one
+tree at a time, but concurrent branch-scoped writes each put a whole tree on the temporary disk every
+workspace shares, including concurrent writes to one run branch that git then refused, and
+concurrent writes to different branches each got the full budget. No runtime schema change.
+
+### Security
+
+- **One write scope per branch.** `git.EnterBranch` claims the branch for the repository in-process
+  before it looks the branch up, measures it or creates the temporary directory, and holds the claim
+  until the scope's Cleanup has removed the worktree. The repository is identified by its git common
+  directory's device and inode (found upward from the given directory, as git does), so every
+  spelling of its path is one repository. A second concurrent write to the branch is refused at
+  once, before any git process runs and before anything is written (it used to write the tree and
+  then be refused by git's "already checked out" guard, which could also let several worktrees
+  attach to one branch).
+- **Bounded, fair in-flight checkout weight.** `spine serve` admits a branch-scoped write only while
+  the weights of every open branch-scoped write stay within `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`.
+  A tree weighs its file bytes plus 4096 per entry, so trees of many empty files or directories are
+  bounded too. Admission is fair across repositories (workspaces in shared mode): each has its own
+  queue, served in turn, and holds at most half the ceiling (one tree heavier than half only while
+  it has nothing else in flight), so one workspace's waiting writes never hold up another's that
+  fits. A write that does not fit waits; one still waiting when its request ends or after the mutate
+  deadline (one for all its waits) fails `503` (retryable); a tree heavier than the ceiling on its
+  own is refused. The tree written is the tree weighed: the worktree is filled at the weighed commit
+  and attached to the branch without a second checkout, a branch that moved while its write waited
+  is measured and admitted again, and one that keeps moving, or moves while the worktree is being
+  filled, fails `503` without its new tree ever being written. The weight
+  is returned only after the worktree is gone, and a branch-scoped write now pushes to origin after
+  its scope is released.
+
+### Changed (operators)
+
+- New variable `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`: a positive integer of bytes; anything else
+  refuses to start. Unset, it is twice one maximal tree's weight (`SPINE_GIT_TREE_MAX_BYTES` + 4096
+  x `SPINE_GIT_TREE_MAX_ENTRIES`), so a maximal tree fits within one workspace's half:
+  5,933,367,296 bytes (about 5.5 GiB) with the defaults. A value at or below a maximal tree's weight
+  logs a startup warning (a branch-scoped write of a heavier tree is refused, and one of a maximal
+  tree leaves no room for other workspaces). The bound is per process; replicas sharing a
+  temporary disk each have their own.
+- Concurrent writes with a run's write context to the same run branch: one proceeds and the others
+  fail `git_error` at once, where before git refused most of them after writing (and sometimes let
+  two through, one of which then failed at commit). Retry after the first has finished.
+- One workspace can no longer fill the in-flight room: it holds at most half of it, and its waiting
+  writes do not delay other workspaces'. A large tree can still wait behind a steady stream of other
+  workspaces' smaller writes until its deadline (no reservation).
+
+### Changed (embedders)
+
+- **A concurrent same-branch entry is refused before writing instead of after.** With no limits set
+  (the library default) `git.EnterBranch` still runs the same git commands with the same argv; the
+  only change is that a second scope for a branch this process already holds is refused before any
+  git process, with an untyped error wrapping the new `git.ErrBranchInUse` — not a `*GitError`, like
+  git's refusal it replaces, so callers classify it as before (the artifact and workflow services:
+  `git_error`). The claim's key is derived in-process (no extra git process). `WriteScope.Cleanup`
+  of a branch scope now runs its removal once however often it is called.
+- **New limit field, opt-in.** `git.CheckoutLimits.InflightMaxBytes` (0, the default: no aggregate
+  bound) weighs every branch scope of the process in one gate — a queue per repository served
+  round-robin, at most half the ceiling per repository — from admission to Cleanup. With a ceiling
+  and no `Budget`, `EnterBranch` alone measures against the default budget to weigh its tree; the
+  process default and other clients are unchanged. New API: `ErrBranchInUse`; `ErrCheckoutsInFlight`
+  with the typed cause `*InflightWaitError{Weight, Ceiling, Err}` (matches the context's error)
+  inside `*GitError{Kind: ErrKindTransient, Message: CheckoutsInFlightMessage}`, which the artifact
+  and workflow services report as `unavailable`; `ErrBranchMoved` (a branch that kept moving while
+  its checkout was admitted; it also matches `ErrCheckoutsInFlight`, with `Message:
+  BranchMovedMessage`); `TreeLimitInflightBytes` (a tree over the ceiling:
+  `ErrTreeTooLarge`, permanent); `InflightEntryWeight`, `InflightWeight(TreeStats)` and
+  `TreeBudget.MaxInflightWeight()` (an embedder can weigh its own checkouts the same way). No
+  interface gains a method.
+- **With a ceiling, a branch scope is attached without a checkout.** `EnterBranch` under
+  `InflightMaxBytes` fills the worktree at the weighed commit and attaches it with `git symbolic-ref
+  HEAD refs/heads/<n>` instead of `git switch`, so a branch that moved after it was weighed is
+  refused (`ErrBranchMoved`) without its new tree being written. The scope is on the branch exactly
+  as before (a commit in it moves the branch). git's "already used by worktree" guard is kept by
+  a `git worktree list --porcelain -z` check: a branch checked out in another worktree is refused
+  with an untyped error matching `ErrBranchInUse` (classified `git_error`, as git's own refusal was;
+  the message names no path). Without a ceiling the attach is the `switch` it was, with the same
+  argv.
+- `artifact.Service` pushes a branch-scoped write to origin after releasing the write scope (the
+  branch is read inside it); the push and its error handling are otherwise unchanged, and an
+  in-place write pushes inside its scope as before.
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-002 TASK-005: standalone push-gate races)
 
 Closes review findings N-8, N-9 and N-13 (P3, standalone git endpoint). No runtime schema change;

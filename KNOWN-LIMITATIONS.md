@@ -1523,16 +1523,14 @@ The following limitations have been resolved:
   `MergeBound` merges the exact measured commit. A writer outside the process that moves the
   checked-out branch between the merge's last tip check and `git merge` (git refuses pushes to it
   by default), or that edits `info/attributes` behind the server, is not covered.
-- **The budget bounds each checkout, not the checkouts in flight** (INIT-024 close, cross-task
-  review; follow-up). Every checkout, merge and push is measured on its own, but nothing bounds
-  the total bytes of the checkouts in progress at the same time, for one branch or across
-  branches. Concurrent branch-scoped writes each write a full within-budget tree under the
-  server's temporary directory (`TMPDIR`) before they finish — including concurrent writes to the
-  same run branch, and writes git then refuses because that branch is already checked out — so a
-  burst of them needs a multiple of the budget on that filesystem. There is no per-tenant disk
-  quota either. Operator levers: a lower `SPINE_GIT_TREE_MAX_BYTES`, and `TMPDIR` on its own
-  size-limited (quota'd) filesystem rather than a memory-backed tmpfs. Bounding the bytes in
-  flight (one writer per branch, a process-wide byte allowance) is INIT-024 TASK-011.
+- **The budget bounds each checkout; TASK-011 bounds the checkouts in flight** (INIT-024
+  TASK-011, from the close's cross-task review). Every checkout, merge and push is measured on
+  its own, and that alone did not bound the total bytes of concurrent branch-scoped writes: each
+  wrote a full within-budget tree under the server's temporary directory (`TMPDIR`), concurrent
+  writes to one run branch included, even those git then refused. TASK-011 bounds them in-process
+  with one writer per branch and an in-flight ceiling shared fairly across workspaces — see
+  "Concurrent branch-scoped writes are bounded in aggregate" below for what remains and the
+  operator levers. There is no per-tenant disk quota.
 - **Mutate deadline.** On expiry the command is SIGTERMed (git removes its locks) and the call
   fails with a permanent error wrapping `git.MutateTimeoutError`. With a deadline, `EnterBranch`
   adds the worktree `--no-checkout` and runs the `reset --hard` that fills it itself, because
@@ -1566,6 +1564,61 @@ The following limitations have been resolved:
   (retrying cannot shrink the tree); a refused branch-scoped write fails with `git_error`. One
   budget covers every client of the process, code-repository clones and merges included, so a
   code repository larger than the defaults needs the limits raised for the whole deployment.
+- **Concurrent branch-scoped writes are bounded in aggregate (INIT-024 TASK-011).** The budget
+  bounds one tree; what concurrent writes with a run's write context have on the temporary disk
+  together is bounded in-process, before anything is written:
+  - *One write scope per branch.* A write to a run branch that another write of the same process
+    is still writing to is refused at once with `git_error` (the classification of git's own
+    "already checked out" refusal, which came only after the tree was written); retry it once the
+    other write has finished. Every spelling of a repository's path is one repository (the key is
+    its git common directory's device and inode).
+  - *A ceiling on in-flight weight* (`spine serve`: `SPINE_GIT_CHECKOUT_INFLIGHT_MAX_BYTES`). A tree
+    weighs its file bytes plus 4 KiB per entry (file, link or directory: the inode, directory entry
+    and index entry a checkout creates), so a tree of many empty files is weighed too. The default
+    ceiling is twice one maximal tree's weight (`SPINE_GIT_TREE_MAX_BYTES` + 4 KiB x
+    `SPINE_GIT_TREE_MAX_ENTRIES`), so a maximal tree fits within one workspace's half whichever
+    allowance makes it heavy: 5,933,367,296 bytes (about 5.5 GiB) with the defaults. A ceiling set at
+    or below one maximal tree's weight logs a startup warning (a heavier tree is refused, and a
+    maximal one leaves no room for other workspaces). The weights of every open branch-scoped write
+    stay within the ceiling; a tree heavier than the ceiling on its own is refused permanently
+    (`git_error`, like a budget refusal). The tree written is the tree weighed: the worktree is
+    filled at the weighed commit and attached to the branch without a second checkout; a branch
+    that moves while its write waits is measured and admitted again (all the waits ending at one
+    `SPINE_GIT_MUTATE_TIMEOUT`), and one that keeps moving, or moves while the worktree is being
+    filled, fails as unavailable with only the weighed tree ever written.
+  - *Fair across workspaces.* Each repository (in shared mode, each workspace) has its own queue,
+    served in turn — freed room goes first to the workspace that has waited longest since it was
+    last served — and holds at most half the ceiling; one tree heavier than half is admitted only
+    while its repository has nothing else in flight. One workspace's waiting writes never hold up
+    another workspace's write that fits. A write that cannot be admitted waits, and one still
+    waiting when its request ends or after `SPINE_GIT_MUTATE_TIMEOUT` fails as unavailable (`503`,
+    retryable). A branch-scoped write pushes to origin after its scope is released, so a slow push
+    holds neither the branch nor the weight.
+  - *What one workspace can still do to another.* Keep up to half the ceiling in flight while the
+    others share the rest (with a ceiling set below twice a maximal tree's weight, one tree heavier
+    than half while it has nothing else in flight); and, under a steady stream of other workspaces'
+    smaller writes, see its own large tree wait — there is no reservation — until its deadline
+    refuses it (`503`). The 4 KiB per entry approximates a filesystem's per-file cost; a filesystem
+    with larger blocks, or large directories, costs more per entry than it is weighed.
+  - *What remains.* The bound is per process: replicas or other processes sharing the temporary disk
+    each have their own. A branch checked out by something other than a write of this process (a
+    sequence in the shared tree, another process) is still refused only after the worktree is
+    filled (at the weighed tree, within the ceiling): by git's guard, or — with a ceiling, where the
+    attach runs no checkout — by its own check of `git worktree list`, which does not see a
+    worktree in the middle of a rebase or bisect of the branch (git's guard does). A worktree
+    registration left behind — a crash between a scope's worktree creation and its removal, or a
+    temporary directory cleaned under a live registration — keeps its branch refused (`git_error`)
+    until `git worktree prune` runs, as git's own guard did before (pruning at `spine serve` start
+    is a follow-up). Only branch-scoped writes are weighed: checkouts, merges and
+    restores of a workspace's own tree and code-repository clones rewrite or create a persistent
+    tree and are bounded per tree. Embedders get the one-writer claim at the bump; the ceiling only
+    when they set `git.CheckoutLimits.InflightMaxBytes` (zero, the library default, is no aggregate
+    bound; with a ceiling and no budget, `EnterBranch` alone measures against the default budget).
+  - *Operator levers.* A lower ceiling bounds the disk and, through the half share, what one
+    workspace can hold; a lower `SPINE_GIT_TREE_MAX_BYTES` or `SPINE_GIT_TREE_MAX_ENTRIES` bounds each
+    tree and so each workspace's turn; `SPINE_GIT_MUTATE_TIMEOUT` bounds how long a write waits; a
+    `TMPDIR` on its own quota'd filesystem with inodes to spare contains whatever remains (on a tmpfs
+    the trees are memory).
 - **Residual — a tree on folding storage can stay marked** (INIT-024 close; follow-up). On case-
   or normalization-insensitive storage two tracked names that differ only in case or
   normalization share one file, so a rewrite from the index can never make both match their
