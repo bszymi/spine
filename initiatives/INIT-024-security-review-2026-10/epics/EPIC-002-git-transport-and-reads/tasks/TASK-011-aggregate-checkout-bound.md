@@ -7,7 +7,7 @@ epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-31
-last_updated: 2026-10-31
+last_updated: 2026-11-02
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
@@ -250,3 +250,151 @@ receive side does not check out). Spine's gate is internal to `adapters/git` (re
   failures).
 - GitHub CI (nothing is pushed).
 - Trees larger than ~60 MiB on the host (disk safety); the fixtures measure the bound in multiples of a 10-13 MiB tree.
+
+### Round 1 review fixes (2026-10-31 … 2026-11-02)
+
+*(Review of `854a1e08..e92b45c4`: 0 P1/P2, 2 P3, 5 P4 — the same-branch defect closed and the ceiling held across
+branches. Codex round 3 ran on the round-1 code. Status stays In Progress.)* This section supersedes Decision 5
+(one FIFO for the process), Decision 7 (a ceiling alone brings the default budget everywhere), Decision 8 (weight =
+`TotalBytes`) and the serve default in `9d6cf380`'s row (the per-tree byte limit) above.
+
+| Commit | Change |
+|---|---|
+| `0faef71e` | Round-1 code and tests (P3-1, P3-2, P4-1…P4-4 below). |
+| `5cfe16dd` | Round-1 docs: KNOWN-LIMITATIONS (the per-entry weight, the default ceiling's derivation, fair admission and the half share per workspace, what one workspace can still do to another, operator levers), the integration guide's variable row, CHANGELOG, README, `.env.example`, `architecture/git-integration.md`. |
+| `a5225cb3` | Codex round 3 fixes and tests (P1, P2 below). |
+| `180764d7` | Codex round 3 docs: KNOWN-LIMITATIONS, CHANGELOG (`ErrBranchMoved`), the integration guide's variable row. |
+| `e4eba029` | Tests only: every entry and admission that can wait in the process-wide gate runs under `boundedCtx(t, d)` (10 s; 30 s for the six-repository and entries tests), a refusal that unexpectedly succeeds is released before the test fails, holder scopes also go to Cleanup with a bounded wait (`cleanupAtEnd`), and the two service tests stop waiting for the holder's deferred Cleanup after 10 s — so a defect fails a named test instead of hanging the binary until `-timeout` (four round-1 mutants hung a test until that timeout; see the mutation table). |
+| (this commit) | These notes. |
+
+#### Review dispositions
+
+| ID | Defect | Disposition |
+|---|---|---|
+| P3-1 | One process-wide FIFO and a default ceiling equal to the per-tree byte limit: one workspace's maximal tree filled the ceiling, and a waiter at the head blocked every other repository's write that fitted, until those were refused at their deadline. | **Fixed.** One FIFO queue per repository (keyed by the claim key), the queues served round-robin; an arrival waits only behind its own repository's queue; one repository holds at most half the ceiling (a single heavier tree only while its repository holds nothing). `spine serve`'s default ceiling = max(2 × `SPINE_GIT_TREE_MAX_BYTES`, one maximal tree's weight) = 4 GiB with the defaults; a Warn at start when a ceiling is below a maximal tree's weight. **Documented residual** (KNOWN-LIMITATIONS): no reservation — a large waiting tree can lose freed room to a steady stream of other repositories' smaller writes until its deadline (503). Tests: `TestInflightGate_OneRepositoryNeverBlocksAnother` and `TestServeCeiling_OneMaximalTreeLeavesRoomForOtherRepositories` (both red at `e92b45c4`), `TestInflightGate_HalfTheCeilingPerRepository`, `_RoundRobinAcrossRepositories`, `_FIFOWithinARepositoryAndCancellation`, `_ForgetsIdleRepositories`, `TestLoadCheckoutLimits_InflightCeiling`. |
+| P3-2 | The weight was the blob bytes only: trees of directories and empty files weighed 0, so any number of them was admitted (inode exhaustion of the shared temporary directory). | **Fixed.** Weight = bytes + `git.InflightEntryWeight` (4096) × `Entries` (`git.InflightWeight(TreeStats)`, saturating; `TreeBudget.MaxInflightWeight()` = the heaviest tree a budget admits); the over-ceiling refusal uses the same weight. `Entries` also counts gitlinks (a superset of what is written). Tests: `TestEnterBranch_EntriesAreWeighed` (red at `e92b45c4`), `TestInflightWeight_CountsEntries`. |
+| P4-1 | The release-after-removal order was untested (a release-first mutant survived). | **Fixed.** A test hook at the release (`SetScopeReleaseHookForTest`); `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved` asserts the private parent is gone and git no longer lists the worktree on Cleanup, a failure after the add, and a failure before anything was created; it kills the release-first mutant (F07). |
+| P4-2 | The claim key depended on the path's spelling (a case variant on case-insensitive storage keyed differently; a subdirectory or a symlinked `.git` fell back to its own path). Not request-reachable. | **Fixed.** Key = the git common directory's (device, inode) (`checkout_identity_unix.go`; the canonical path elsewhere and as the fallback), the repository found upward from the given directory as git does; a `.git` symbolic link is followed for the identity, and a file is opened only when what it names is a regular file. `TestEnterBranch_BranchClaimIsPerRepository` and `TestRepoClaimKey_MatchesGitCommonDir` add the subdirectory, symlinked `.git` and case-variant (APFS) spellings. |
+| P4-3 | `artifact.Service` pushed inside the branch scope, holding the claim and the weight across an unbounded network push. | **Fixed for branch scopes:** the branch is read inside the scope, the scope released, then the branch pushed (failures still only logged). In-place writes still push inside their scope, as before. `core/workflow` does not push. Test: `TestCreate_PushStartsAfterTheBranchScopeIsReleased` (red at `e92b45c4`). |
+| P4-4 | A ceiling alone brought the default budget to every client in the process (`Checkout`/`Merge`/`Clone` of a repository without the neutral attributes line were then refused). | **Fixed.** The implied budget applies only inside `EnterBranchWithLimits` (to weigh its tree); the process default and every client keep exactly the limits they were given. `TestCheckoutLimits_InflightCeiling` (a ceiling-only default leaves `DefaultCheckoutLimits`/`CLIClient.CheckoutLimits` without a budget and a plain repository's `Checkout` succeeds). |
+| P4-5 | The stale `KNOWN-LIMITATIONS.md` residual sentence. | **Left to the TASK-010 closer**, as instructed (the TASK-011 entry supersedes it). |
+
+#### Codex round 3 (the last round; `codex review --base 854a1e08` at `5cfe16dd`, session `01a19022-ee81-7672-91cc-5704db3bb695`, model `gpt-6.1-sol`)
+
+| Finding | Fix (`a5225cb3`) |
+|---|---|
+| **P1** A branch that moved while its entry waited for room (a push) was checked out at its new tip while the gate held the old tree's weight, so the ceiling could be exceeded. | With a ceiling, the tip is re-read after admission; when it moved, the weight is returned and the new tip measured and admitted again, at most `branchMovedAttempts` (3) times, then the retryable `git.ErrBranchMoved` (it also matches `ErrCheckoutsInFlight`, so API callers get `unavailable`, 503). After the checkout, `HEAD` must be the weighed commit; a move in between removes the worktree and refuses the same way. Tests: `TestEnterBranch_BranchMovedWhileWaitingIsReweighed` (red at `5cfe16dd`), `_BranchMovedDuringCheckoutIsRefused`, `_BranchThatKeepsMovingIsRefused`. |
+| **P2** The round-robin moved every repository it visited to the back, restoring the original order after each pass, so one repository's backlog could take each freed slot before another repository waiting for the same room. | A repository whose head does not fit keeps its place; only a served one goes to the back, so freed room goes first to the repository that has waited longest since it was last served. Test: `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` (red at `5cfe16dd`). |
+
+**The two codex-round-3 fixes (`a5225cb3`, `180764d7`) and the test-bounding commit `e4eba029` are NOT
+codex-reviewed** (the codex budget for the task is spent); they go to an independent delta review.
+
+#### Red / green
+
+"Red" = the head tests run with `go test -overlay` mapping the production files to the earlier revision.
+
+| Regression | Red | Green |
+|---|---|---|
+| `TestInflightGate_OneRepositoryNeverBlocksAnother` | at `e92b45c4` (`t011/red-r1/`, with a compile shim for the new test API): C's 10-byte admission waited 2 s behind B's waiting 60 and was refused (`ErrCheckoutsInFlight`) | PASS |
+| `TestEnterBranch_EntriesAreWeighed` | at `e92b45c4`: 3 trees of 3,001 entries in flight under a 2.5-tree ceiling, peak 9,013 filesystem entries, a tree weighing twice the ceiling admitted | PASS |
+| `TestServeCeiling_OneMaximalTreeLeavesRoomForOtherRepositories` | at `e92b45c4`: another repository's 10-byte write beside one maximal tree waited 3 s and was refused (8 MiB ceiling) | PASS |
+| `TestCreate_PushStartsAfterTheBranchScopeIsReleased` | at `e92b45c4`: the push started while the worktree was on disk and the branch still claimed | PASS |
+| `TestEnterBranch_BranchMovedWhileWaitingIsReweighed` | at `5cfe16dd` (`t011/red-c3/`): the gate held 4,102 for a scope that checked out the moved tip weighing 10,653,696 | PASS |
+| `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` | at `5cfe16dd`: a3 took the freed slot before b1 | PASS |
+
+The bounded tests (`e4eba029`) were run again against both red bases (`red-r1/overlay-bounded.json` — the round-1
+overlay plus the codex-round-3 test file left out — and `red-c3/overlay.json`; logs `red-r1/red-bounded.log`,
+`red-c3/red-bounded.log`): all six still fail at their base with the same messages, so bounding the waits did not
+weaken them.
+
+#### Mutations (round 1; `t011/mut-r1/`, overlays, re-run on `e4eba029` with `mut-r1/run2.sh`, logs `mut-r1/r2/`)
+
+33 mutants. The first round-1 run reached 25 of them before it was stopped during S04: 21 were killed by named
+tests; F03, F13, K02 and S03 each hung a test until the 5-minute binary timeout (F03 named no failing test at all;
+the other three also failed named tests, then a leaked scope or a locked gate hung a later test); S04–S11 were not
+run. All 33 are now killed by named tests: 0 timeouts, 0 build errors, no survivor. F13 (a cancelled last waiter left in the turn
+list) makes the admission pass dereference an empty queue and panic while holding the gate's lock: it is reported
+under the failing test's name in `adapters/git`, `core/artifact` and `core/workflow`. Before `e4eba029` the two
+service tests deadlocked in their deferred Cleanup on that lock, so only the binary timeout reported them.
+
+| Mutant | Killed by (FAIL by name; 0 timeouts, 0 build errors) |
+|---|---|
+| C01 no branch claim | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestCreate_ConcurrentRunBranchWritesPutOneTreeOnDisk`, `TestEnterBranch_BranchClaimIsPerRepository`, `TestEnterBranch_BranchInUseKeepsTheRefusalClass`, `TestEnterBranch_RacingSameBranchEntriesWriteOneTree`, `TestEnterBranch_SameBranchEntriesAreRefusedBeforeWriting` |
+| C02 claim released when EnterBranch returns (not at Cleanup) | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_BranchClaimIsPerRepository`, `TestEnterBranch_BranchInUseKeepsTheRefusalClass`, `TestEnterBranch_SameBranchEntriesAreRefusedBeforeWriting` |
+| C03 claim key ignores the branch | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_BranchClaimIsPerRepository` |
+| C04 a non-regular administrative file opened (no regular-file check) | `TestRepoClaimKey_ReadsOnlyRegularAdministrativeFiles` |
+| C05 claim taken after the temporary directory | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_SameBranchEntriesAreRefusedBeforeWriting` |
+| F01 no per-repository share (fits ignores the half ceiling) | `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_HalfTheCeilingPerRepository` |
+| F02 per-repository share = the whole ceiling | `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_HalfTheCeilingPerRepository` |
+| F03 one global FIFO (an arrival waits whenever any repository has waiters) | `TestInflightGate_HalfTheCeilingPerRepository`, `TestInflightGate_OneRepositoryNeverBlocksAnother` |
+| F04 a served repository is not moved to the back (drain one repository first) | `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| F05 weight = bytes only (no entry cost) | `TestCheckoutLimits_InflightCeiling`, `TestEnterBranch_BranchMovedDuringCheckoutIsRefused`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_BranchThatKeepsMovingIsRefused`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_InflightCeilingBoundsDifferentBranches`, `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved`, `TestEnterBranch_TreeOverTheInflightCeilingIsRefused`, `TestInflightWeight_CountsEntries` |
+| F06 serve default ceiling = the per-tree byte limit | `TestLoadCheckoutLimits_InflightCeiling`, `TestServeCeiling_OneMaximalTreeLeavesRoomForOtherRepositories` |
+| F07 weight and claim released before the worktree is removed | `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved` |
+| F08 claim key by path (no device/inode identity) | `TestEnterBranch_BranchClaimIsPerRepository` |
+| F09 no upward discovery of the repository | `TestEnterBranch_BranchClaimIsPerRepository`, `TestRepoClaimKey_MatchesGitCommonDir` |
+| F10 artifact push inside the branch scope | `TestCreate_PushStartsAfterTheBranchScopeIsReleased` |
+| F11 a ceiling alone brings the default budget process-wide | `TestCheckoutLimits_InflightCeiling` |
+| F12 idle repositories never forgotten | `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_ForgetsIdleRepositories`, `TestInflightGate_HalfTheCeilingPerRepository` |
+| F13 a cancelled last waiter leaves its repository in the turn list | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_InflightWaitEndsWithRetryableError` — the panic (nil head in admitLocked, under the gate lock) is reported under the test's name in all three packages; the bounded Cleanup reports the stuck gate instead of deadlocking |
+| F14 MaxInflightWeight without the entry cost | `TestInflightWeight_CountsEntries`, `TestLoadCheckoutLimits_InflightCeiling` |
+| K01 no tip re-read after admission (codex P1) | `TestEnterBranch_BranchMovedWhileWaitingIsReweighed` |
+| K02 no HEAD check after switch (codex P1) | `TestEnterBranch_BranchMovedDuringCheckoutIsRefused` |
+| K03 a repository whose head does not fit is rotated too (codex P2) | `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| S01 the gate never waits | `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_InflightCeilingBoundsDifferentBranches`, `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_ForgetsIdleRepositories`, `TestInflightGate_HalfTheCeilingPerRepository`, `TestInflightGate_OneRepositoryNeverBlocksAnother`, `TestInflightGate_RoundRobinAcrossRepositories`, `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| S02 weight released when EnterBranch returns | `TestCheckoutLimits_InflightCeiling`, `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_InflightCeilingBoundsDifferentBranches`, `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit` |
+| S03 no over-ceiling refusal | `TestCheckoutLimits_InflightCeiling`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_TreeOverTheInflightCeilingIsRefused`, `TestInflightGate_FIFOWithinARepositoryAndCancellation` |
+| S04 a cancelled waiter left queued | `TestCheckoutLimits_InflightCeiling`, `TestEnterBranch_BranchMovedDuringCheckoutIsRefused`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_BranchThatKeepsMovingIsRefused`, `TestEnterBranch_InflightWaitEndsWithRetryableError`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved`, `TestEnterBranch_TreeOverTheInflightCeilingIsRefused`, `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_ForgetsIdleRepositories`, `TestInflightGate_HalfTheCeilingPerRepository`, `TestInflightGate_OneRepositoryNeverBlocksAnother`, `TestInflightGate_RoundRobinAcrossRepositories`, `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| S05 weight kept on error paths (only the claim released) | `TestCheckoutLimits_InflightCeiling`, `TestEnterBranch_BranchMovedDuringCheckoutIsRefused`, `TestEnterBranch_BranchMovedWhileWaitingIsReweighed`, `TestEnterBranch_BranchThatKeepsMovingIsRefused`, `TestEnterBranch_EntriesAreWeighed`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit`, `TestEnterBranch_ScopeIsReleasedAfterItsWorktreeIsRemoved`, `TestInflightGate_FIFOWithinARepositoryAndCancellation`, `TestInflightGate_ForgetsIdleRepositories`, `TestInflightGate_HalfTheCeilingPerRepository`, `TestInflightGate_OneRepositoryNeverBlocksAnother`, `TestInflightGate_RoundRobinAcrossRepositories`, `TestInflightGate_ServedRepositoryGoesBehindTheWaitingOne` |
+| S06 wait not bounded by the mutate deadline | `TestEnterBranch_InflightWaitEndsWithRetryableError` |
+| S07 a done context acquires with room | `TestInflightGate_FIFOWithinARepositoryAndCancellation` |
+| S08 no admission pass after a cancelled waiter | `TestInflightGate_FIFOWithinARepositoryAndCancellation` |
+| S09 artifact service maps the wait refusal to git_error | `TestCreate_CheckoutRefusalsKeepTheirClassification` |
+| S10 workflow service maps the wait refusal to git_error | `TestCreate_CheckoutRefusalsKeepTheirClassification` |
+| S11 no implied budget inside EnterBranch (a ceiling alone weighs nothing) | `TestCheckoutLimits_InflightCeiling`, `TestCreate_CheckoutRefusalsKeepTheirClassification`, `TestEnterBranch_InflightWeightIsReturnedOnEveryExit` |
+
+#### Gates (final code `e4eba029`; only this notes commit follows)
+
+Logs: `t011/chain1.out`, `basic-final/`, `ci-final/`, `light-final/`, `linux-floor.log`.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `embed-smoketest` | rc=0; rc=0; rc=0 |
+| `go test -p 4 ./...` (heavy lock) | rc=0 (41 packages ok, no failure) |
+| `go vet ./...` plain / `-tags integration` / `-tags scenario`; `GOOS=linux` and `GOOS=windows` vet of the touched packages | rc=0 / 0 / 0; 0 / 0 |
+| `-race -p 4` on `adapters/git/...`, `core/artifact/...`, `core/workflow/...`, `core/worktreefs/...`, `service/cmd/spine/...` | rc=0, no data race |
+| `-tags integration` suites of `adapters/git/...`, `adapters/gitpool/...`, `core/artifact/...`, `core/workflow/...`, `service/cmd/spine/...`, `service/internal/githttp/...` (own DB `s24011_ci_final`, dropped) | rc=0 (7 packages ok) |
+| `scenario-git-http` job, every step (`TestGitHTTP_*` / `TestBootstrapInternalAdmin_*` / `TestWorkflowLifecycle_*` / workflow-policy / step CAS + evidence / status lifecycle scenario + integration / governance scenario + store / multi-scheduler) | rc=0 for all; 90 / 26 / 154 / 1 / 12 + 24 / 37 + 1 / 19 + 1 / 1 passes; 0 skips |
+| `git-floor` (`golang:1.26-bookworm`, git 2.39.5, `--pull=never`, read-only mounts, go1.26.10 toolchain copied into the tmpfs; container removed) | STEP1 rc=0, STEP2 rc=0; every TASK-011 test PASS on 2.39.5 (AC 2: 1 of 4 writers, peak 13,107,437 = one tree + the artifact) |
+| golangci-lint v2.11.4 `--new-from-rev=854a1e08` on the touched packages; `--enable-only=gosec` | 0 issues; 0 issues |
+| `gofmt -l` on the changed files | clean |
+
+#### SMP compatibility gate
+
+`smp` (SMP main `21cc2e8a`, `../spine` = this worktree at `e4eba029`, left unmodified), daytime run 2026-11-02
+(`t011/smp-day.out`, `t011/smp/`): `go build ./...` rc=0; `go vet` plain / integration / `-tags scenario
+./scenariotest/...` / faultinject rc=0; `go test -race -p 4` over the initiative §5 packages plus every SMP importer
+of `adapters/git`, `core/artifact` or `core/workflow` rc=0 (15 packages ok); `dev/testgate` Spine-runtime leg PASS
+(2,463 passed, 0 failed, 3 allowed skips) and githttp leg PASS (590 passed, 1 allowed skip); platform / spine-runtime
+migrations applied to `s24011_*` databases (dropped); no `ws_*` database or role before or after. No SMP change.
+
+**An earlier run of the same gate failed three timing tests, none caused by this task.** The first run (in the gate
+chain, `t011/smp-overnight/`) ran from 2026-11-01 14:13 to 2026-11-02 09:40 while the host went through repeated
+sleep / dark-wake cycles (`pmset -g log`). It failed `internal/customer/gitread`
+`TestBatch_IdleAndCloseStopChildren` (an idle-timer restart order) in the `-race` leg, and
+`internal/customer/spineembedded` `TestReconcileWaiting_Integration/inside_grace` (a 10-second grace window seen as
+elapsed) and `internal/customer/executionreadiness` `TestReadinessService_Integration` ("no runner is online": a
+runner's liveness seen as stale) in the runtime leg. None of them reaches `EnterBranch` with a branch or sets a
+ceiling. Re-run standalone under the heavy lock with the gate's flags (`t011/smp-rerun.sh`, `smp-rerun.out`), all
+three pass both at this head and at `854a1e08` (every Spine production file the branch changes mapped to its
+`854a1e08` content by `go test -overlay`, `t011/smp-base/overlay.json`): 1,101 passed, 0 failed for the two runtime
+packages, and `TestBatch_IdleAndCloseStopChildren` PASS in `gitread -race`, at each revision. The standalone testgate
+exit is 1 at both revisions only because the gate's `-allow-skip` for `spinecore`'s Linux-only skips matched nothing
+(`spinecore` was not in the standalone set). The daytime run above then passed in full.
+
+#### Not run (round 1)
+
+- Codex on `a5225cb3`, `180764d7` and `e4eba029` (the task's codex budget is spent): they go to an independent delta
+  review.
+- The full `make test-scenario` with a registry database, GitHub CI (nothing is pushed), and the tests on Windows
+  (vet only).
