@@ -525,24 +525,26 @@ killed by name.
 
 #### SMP compatibility gate
 
-**Incomplete — the shared PostgreSQL went down during it.** `smp` (SMP main `21cc2e8a`, `../spine` = this worktree at
-`43bcc31b`, left unmodified), 2026-11-02 11:47–12:12 UTC, daytime (`t011/chain1.out`, `t011/smp/`):
+`smp` (SMP main `21cc2e8a`, `../spine` = this worktree at `eca8face`, left unmodified), 2026-11-02 14:20–14:35 UTC,
+daytime, under the heavy lock (`t011/smp-r2.out`, `t011/smp/`):
 
 | Leg | Result |
 |---|---|
 | `go build ./...`; `go vet` plain / integration / `-tags scenario ./scenariotest/...` / faultinject | rc=0; rc=0 / 0 / 0 / 0 |
-| `go test -race -p 4` over the initiative §5 packages and every SMP importer of `adapters/git`, `core/artifact`, `core/workflow` | rc=0 |
+| `go test -race -p 4` over the initiative §5 packages and every SMP importer of `adapters/git`, `core/artifact`, `core/workflow` | rc=0 (15 packages ok) |
+| `dev/testgate` Spine-runtime leg (platform and spine-runtime migrations on `s24011_*` databases, dropped) | PASS (2,463 passed, 0 failed, 3 allowed skips) |
 | `dev/testgate` githttp leg | PASS (590 passed, 1 allowed skip) |
-| `dev/testgate` Spine-runtime leg | **not a valid result**: 2,278 passed, 120 failed — `spineembedded`'s DB-backed tests failed with `connection refused` (187 lines) once the shared `i23-pg` container stopped at 12:07 UTC: its Docker VM disk was full ("could not write to file … No space left on device" at its restart; the container is `Exited (1)`). The first failure, `TestGovernance_SelfApprovalWhenTheAdminHeldTheReview` ("internal_error: load run"), is in the same minute. |
 
-The container was not restarted, reconfigured or pruned (rules). **To finish:** once `i23-pg` is back, re-run
-`t011/smp.sh` in daytime and drop `s24011_smp_it` and `s24011_spine_runtime_it` (left behind: the gate's drop ran
-against the stopped container). Round 2 changes nothing SMP reaches — SMP calls no branch-scoped `EnterBranch` and
-sets no ceiling, so neither the attach nor the serve default applies — and the round-1 gate passed in full
-(2026-11-02 daytime).
+No `ws_*` database or role before or after. No SMP change. Round 2 changes nothing SMP reaches: SMP calls no
+branch-scoped `EnterBranch` and sets no ceiling, so neither the attach nor the serve default applies.
+
+*An earlier run (11:47–12:12 UTC, at `43bcc31b`; logs `t011/smp-r2-pgdown/`) passed build, vet ×4, `-race` and the
+githttp leg, but its Spine-runtime leg was not a valid result: the shared `i23-pg` container stopped at 12:07 UTC
+when its Docker VM disk filled ("No space left on device"), and `spineembedded`'s DB-backed tests then failed with
+`connection refused`. The container was brought back by the coordinator (an owner-approved build-cache prune); the
+run above replaces that one.*
 
 #### Not run (round 2)
 
-- The SMP gate's Spine-runtime leg (above; the shared PostgreSQL is down).
 - Codex (the budget is spent): `db8545c2`, `43bcc31b` and `71db73ca` go to the independent delta check.
 - The full `make test-scenario` with a registry database, GitHub CI, the tests on Windows (vet only).
