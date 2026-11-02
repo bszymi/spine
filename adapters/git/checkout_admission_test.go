@@ -493,10 +493,12 @@ func TestEnterBranch_TreeOverTheInflightCeilingIsRefused(t *testing.T) {
 
 // TestEnterBranch_InflightWeightIsReturnedOnEveryExit: the weight is held
 // exactly while a scope is (Cleanup returns it once, however often it is
-// called), every failure after the admission returns it — git's refusal
-// of a branch checked out in the main worktree (the case the in-process
-// claim cannot see) and a temporary directory that cannot be created —
-// and the claim with it; zero limits never touch the gate (AC 4).
+// called), every failure after the admission returns it — the refusal of
+// a branch checked out in the main worktree (the case the in-process
+// claim cannot see; under a ceiling the attach's own worktree check, delta
+// review P3-A, where git's guard used to refuse it) and a temporary
+// directory that cannot be created — and the claim with it; zero limits
+// never touch the gate (AC 4).
 func TestEnterBranch_InflightWeightIsReturnedOnEveryExit(t *testing.T) {
 	t.Cleanup(git.ResetDefaultCheckoutLimitsForTest)
 	repo, run := claimRepo(t)
@@ -529,14 +531,14 @@ func TestEnterBranch_InflightWeightIsReturnedOnEveryExit(t *testing.T) {
 	tip := tbGit(t, repo, nil, "rev-parse", run)
 	tbGit(t, repo, nil, "branch", "here", tip)
 	tbGit(t, repo, nil, "switch", "-q", "here")
-	if s, err := git.EnterBranch(boundedCtx(t, 10*time.Second), repo, "here", nil); err == nil || errors.Is(err, git.ErrBranchInUse) {
+	if s, err := git.EnterBranch(boundedCtx(t, 10*time.Second), repo, "here", nil); !errors.Is(err, git.ErrBranchInUse) {
 		if s != nil {
 			s.Cleanup()
 		}
-		t.Fatalf("branch checked out in the main worktree: err = %v, want git's refusal", err)
+		t.Fatalf("branch checked out in the main worktree: err = %v, want the other-worktree refusal (ErrBranchInUse)", err)
 	}
 	if h := git.InflightHeldForTest(); h != 0 {
-		t.Errorf("after git's refusal: gate holds %d, want 0", h)
+		t.Errorf("after the other-worktree refusal: gate holds %d, want 0", h)
 	}
 	assertEmptyDir(t, tmp)
 	tbGit(t, repo, nil, "switch", "-q", "main")
@@ -1002,9 +1004,11 @@ func requireBranchMoved(t *testing.T, err error) {
 
 // TestEnterBranch_BranchMovedDuringCheckoutIsRefused (codex review round
 // 3, P1): with a ceiling, a branch that moves after the tip was re-read —
-// here while `git worktree add` runs, so `switch` checks out another tree
-// than the one weighed — is refused with the retryable ErrBranchMoved and
-// nothing is left: no directory, no worktree, no weight, no claim.
+// here while `git worktree add` runs, so the branch the worktree is
+// attached to is no longer at the commit weighed (and filled) — is refused
+// with the retryable ErrBranchMoved and nothing is left: no directory, no
+// worktree, no weight, no claim. (That the moved tip is never written is
+// TestEnterBranch_MoveAfterTheReReadIsNeverWritten, delta review P3-A.)
 func TestEnterBranch_BranchMovedDuringCheckoutIsRefused(t *testing.T) {
 	repo, run := claimRepo(t)
 	other := tbGit(t, repo, nil, "rev-parse", "main")

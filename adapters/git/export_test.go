@@ -293,7 +293,7 @@ func InflightReposForTest() int {
 // process gate under ceiling, as EnterBranch does for a measured tree
 // (op "worktree").
 func AdmitCheckoutForTest(ctx context.Context, repo string, weight, ceiling int64) (func(), error) {
-	return admitCheckout(ctx, "worktree", repo, weight, CheckoutLimits{InflightMaxBytes: ceiling})
+	return admitCheckout(ctx, "worktree", repo, weight, ceiling)
 }
 
 // RepoClaimKeyForTest exposes the key EnterBranch claims a branch under

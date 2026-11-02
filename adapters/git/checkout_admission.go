@@ -74,12 +74,64 @@ import (
 
 // ErrBranchInUse matches (errors.Is) an EnterBranch refused because
 // another write scope of this process holds the same branch of the same
-// repository. Nothing was created or written. It is returned wrapped in a
+// repository. Nothing was created or written. With an in-flight ceiling it
+// also matches the refusal of a branch another worktree of the repository
+// has checked out (errBranchInAnotherWorktree, after the worktree was
+// filled at the weighed commit and removed again). It is returned wrapped in a
 // plain error, not a *GitError, so callers classify it exactly as the
 // "already checked out" refusal git returned for the same case before
 // INIT-024 TASK-011 (the artifact and workflow services: git_error); the
 // write can be retried once the other scope's Cleanup ran.
 var ErrBranchInUse = errors.New("git: the branch is checked out by another write scope of this process")
+
+// errBranchInAnotherWorktree is the refusal, with an in-flight ceiling, of
+// a branch another worktree of the repository has checked out — one this
+// process's claim does not see (the main worktree, or a worktree an
+// operator or another process added). Under a ceiling the worktree is
+// attached to its branch without a checkout, so git's own "already used
+// by worktree" guard does not run; this check keeps it (delta review
+// P3-A). It matches ErrBranchInUse and, like it and like git's refusal it
+// stands in for, it is not a *GitError (the services: git_error). It
+// names no path.
+var errBranchInAnotherWorktree error = &branchInUseError{msg: "git: the branch is checked out in another worktree of the repository"}
+
+// branchInUseError is a refusal that matches ErrBranchInUse with its own
+// message.
+type branchInUseError struct{ msg string }
+
+func (e *branchInUseError) Error() string        { return e.msg }
+func (e *branchInUseError) Is(target error) bool { return target == ErrBranchInUse }
+
+// branchCheckedOutElsewhere reports whether a worktree of repoDir other
+// than own has ref (refs/heads/<n>) checked out, from `git worktree list
+// --porcelain -z` (NUL-separated, so no path can forge a "branch" line).
+// A registered worktree whose directory is gone still counts, as it does
+// for git's own guard. own is told apart by file identity (os.SameFile),
+// so no spelling of the temporary path matters.
+func branchCheckedOutElsewhere(ctx context.Context, repoDir, own, ref string) (bool, error) {
+	cmd := newGitCmd(ctx, "worktree", "list", "--porcelain", "-z")
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("list worktrees: %w", err)
+	}
+	ownInfo, ownErr := os.Stat(own)
+	var path string
+	for _, field := range strings.Split(string(out), "\x00") {
+		switch {
+		case strings.HasPrefix(field, "worktree "):
+			path = strings.TrimPrefix(field, "worktree ")
+		case field == "branch "+ref:
+			if ownErr == nil {
+				if fi, err := os.Stat(path); err == nil && os.SameFile(fi, ownInfo) {
+					continue
+				}
+			}
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // ErrCheckoutsInFlight matches (errors.Is) an EnterBranch refused because
 // the in-flight checkout ceiling (CheckoutLimits.InflightMaxBytes) left no
@@ -96,11 +148,14 @@ var ErrCheckoutsInFlight = errors.New("git: the in-flight checkout ceiling is fu
 const CheckoutsInFlightMessage = "other checkouts in flight fill the checkout ceiling; retry later"
 
 // ErrBranchMoved matches (errors.Is) an EnterBranch with an in-flight
-// ceiling refused because its branch moved between the measure that
-// weighed its tree and the checkout, and kept moving (codex review round
-// 3): the tree checked out must be the tree weighed, or the ceiling would
-// account for less than is on disk. It also matches ErrCheckoutsInFlight;
-// the *GitError's Message is BranchMovedMessage. Retryable.
+// ceiling refused because its branch moved after the measure that weighed
+// its tree: it kept moving across the re-weighs (codex review round 3), or
+// it moved after the last re-read, while the worktree was being filled at
+// the weighed commit (delta review P3-A; the worktree is then removed, and
+// the moved tip was never written). The tree written must be the tree
+// weighed, or the ceiling would account for less than is on disk. It also
+// matches ErrCheckoutsInFlight; the *GitError's Message is
+// BranchMovedMessage. Retryable.
 var ErrBranchMoved = errors.New("git: the branch moved while its checkout was being admitted")
 
 // BranchMovedMessage is the GitError.Message of an ErrBranchMoved refusal.
@@ -502,18 +557,16 @@ func (g *inflightGate) admitLocked() {
 }
 
 // admitCheckout weighs a branch scope's tree (weight, InflightWeight of
-// its measure) for the repository key in the process gate under
-// limits.InflightMaxBytes (> 0; the caller checks). The wait is bounded
-// by the caller's context and, when set, the mutate deadline. op names
-// the refused operation. The returned release is idempotent.
-func admitCheckout(ctx context.Context, op, repoKey string, weight int64, limits CheckoutLimits) (func(), error) {
-	ceiling := limits.InflightMaxBytes
+// its measure) for the repository key in the process gate under ceiling
+// (> 0; the caller checks). The wait is bounded by ctx alone: EnterBranch
+// passes its admission context, the caller's capped by ONE mutate
+// deadline for every attempt (delta review P4-1). op names the refused
+// operation. The returned release is idempotent.
+func admitCheckout(ctx context.Context, op, repoKey string, weight, ceiling int64) (func(), error) {
 	if weight > ceiling {
 		return nil, treeTooLarge(op, &TreeTooLargeError{Limit: TreeLimitInflightBytes, Max: ceiling, Seen: weight})
 	}
-	wctx, cancel := withMutateDeadline(ctx, limits.MutateTimeout)
-	defer cancel()
-	s, err := checkoutsInFlight.acquire(wctx, repoKey, weight, ceiling)
+	s, err := checkoutsInFlight.acquire(ctx, repoKey, weight, ceiling)
 	if err != nil {
 		return nil, &GitError{Kind: ErrKindTransient, Op: op, Message: CheckoutsInFlightMessage,
 			Err: &InflightWaitError{Weight: weight, Ceiling: ceiling, Err: err}}

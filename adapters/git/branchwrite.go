@@ -126,6 +126,9 @@ var TrailerOrder = []string{
 //     checked out / used by worktree" guard.
 //  3. the post-condition `git symbolic-ref -q HEAD` == refs/heads/<n>.
 //
+// (With an in-flight ceiling, step 2 is an attach without a checkout; see
+// EnterBranchWithLimits.)
+//
 // On any failure the worktree and its parent are removed and an error is
 // returned; a missing branch is a *GitError{Kind: ErrKindNotFound}.
 //
@@ -159,12 +162,20 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 //   - with an in-flight ceiling (InflightMaxBytes; INIT-024 TASK-011),
 //     the measured tree is admitted to the process-wide gate before the
 //     private parent directory is created, and its weight is held until
-//     Cleanup has removed the worktree: the entry waits (FIFO, under ctx
-//     and the mutate deadline) while the trees of the other scopes leave
-//     no room, and a wait that ends first is the transient
+//     Cleanup has removed the worktree: the entry waits (its repository's
+//     queue, served in turn with the others', under ctx and ONE mutate
+//     deadline for every re-weigh) while the trees of the other scopes
+//     leave no room, and a wait that ends first is the transient
 //     ErrCheckoutsInFlight *GitError; a tree over the ceiling on its own
 //     is the ErrTreeTooLarge *GitError (TreeLimitInflightBytes). Nothing
-//     is created or written on either refusal.
+//     is created or written on either refusal. The tree written is the
+//     tree weighed: the worktree is filled at the weighed commit and
+//     attached to the branch without a checkout (`git symbolic-ref HEAD
+//     refs/heads/<n>` instead of step 2's `switch`), a branch another
+//     worktree has checked out is refused (matching ErrBranchInUse, git's
+//     guard kept), and a branch that moved since it was weighed is the
+//     transient ErrBranchMoved — the worktree removed, the moved tip never
+//     written.
 //
 // With none of them (the zero limits and no process default) it is
 // exactly EnterBranch before INIT-024 TASK-003 — no extra git process,
@@ -234,6 +245,12 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 		budget = &b
 	}
 	var weight int64
+	// Every wait for room, across the re-weigh attempts below, ends at ONE
+	// deadline: the caller's context capped by a single mutate deadline
+	// taken here (delta review P4-1: a deadline per attempt let an entry
+	// whose branch kept moving hold its claim for up to three of them).
+	waitCtx, cancelWait := withMutateDeadline(ctx, limits.MutateTimeout)
+	defer cancelWait()
 	for attempt := 1; ; attempt++ {
 		if budget != nil {
 			stats, err := (&CLIClient{repoPath: repoDir}).measureTree(ctx, oid, budget.Effective())
@@ -248,7 +265,7 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 		// The in-flight ceiling, still before anything exists on disk: the
 		// tree waits for room among the other scopes' trees, and for its
 		// repository's share.
-		release, err := admitCheckout(ctx, "worktree", repoKey, weight, limits)
+		release, err := admitCheckout(waitCtx, "worktree", repoKey, weight, limits.InflightMaxBytes)
 		if err != nil {
 			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
 		}
@@ -338,14 +355,51 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 		}
 	}
 
-	sw := newGitCmd(mctx, "switch", "--no-guess", "--end-of-options", short)
-	sw.Dir = worktreeDir
-	if out, err := sw.CombinedOutput(); err != nil {
-		removeWorktree()
-		if dErr := deadlineErr(err); dErr != nil {
-			return nil, dErr
+	if limits.InflightMaxBytes > 0 {
+		// With an in-flight ceiling the tree on disk must be the tree
+		// weighed. `switch` checks the branch's CURRENT tip out, so a
+		// branch moved after the re-read above (a push) was written — a
+		// tree nobody weighed — before the check below refused it (delta
+		// review P3-A). The worktree already holds the weighed commit:
+		// attach HEAD to the branch without a checkout (`symbolic-ref`
+		// writes only the worktree's HEAD file), then keep git's
+		// "already used by worktree" guard, which `symbolic-ref` does not
+		// apply, by refusing a branch another worktree has checked out.
+		// The guard runs AFTER the attach, so a worktree that attaches to
+		// the branch at the same moment is seen too (git's own guard,
+		// checked before it attaches, could let both through). A tip that
+		// moved is refused below, with only the weighed tree ever written.
+		ref := headsPrefix + short
+		attach := newGitCmd(mctx, "symbolic-ref", "HEAD", ref)
+		attach.Dir = worktreeDir
+		if out, err := attach.CombinedOutput(); err != nil {
+			removeWorktree()
+			if dErr := deadlineErr(err); dErr != nil {
+				return nil, dErr
+			}
+			return nil, fmt.Errorf("add worktree for branch %s: %s", branch, strings.TrimSpace(string(out)))
 		}
-		return nil, fmt.Errorf("add worktree for branch %s: %s", branch, strings.TrimSpace(string(out)))
+		elsewhere, err := branchCheckedOutElsewhere(mctx, repoDir, worktreeDir, ref)
+		if err != nil || elsewhere {
+			removeWorktree()
+			if err != nil {
+				if dErr := deadlineErr(err); dErr != nil {
+					return nil, dErr
+				}
+				return nil, fmt.Errorf("add worktree for branch %s: %w", branch, err)
+			}
+			return nil, fmt.Errorf("add worktree for branch %s: %w", branch, errBranchInAnotherWorktree)
+		}
+	} else {
+		sw := newGitCmd(mctx, "switch", "--no-guess", "--end-of-options", short)
+		sw.Dir = worktreeDir
+		if out, err := sw.CombinedOutput(); err != nil {
+			removeWorktree()
+			if dErr := deadlineErr(err); dErr != nil {
+				return nil, dErr
+			}
+			return nil, fmt.Errorf("add worktree for branch %s: %s", branch, strings.TrimSpace(string(out)))
+		}
 	}
 
 	// Post-condition: the worktree must be ON refs/heads/<short>, never
@@ -356,10 +410,11 @@ func EnterBranchWithLimits(ctx context.Context, repoDir, branch string, validato
 		removeWorktree()
 		return nil, fmt.Errorf("add worktree for branch %s: worktree is not on %s%s", branch, headsPrefix, short)
 	}
-	// With an in-flight ceiling, the tree on disk must be the tree weighed:
-	// `switch` checks the branch out by name, so a move after the re-read
-	// above would have written another tree. Refuse, with nothing left on
-	// disk, rather than hold a weight that undercounts it.
+	// With an in-flight ceiling, the branch HEAD is attached to must still
+	// be at the weighed commit — the commit the worktree holds. A branch
+	// that moved after the re-read above is refused (nothing beyond the
+	// weighed tree was written, and nothing is left), rather than handing
+	// out a worktree whose files are not its HEAD's tree.
 	if limits.InflightMaxBytes > 0 {
 		head := newGitCmd(ctx, "rev-parse", "--verify", "-q", "HEAD")
 		head.Dir = worktreeDir

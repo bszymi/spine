@@ -97,6 +97,13 @@ var allowed = map[string]bool{
 	"adapters/git/checkout_admission.go:gitDirOf":         true,
 	"adapters/git/checkout_admission.go:readSmallFile":    true,
 	"adapters/git/checkout_identity_unix.go:fileIdentity": true,
+	// INIT-024 TASK-011 delta review (P3-A): with an in-flight ceiling a
+	// branch scope attaches without a checkout and keeps git's "already
+	// used by worktree" guard itself — Stat (never Open) of its own
+	// temporary worktree and of each worktree root `git worktree list`
+	// names for the same branch, only to tell its own apart by file
+	// identity. Nothing is read or written.
+	"adapters/git/checkout_admission.go:branchCheckedOutElsewhere": true,
 }
 
 func set(names ...string) map[string]bool {
