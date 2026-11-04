@@ -10,8 +10,18 @@ clean:
 
 # ── Test ──
 
+# The unit tests run with the environment of ci.yml's `go test ./...` step
+# (INIT-024 TASK-010): no global or system git config, no identity
+# variables, and user.useConfigOnly so git never guesses an identity from
+# the passwd entry and the host name, as it does on most developer machines
+# and cannot on GitHub's runners. A test that depends on the host's git
+# identity then fails here as it fails in CI.
+GIT_HERMETIC = env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL -u EMAIL \
+	GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.useConfigOnly GIT_CONFIG_VALUE_0=true
+
 test:
-	go test ./...
+	$(GIT_HERMETIC) go test ./...
 
 test-integration:
 	go test -tags integration ./...
