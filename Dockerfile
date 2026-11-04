@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 go build -o spine ./service/cmd/spine
 # Pinned by digest: debian:bookworm-slim, the image index of 2026-10-20.
 # Dependabot (docker ecosystem) proposes the next digest; take it for the
 # Debian security updates it carries (git, ca-certificates).
-FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
 # git is required at runtime: the artifact service shells out to
 # `git worktree add`, `git push`, etc. ca-certificates is needed for
