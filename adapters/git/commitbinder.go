@@ -370,6 +370,9 @@ func (c *CLIClient) CommitFilesOnto(ctx context.Context, base string, files map[
 	if opts.Author.Name != "" && opts.Author.Email != "" {
 		env = append(env, "GIT_AUTHOR_NAME="+opts.Author.Name, "GIT_AUTHOR_EMAIL="+opts.Author.Email)
 	}
+	// A committer (or author) the host's git cannot resolve is Spine's
+	// (identity.go): still deterministic, as both dates are pinned.
+	env = append(env, identityFallbackEnv(ctx, c.repoPath, env, rolesFor(opts.Author))...)
 	msg := buildCommitMessage(opts) + "\n"
 	out, _, err := c.runWith(ctx, op, runOpts{env: env, stdin: strings.NewReader(msg)},
 		"commit-tree", "--no-gpg-sign", "-p", base, "-F", "-", tree)

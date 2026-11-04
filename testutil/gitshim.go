@@ -108,3 +108,33 @@ func HermeticGit(t *testing.T) {
 	t.Setenv("GIT_COMMITTER_NAME", "Spine Test")
 	t.Setenv("GIT_COMMITTER_EMAIL", "test@spine.local")
 }
+
+// NoGitIdentity takes every git identity away for the rest of the test:
+// git then has none, as on a GitHub runner (its user has an empty GECOS
+// name) and in Spine's standalone image (`useradd spine`). No system or
+// global config is read (HOME and XDG_CONFIG_HOME are empty directories,
+// GIT_CONFIG_GLOBAL is the null device), GIT_AUTHOR_*, GIT_COMMITTER_* and
+// EMAIL are unset, and user.useConfigOnly=true (through GIT_CONFIG_COUNT)
+// stops git from guessing one from the passwd entry and the host name — on
+// macOS the GECOS name and a .local host name would otherwise pass, so a
+// test that needs an identity it was not given passed locally and failed
+// only on CI. A plain `git commit` is then refused "Author identity
+// unknown" on every host. A repository's own user.name/user.email, and
+// identity variables a command is given explicitly, still apply. Tests
+// that use it must not be parallel (t.Setenv).
+func NoGitIdentity(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+	t.Setenv("GIT_CONFIG_VALUE_0", "true")
+	for _, k := range []string{"GIT_CONFIG_PARAMETERS", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"} {
+		t.Setenv(k, "") // restored at cleanup
+		_ = os.Unsetenv(k)
+	}
+}

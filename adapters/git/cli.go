@@ -777,7 +777,10 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 		args = append(args, "--author", fmt.Sprintf("%s <%s>", opts.Author.Name, opts.Author.Email))
 	}
 
-	if _, err := c.run(ctx, "commit", args...); err != nil {
+	// A committer (and, with no explicit author, an author) the host's
+	// git cannot resolve is Spine's (identity.go); a resolved one is kept.
+	idEnv := identityFallbackEnv(ctx, c.repoPath, nil, rolesFor(opts.Author))
+	if _, err := c.runEnv(ctx, "commit", idEnv, args...); err != nil {
 		return CommitResult{}, err
 	}
 
@@ -925,7 +928,14 @@ func (c *CLIClient) runMerge(ctx context.Context, opts MergeOpts, source string)
 	}
 	args = append(args, "--end-of-options", source)
 
-	output, err := c.run(ctx, "merge", args...)
+	// A merge commit records an author and a committer; one the host's git
+	// cannot resolve is Spine's (identity.go). A fast-forward-only merge
+	// creates no commit and needs neither.
+	var idEnv []string
+	if opts.Strategy != "fast-forward" {
+		idEnv = identityFallbackEnv(ctx, c.repoPath, nil, committerRole|authorRole)
+	}
+	output, err := c.runEnv(ctx, "merge", idEnv, args...)
 	if err != nil {
 		return MergeResult{}, err
 	}
@@ -1992,7 +2002,14 @@ func classOf(op string) opClass {
 // (runSink) and held once: the returned string is the sink's own buffer,
 // not a copy of it, so a parser's substrings share it too.
 func (c *CLIClient) run(ctx context.Context, op string, args ...string) (string, error) {
-	sink, err := c.runSink(ctx, op, c.outputLimit(), 0, true, args...)
+	return c.runEnv(ctx, op, nil, args...)
+}
+
+// runEnv is run with extra environment entries appended after everything
+// runSink sets (a later duplicate wins in os/exec). The commit and merge
+// paths pass identityFallbackEnv's entries through it; nil is run.
+func (c *CLIClient) runEnv(ctx context.Context, op string, extraEnv []string, args ...string) (string, error) {
+	sink, err := c.runSink(ctx, op, c.outputLimit(), 0, true, extraEnv, args...)
 	if err != nil {
 		return "", err
 	}
@@ -2002,7 +2019,7 @@ func (c *CLIClient) run(ctx context.Context, op string, args ...string) (string,
 // runBounded is run for a caller that needs the stdout bytes (ReadFile):
 // sizeHint pre-sizes the buffer when the caller knows the expected size.
 func (c *CLIClient) runBounded(ctx context.Context, op string, limit, sizeHint int64, args ...string) ([]byte, error) {
-	sink, err := c.runSink(ctx, op, limit, sizeHint, false, args...)
+	sink, err := c.runSink(ctx, op, limit, sizeHint, false, nil, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2019,7 +2036,7 @@ func (c *CLIClient) runBounded(ctx context.Context, op string, limit, sizeHint i
 // BEFORE stderr is classified: git's own text for an alloc refusal
 // ("packed object … is corrupt") would otherwise be reported as
 // repository corruption. Stderr keeps its head and tail (stderrSink).
-func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int64, text bool, args ...string) (*stdoutSink, error) {
+func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int64, text bool, extraEnv []string, args ...string) (*stdoutSink, error) {
 	class := classOf(op)
 
 	// For push operations, prepend a command-scoped credential.helper
@@ -2118,6 +2135,14 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 			// patterns are English, as for merge-tree (runWith).
 			cmd.Env = append(os.Environ(), "GIT_ALLOC_LIMIT="+strconv.FormatInt(mergeLimit, 10), "LC_ALL=C", "LANGUAGE=")
 		}
+	}
+	// The caller's additions (runEnv) go last, over the inherited
+	// environment when nothing above replaced it. None: as before.
+	if len(extraEnv) > 0 {
+		if cmd.Env == nil {
+			cmd.Env = os.Environ()
+		}
+		cmd.Env = append(cmd.Env, extraEnv...)
 	}
 
 	stdout := newStdoutSink(limit, sizeHint, class != opMutate, text)
