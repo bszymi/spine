@@ -24,7 +24,7 @@ services:
       retries: 10
 
   spine-test-localstack:
-    image: localstack/localstack:3@sha256:b279c01f4cfb8f985a482e4014cabc1e2697b9d7a6c8c8db2e40f4d9f93687c7 # LocalStack 3.8.1 (what the `3` tag has named since 2024-10; INIT-024 TASK-009 digest pin)
+    image: localstack/localstack:2026.10.4@sha256:2290500d7398e6458544fab2f49aaf170b81a1006ee69067e8e7fc59b810a824 # LocalStack 3.8.1 (what the `3` tag has named since 2024-10; INIT-024 TASK-009 digest pin)
     deploy:
       resources:
         limits:
