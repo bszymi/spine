@@ -89,7 +89,24 @@ jobs:
         with:
           go-version: '1.26.10'
 
+      # INIT-024 / TASK-010 (GitHub CI after the push): git is given no
+      # identity and may not guess one. The runner configures no
+      # user.name and its user has an empty GECOS name, so a test that
+      # needs an identity it was not given fails here (run 41856447149) — but on a developer's machine git guessed
+      # one from the passwd entry and the host name, and the same test
+      # passed. user.useConfigOnly turns that guess off on every host, so
+      # `make test` (the same environment) fails the same way locally.
+      # Step-scoped, not job-scoped, so actions/checkout's own git
+      # commands keep their configuration. A repository's own
+      # user.name/user.email and identity variables a test sets still
+      # apply.
       - name: Unit tests
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: user.useConfigOnly
+          GIT_CONFIG_VALUE_0: 'true'
         run: go test ./...
 
   # INIT-023 / EPIC-001 / TASK-001: the git push scenarios

@@ -878,13 +878,14 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 // quarantineTracked writes the tracked changes of the index and working
 // tree against HEAD into an unreferenced commit (`git stash create`: no
 // ref, so the git HTTP endpoint never advertises it) and returns its id,
-// or "" when git found nothing to save. A fixed identity: the quarantine
-// commit is the server's, and stash create must work on a host with no
-// user.name configured. Nothing in the tree or the index is changed.
+// or "" when git found nothing to save. A fixed identity (identity.go's
+// server identity, unconditionally): the quarantine commit is the
+// server's, and stash create must work on a host with no user.name
+// configured. Nothing in the tree or the index is changed.
 func (c *CLIClient) quarantineTracked(ctx context.Context, op string) (string, error) {
 	env := []string{
-		"GIT_AUTHOR_NAME=Spine", "GIT_AUTHOR_EMAIL=spine@spine.local",
-		"GIT_COMMITTER_NAME=Spine", "GIT_COMMITTER_EMAIL=spine@spine.local",
+		"GIT_AUTHOR_NAME=" + serverIdentityName, "GIT_AUTHOR_EMAIL=" + serverIdentityEmail,
+		"GIT_COMMITTER_NAME=" + serverIdentityName, "GIT_COMMITTER_EMAIL=" + serverIdentityEmail,
 	}
 	// core.fsmonitor off (review round 6): a stale monitor would keep a
 	// modified file out of the quarantine, and a renormalisation that

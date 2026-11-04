@@ -957,7 +957,9 @@ func TestReadCommands_GitAllocLimitBoundsEveryReadOp(t *testing.T) {
 // exactly its class's environment. A wrapper records each invocation's
 // argv and environment; the inherited environment carries a non-C
 // locale, no GIT_ALLOC_LIMIT and an unrelated GIT_CONFIG_PARAMETERS
-// entry, which every class must keep.
+// entry, which every class must keep. The identity probe the commit and
+// merge paths run first (`git var`, identity.go; INIT-024 TASK-010) reads
+// config only: the C locale for its message, nothing else pinned.
 func TestCommands_RunUnderTheirClassEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell wrapper")
@@ -1003,6 +1005,13 @@ func TestCommands_RunUnderTheirClassEnvironment(t *testing.T) {
 	t.Setenv("GIT_CONFIG_PARAMETERS", inherited)
 	t.Setenv("GIT_ALLOC_LIMIT", "")
 	os.Unsetenv("GIT_ALLOC_LIMIT")
+	// The repository's own identity, not the environment's, so the
+	// commit and merge paths probe it (an identity the environment names
+	// is never probed).
+	for _, k := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
 
 	c := git.NewCLIClient(dir)
 	blob, _, alloc := c.ReadBoundsForTest()
@@ -1048,6 +1057,7 @@ func TestCommands_RunUnderTheirClassEnvironment(t *testing.T) {
 		"branch":   {"unset", "POSIX", "t003", inherited}, "switch": {"unset", "POSIX", "t003", inherited},
 		"add": {"unset", "POSIX", "t003", inherited}, "commit": {"unset", "POSIX", "t003", inherited},
 		"merge": {"unset", "POSIX", "t003", inherited}, "push": {"unset", "POSIX", "t003", inherited},
+		"var": {"unset", "C", "", inherited},
 	}
 	raw, err := os.ReadFile(logPath) //nolint:gosec // G304: the test's own temp file
 	if err != nil {

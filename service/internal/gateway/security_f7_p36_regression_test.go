@@ -439,6 +439,17 @@ func TestP36_R12_ReviewFreeze_InjectionNeverReachesMain(t *testing.T) {
 	if onMain := secGit(t, repo, "show", "main:governance/charter.md"); strings.Contains(onMain, "MALLORY") {
 		t.Fatalf("unreviewed injection reached main")
 	}
+	// The merge itself happened (INIT-024 TASK-010): a merge git refused
+	// fails the run with nil from MergeRunBranch, and main then trivially
+	// lacks the injection. On GitHub's runners, which have no git
+	// identity, that is what this test saw until the client's merges got
+	// Spine's fallback committer.
+	if fs.run.Status == domain.RunStatusFailed {
+		t.Fatalf("the governed merge failed the run")
+	}
+	if onMain := secGit(t, repo, "show", "main:"+secTask); onMain != "task v2 (alice work)" {
+		t.Fatalf("the reviewed work is not on main: %q", onMain)
+	}
 }
 
 // /artifacts/add: only the draft assignee (or an operator) adds to a planning run.

@@ -7,7 +7,7 @@ epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-005-close-out/epi
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-31
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-005-close-out/epic.md
@@ -448,3 +448,105 @@ the others until GitHub CI.
   golangci/gosec, and the SMP gate at SMP `21cc2e8a` with `../spine` = TASK-011's head). Only the
   quick gates were re-run here (orchestrator ruling: the merged code is `main`'s).
 - GitHub CI on a pushed closing commit: owner-gated (push held).
+
+### GitHub CI after the push (2026-11-04)
+
+Spine `main` `fd35f802` was pushed on 2026-11-04. Its first GitHub CI run, **41856447149**, failed
+only the `go test ./...` job, on three tests; every other job was green (boundary lint, build,
+toolchain parity and pins, git-floor on 2.39, govulncheck, the git push scenarios, image build).
+
+- `adapters/gitpool` `TestClient_ReusedConvertedCloneIsRenormalised` (both subtests): "first merge
+  after the upgrade: git merge: Committer identity unknown".
+- `service/internal/gateway` `TestF7_OperatorUpdate_KeepsBypassTrailer` (operator PUT 500 "git
+  commit workflows/task-default.yaml: Committer identity unknown") and
+  `TestP36_Assignee_CanWriteOwnRunBranch` (assignee write 500, the same).
+
+**Cause.** GitHub's runner gives git no identity: no `user.name` in any config, and the runner
+user's GECOS name is empty ("empty ident name (for <runner@…>) not allowed"). The machine every
+earlier run used had a global identity. The tests were right: the git client's commits pass
+`--author` but never a committer, and its merges pass neither, so they depend on the host's
+identity whenever the repository has none of its own.
+
+**Reproduction (hermetic, per command, no global config touched).** `HOME` and `XDG_CONFIG_HOME`
+empty scratch directories, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, no
+`GIT_AUTHOR_*`/`GIT_COMMITTER_*`/`EMAIL`/`GIT_EDITOR`, Go's caches pinned to their usual paths.
+On macOS that alone is not enough: git builds a name from the passwd GECOS field and an address
+from the host name, and commits. So `user.useConfigOnly=true` was added through
+`GIT_CONFIG_COUNT`, which makes git refuse any identity it was not given, as the runner does. With
+it, `go test -count=1 -p 4 ./...` at `fd35f802` failed exactly CI's three tests and nothing else. A
+second run put a `git` wrapper on `PATH` that, before each commit-creating command (commit,
+commit-tree, merge other than `--ff-only`/`--abort`, stash, cherry-pick, …), asks `git var
+GIT_COMMITTER_IDENT`/`GIT_AUTHOR_IDENT` in the same directory and environment and logs the command
+when git cannot resolve one. It found one more test, which passed while its merge was refused. Two
+cross-checks agree: the `scenario-git-http` job's eight steps under the same environment and the
+wrapper (green, and no identity-less commit-creating command), and the `git-floor` job in
+`golang:1.26-bookworm` (git 2.39.5, go1.26.10 from the module cache) as uid 501, which has no
+passwd entry, so git's guess is "Unknown <unknown@<host>.(none)>" and is refused, with no identity
+configured anywhere. Both of that job's steps are ok there. `adapters/gitpool` and
+`service/internal/gateway` fail CI's three tests there.
+
+| Test (hermetic run at `fd35f802`) | Path | Production? | Fix |
+|---|---|---|---|
+| `TestClient_ReusedConvertedCloneIsRenormalised` (2 subtests), FAIL | `CLIClient.Merge` (merge-commit) in a gitpool code-repository clone | **Yes.** `gitpool.NewCLICloner` clones with plain `git clone`, so no clone has an identity of its own. On a host with none, every governed merge into a code repository is refused. | Fallback in `runMerge`; new `TestClient_CodeRepoCloneMergesWithNoHostIdentity` (the production cloner and factory) |
+| `TestF7_OperatorUpdate_KeepsBypassTrailer`, FAIL | `workflow.Service` write → `git.StageAndCommit` → `commitFile`, in the authoritative repository | **Yes.** `Provision` sets a repo-local identity only on the repositories it initialises (fresh, or a clone of a non-Spine repository), not on a clone of an existing Spine repository, and an operator-mounted single-repository deployment has none. Spine's standalone image has no identity either (`useradd spine`: empty GECOS name, no `user.name`). | Fallback in `commitFile`; new gateway test |
+| `TestP36_Assignee_CanWriteOwnRunBranch`, FAIL | `artifact.Service` run-branch write → `EnterBranch` worktree → `commitFile` | **Yes**, as above (a linked worktree reads the repository's config) | Same |
+| `TestP36_R12_ReviewFreeze_InjectionNeverReachesMain`, **passed vacuously** (on CI too) | `engine.MergeRunBranch` → `MergeBound` into main | **Yes.** The governed merge was refused ("permanent merge failure … Committer identity unknown", "run failed on merge"), `MergeRunBranch` returned nil, and the only assertion, that the injection is not on main, held trivially. | Fallback; **test gap fixed**: the test also requires that the run did not fail and that the reviewed work is on main |
+
+No failure was a fixture gap. Every fixture commit in these tests already carried an explicit
+identity. In each failure the production client made the commit, in a repository with no identity
+of its own.
+
+**Fix** (`fd690802`). `adapters/git/identity.go`: before `Commit`, `Merge` (every strategy but
+`fast-forward`), `MergeBound`, `CommitFilesOnto` and `StageAndCommit`, the client asks git whether
+it resolves the committer, and the author too where the caller names none (merge commits, system
+commits). It runs `git var GIT_<ROLE>_IDENT` in the repository with the command's environment, and
+skips the probe when that environment names the identity. Only git's own identity refusal adds
+`GIT_<ROLE>_NAME=Spine` and `GIT_<ROLE>_EMAIL=spine@spine.local`. This is the quarantine commit's
+identity from `treelock.go` (INIT-023 TASK-012), which now uses the same constants. The server is
+the committer of what it writes on an actor's behalf, and the actor stays the author. It is a
+fallback, not an override (the way `treelock.go` does its own commit), because an identity a
+deployment configures must be kept: SMP's embedded scopes set a repo-local committer before they
+write (`spinecore.configureCommitterIdentity`), and SMP's `gitsync` compares committer fields. When
+git resolves an identity, the command, its argv and its environment are unchanged. That covers
+every commit SMP makes, so SMP's commits are byte-identical, at one or two `git var` processes per
+commit or merge. A probe that fails for another reason (a cancelled context, a broken config) adds
+nothing. Tests (the red runs are in the gate table): `adapters/git`
+`TestNoHostIdentity_CommitPathsFallBackToSpine` (9 paths), `TestNoHostIdentity_ConfiguredIdentityIsKept`
+(passes before and after: the compatibility guard), `TestNoHostIdentity_ResolvedIdentityRunsTheCommandUnchanged`,
+`TestIdentityRefusal`, `TestIdentityFallbackEnv_OnlyGitsRefusalFallsBack`; `adapters/gitpool`
+`TestClient_CodeRepoCloneMergesWithNoHostIdentity`; `service/internal/gateway`
+`TestNoHostIdentity_GatewayWritesCommitAsSpine`; the strengthened R12 test. All run under the new
+`testutil.NoGitIdentity`, so they fail without the fix on every host, not only on CI.
+`TestCommands_RunUnderTheirClassEnvironment` pins the probe's environment (the C locale, nothing
+else).
+
+**Hermetic by default** (`874090fe`). The `ci.yml` `go test ./...` step, step-scoped so
+actions/checkout is untouched, and `make test` (`GIT_HERMETIC`, which also unsets the identity
+variables) run with `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and
+`user.useConfigOnly=true`. A future identity dependency now fails locally too. It broke no other
+test: the hermetic full run is green. Docs: `81790e80` (CHANGELOG; KNOWN-LIMITATIONS "Git Commit
+Identity: Spine's Fallback").
+
+**Gates** (code at `fd690802`/`874090fe`, go1.26.10; heavy runs under the machine lock):
+
+| Gate | Result |
+|---|---|
+| Hermetic `go test -count=1 -p 4 ./...` (the environment above, with the identity wrapper) | rc 0, 41 packages ok. The wrapper logged only commits whose author is on the command line (`--author`, committer resolved) and `TestNoGitIdentity`'s deliberate refusal |
+| `go test -count=1 -p 4 ./...` (this host's own git identity) | rc 0, 41 ok |
+| `make test` (`GOFLAGS=-count=1`) | rc 0, 41 ok |
+| `scenario-git-http`: its eight steps, verbatim, under the hermetic environment and the wrapper | all rc 0, 48 required PASS, no FAIL or SKIP, nothing logged |
+| `git-floor`: both steps in `golang:1.26-bookworm` (git 2.39.5, go1.26.10), uid 501, no identity anywhere; plus `adapters/gitpool`, `service/internal/gateway`, `testutil` | all ok |
+| Red runs (`go test -overlay` with `fd35f802`'s production files) | every new regression test fails (`TestNoHostIdentity_CommitPathsFallBackToSpine` 9/9 "Committer/Author identity unknown", `TestClient_CodeRepoCloneMergesWithNoHostIdentity`, both gateway subtests `500`, R12 "the governed merge failed the run", `TestNoHostIdentity_ResolvedIdentityRunsTheCommandUnchanged` "no identity probe ran"); `TestNoHostIdentity_ConfiguredIdentityIsKept` passes (the guard). The unit tests of the new functions and of `testutil.NoGitIdentity` have no base |
+| `go vet ./...` plain, `-tags integration`, `-tags scenario` | rc 0 |
+| `./dev/lint-boundaries.sh`; `go run ./dev/pincheck` | OK; OK |
+| golangci-lint v2.11.4 `--new-from-rev=main` on the touched packages, and `--enable-only=gosec` | 0 issues each (a gocritic `appendAssign` in `identity.go` fixed before the commit) |
+| `gofmt -l` on the changed Go files | clean |
+| Build job: `go build ./service/cmd/spine`, `embed-smoketest` built and run | ok |
+| Codex: `codex review --base main`, plain; review sub-session `01a1a75c-7e7f-7120-bd48-5d025b4f3858`, model `gpt-6.1-sol` | no findings ("patch is correct", confidence 0.88) |
+| SMP compatibility: SMP `efe1dec2` with `../spine` = `81790e80` | `go build ./...`; `go vet` plain, `-tags integration`, `-tags scenario ./scenariotest/...`, `-tags faultinject`: all rc 0. `dev/testgate` `-race` spinecore, spineembedded, runner, executionreadiness: 2468 passed, 0 failed, 3 allowed skips. `dev/testgate` githttp `-tags integration`: 594 passed, 1 allowed skip. `go test -race` gitread, projectionwriter, workspace, cmd/customer-app, githttp: all ok. Databases `s24010ci_*` dropped; no `ws_*` database or role left |
+
+**Also seen (not changed here).** 618 commits on the pushed `main` (from 2026-10-06 through
+`fd35f802`) carry the author and committer `t <t@t>`, a placeholder identity from earlier agent sessions
+(its source is not traced here), now in the public history; rewriting it is the owner's call. `spine init-repo` (operator CLI) still commits
+with the operator's identity, and with none it exits 0 without committing (KNOWN-LIMITATIONS).
+Statuses are unchanged.
