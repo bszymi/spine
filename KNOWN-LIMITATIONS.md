@@ -872,6 +872,24 @@ CI pins every action and image, scans for reachable advisories and enforces tool
   install git ca-certificates` resolves at build time. There is no image vulnerability scan, SBOM
   or signing: Spine has no image publishing pipeline.
 
+### Git Commit Identity: Spine's Fallback (INIT-024 TASK-010)
+
+When git can resolve no identity, the git client's commits and merges record `Spine
+<spine@spine.local>` as committer, and as author where the caller names none (CHANGELOG, "GitHub CI
+after the push"). What that leaves:
+
+- **The fallback is fixed.** It is not configurable; a deployment that wants another committer
+  configures git (repo-local or global `user.name`/`user.email`, or `GIT_COMMITTER_*`).
+- **A partial identity is replaced whole.** A configured name with no address (or the reverse) is
+  not an identity git accepts, and the fallback names both fields.
+- **Two server addresses.** Repositories `workspace.Provision` initialises carry the repo-local
+  identity `Spine <spine@local>` it has always written; their commits keep it.
+- **`spine init-repo` still uses the operator's identity.** It is an operator command and commits
+  as whoever runs it. On a host where git has none, its commit on `spine/init` (the default mode;
+  `--no-branch` commits nothing) fails, and init-repo exits 0 without committing, pushing or
+  saying why: it treats any commit failure as "nothing to commit" (a re-run). Configure an
+  identity before running it.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:
