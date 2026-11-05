@@ -6,6 +6,94 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-004 TASK-013: dependency refresh — pgx v5.11.0, chi v5.5.0, LocalStack 4.14.0)
+
+Replaces Dependabot #602 (postgres digest) and #604 (the Go module group) with the same versions,
+and moves the test stack's LocalStack to 4.14.0. No runtime schema change.
+
+### Security
+
+- **The `sslmode=disable` startup gate reads the setting as pgx does.** `spine serve`, `spine
+  migrate` and `spine secrets reencrypt` refuse a database URL that disables TLS unless
+  `SPINE_INSECURE_LOCAL=1`. The gate looked for the literal text `sslmode=disable`. pgx v5.11.0
+  trims spaces around a URL query key and value and takes the last of a repeated parameter, so
+  `?sslmode= disable` and `?sslmode=require&sslmode= disable` now connect without TLS (v5.9.2
+  refused the first and kept TLS for the second), and both passed the gate. It now decodes every
+  `sslmode` setting the way pgx does (spaces, percent-escapes such as `%64isable`, key/value
+  spacing, quotes and backslashes) and refuses any that reads as `disable`. Settings from the
+  environment (`PGSSLMODE`) are still not read.
+- **No piece of a workspace password reaches an error.** pgx v5.11.0 ends a URL's user part at the
+  first `@` (net/url, and pgx v5.9.2, at the last), so an unencoded `@` in a password splits it and
+  the tail becomes part of the host that a connect error names. Workspace pool errors and `spine
+  secrets` output now mask every `@`-separated piece. pgx v5.11.0's parse errors also quote the
+  part of a malformed string they stopped at (`missing "=" after "…"`, a component that does not
+  decode), which can be a piece of a password; the workspace error keeps pgx's reason with those
+  quoted fragments masked.
+
+### Changed (operators): connection strings under pgx v5.11.0
+
+pgx v5.11.0 parses `postgres://` URLs with a parser that matches libpq instead of net/url, and its
+key/value parser now matches libpq too. Every connection string Spine ships (compose, test
+defaults, docs, provisioned workspace URLs) parses as before. These spellings changed:
+
+- **An unencoded `@` in a URL password** now ends the user part at the first `@`; the connection
+  fails. Percent-encode it (`%40`). The compose files put `POSTGRES_PASSWORD` and
+  `POSTGRES_REGISTRY_PASSWORD` into a URL unencoded, so those passwords must not contain `@` (nor,
+  as before, `/`, `%` or spaces); `.env.example` says so.
+- **`+` in a URL query value is literal** (it was a space): `?password=a+b` is `a+b`. Encode a
+  space as `%20`.
+- **An unencoded `=` in a URL query value is refused** (`?password=abc==` used to work). Encode it
+  as `%3D`; base64-generated passwords often end in `=`.
+- **A repeated URL query parameter: the last wins** (it was the first). `?sslmode=require&sslmode=disable`
+  now connects without TLS; the startup gate refuses it.
+- **Key/value strings: a backslash escapes the next character and is dropped**, as in libpq.
+  `password=a\b` is `ab`; write `a\\b`. An unquoted value with a space (`application_name=my app`)
+  is refused instead of being sent as a runtime parameter.
+- **Also refused now:** a URL query parameter without `=` (`?foo`), and a bare IPv6 host (`postgres://::1/db`;
+  write `[::1]`). **Now accepted:** an unencoded `#` or `?` in a URL password, an empty URL port
+  (`?port=` means 5432), and `ssl=true` (an alias of `sslmode=require`).
+- **Multiple hosts:** ports align with hosts by position (`h1,h2:5433` is h1:5432 and h2:5433), and
+  an empty element of a URL host list (`h1,,h2`) means the default host, usually the Unix socket
+  (it was dropped).
+- **Home directory:** pgx finds `~/.pgpass`, `~/.pg_service.conf` and `~/.postgresql/` through
+  `$HOME` rather than the OS account, and looks the OS user up only when no user is given.
+- **timestamptz in text format** is returned in the client's time zone (`time.Local`), as the
+  binary format always was. Spine uses the extended protocol, where these values arrive in binary,
+  so nothing Spine reads changes; only a connection string that selects
+  `default_query_exec_mode=simple_protocol` or `exec` sees it, and the instant is unchanged.
+
+### Changed (standalone)
+
+- **HTTP `QUERY` requests reach the wildcard routes.** chi v5.5.0 matches the `QUERY` method on
+  `Handle`/`HandleFunc` routes, where v5.2.5 answered `405` before any handler ran. `QUERY` on
+  `/api/v1/artifacts/*`, `/api/v1/workflows/*` and `/api/v1/tasks/*` now gets the handlers' `404`,
+  and on `/git/*` the auth gate and then `403 unsupported git operation`. Method-specific routes
+  still answer `405`.
+
+### Changed (embedders)
+
+- **Minimal version selection raises an embedder's floors** when it moves its Spine pin: pgx
+  v5.11.0, chi v5.5.0, cobra v1.10.2 (pflag v1.0.9), aws-sdk-go-v2 v1.47.5 (config v1.33.12,
+  credentials v1.20.12, secretsmanager v1.50.7), smithy-go v1.28.7, x/sync v0.24.0, x/time v0.16.0.
+- **pgx v5.11.0 adds `TypeMap() *pgtype.Map` to the `pgx.Rows` interface.** Every type that
+  implements `pgx.Rows` (test fakes included) must add it; returning nil is allowed when the rows
+  are not decoded through a type map.
+- The connection-string changes above apply to every connection string an embedder hands pgx.
+- No exported Spine API changed.
+
+### Tests and CI
+
+- The compose and CI postgres pin moves to `postgres:18-bookworm@sha256:5c4783a8…` (PostgreSQL 18.6,
+  index of 2026-10-28).
+- The test stack's LocalStack moves from 3.8.1 to `localstack/localstack:4.14.0@sha256:3ebc3759…`,
+  the last release of the open-source image. Dependabot ignores LocalStack's major updates: its
+  date-numbered tags (2026.x) are the consolidated image, which needs an account token to start.
+- The two password-redaction tests now test Spine's withholding against parse errors that carry
+  the password whatever pgx masks; pgx v5.11.0 masks the query-parameter passwords their fixtures
+  relied on.
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-005 TASK-010: GitHub CI after the push — git identity)
 
 The first GitHub CI run after the INIT-023/INIT-024 push (run 41856447149) failed three tests:

@@ -890,6 +890,34 @@ after the push"). What that leaves:
   saying why: it treats any commit failure as "nothing to commit" (a re-run). Configure an
   identity before running it.
 
+### Connection Strings Under pgx v5.11.0 (INIT-024 TASK-013)
+
+pgx v5.11.0 reads connection strings as libpq does (CHANGELOG, "dependency refresh"). What that
+leaves:
+
+- **The compose stacks need URL-safe database passwords.** `docker-compose.yaml` puts
+  `POSTGRES_PASSWORD` and `POSTGRES_REGISTRY_PASSWORD` into a `postgres://` URL unencoded, and the
+  postgres container reads the same variable unencoded, so neither side can be percent-encoded
+  alone. A password with `@` (which pgx v5.9.2 still read), `/`, `%` or a space breaks the stack's
+  connection. Use another password, or set `SPINE_DATABASE_URL` yourself with the characters
+  percent-encoded.
+- **The `sslmode=disable` gate reads the string only.** It refuses every `sslmode` setting that
+  decodes to `disable`, even one a later setting overrides (refusing is the safe side), and it
+  does not read `PGSSLMODE` or a service file, which pgx merges in. `sslmode=allow` and `prefer`
+  (the default), which can fall back to plaintext, pass as before.
+- **Masking a malformed connection string is best effort.** Workspace pool errors drop the string,
+  mask the credentials it carries read either way (net/url's and libpq's), and mask the quoted
+  fragments of pgx's reason. A password whose malformed part contains a raw `"` can split a quoted
+  fragment and leave the rest of it in the reason. `spine serve` and `spine migrate` open the
+  single-workspace and registry databases (`SPINE_DATABASE_URL`, `SPINE_REGISTRY_DATABASE_URL`)
+  and log pgx's own errors, which mask a password on a best-effort basis only (`spine secrets`
+  masks them itself). That was already so before v5.11.0, which masks more (query-parameter
+  passwords) than v5.9.2 did.
+- **LocalStack stays on 4.14.0.** It is the last release of the open-source image; Dependabot
+  ignores LocalStack's major updates, whose images need an account token. Moving the test stack's
+  Secrets Manager emulator off 4.14.0 is a manual decision. `TestAWSClient_Contract_LocalStack`
+  needs that stack and does not run in CI.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:
