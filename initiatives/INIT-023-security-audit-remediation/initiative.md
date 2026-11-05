@@ -5,7 +5,7 @@ title: Security Audit Remediation
 status: In Progress
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: related_to
     target: /initiatives/INIT-018-branch-protection/initiative.md
@@ -712,6 +712,10 @@ questions stay in that task.
     its first run since the push is red for SMP-side causes).
 
   All four epics and the initiative are In Progress.
+- 2026-11-05 — **TASK-004 Completed.** Its AC 14 check ran: the three original audit PoCs
+  (`poc/git`, `poc/parsing`, `poc/verify-r1-8`), run with `go test -overlay` against the merge
+  commit `d23b897` and against `main` `f6132470`, do not reproduce at either commit. Seven of the
+  17 tasks are Completed; the epics and the initiative stay In Progress.
 
 ---
 

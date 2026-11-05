@@ -6,7 +6,7 @@ status: In Progress
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md
@@ -138,6 +138,10 @@ Make the git surface trustworthy:
 
 The PoC directories are under the audit's `poc/`, which is held out of tree (initiative §1).
 Each task commits the scaled-down regression test it derives from them.
+
+**Status (2026-11-05):** TASK-002 and TASK-004 are Completed (TASK-004's last item, AC 14, the
+audit PoCs at the merge commit, was met on 2026-11-05). TASK-001, TASK-003 and TASK-016 are In
+Progress; each task's "Status after GitHub CI" note lists what remains. The epic stays In Progress.
 
 ---
 
