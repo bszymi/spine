@@ -18,14 +18,16 @@ and moves the test stack's LocalStack to 4.14.0. No runtime schema change.
   `SPINE_INSECURE_LOCAL=1`. The gate looked for the literal text `sslmode=disable`. pgx v5.11.0
   trims spaces around a URL query key and value and takes the last of a repeated parameter, so
   `?sslmode= disable` and `?sslmode=require&sslmode= disable` now connect without TLS (v5.9.2
-  refused the first and kept TLS for the second), and both passed the gate. It now decodes every
+  refused the first and kept TLS for the second), and both passed the gate. It now reads every
   `sslmode` setting the way pgx does (spaces, percent-escapes such as `%64isable`, key/value
-  spacing, quotes and backslashes) and refuses any that reads as `disable`. Settings from the
-  environment (`PGSSLMODE`) are still not read.
+  spacing, quotes and backslashes; text inside a password or another quoted value is not a
+  setting) and refuses any that reads as `disable`. Everything it refused before it still refuses.
+  Settings from the environment (`PGSSLMODE`) are still not read.
 - **No piece of a workspace password reaches an error.** pgx v5.11.0 ends a URL's user part at the
   first `@` (net/url, and pgx v5.9.2, at the last), so an unencoded `@` in a password splits it and
-  the tail becomes part of the host that a connect error names. Workspace pool errors and `spine
-  secrets` output now mask every `@`-separated piece. pgx v5.11.0's parse errors also quote the
+  the tail becomes the host part, which pgx splits into a host list at `,` and names host by host in
+  a connect error. Workspace pool errors and `spine secrets` output now mask the password and every
+  piece of it between URI delimiters (`@ , : [ ] / ? & = #`). pgx v5.11.0's parse errors also quote the
   part of a malformed string they stopped at (`missing "=" after "…"`, a component that does not
   decode), which can be a piece of a password; the workspace error keeps pgx's reason with those
   quoted fragments masked.
