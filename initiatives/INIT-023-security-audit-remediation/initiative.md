@@ -594,6 +594,8 @@ questions stay in that task.
 11. **Accept the descoped and narrowed items in §7d.**
     - *Default:* accept, including the correction that F7's update-capable planning runs are in
       scope (TASK-014).
+    - *Answered 2026-11-05: accept (the default), by the owner's delegation to the recorded
+      defaults.*
 12. **Partial close.** If a standalone-only Spine task (TASK-012 … TASK-016) stalls, does SMP
     EPIC-004 wait for the INIT-023 closing commit?
     - *Default:* wait.
@@ -733,6 +735,32 @@ questions stay in that task.
   Sixteen of the 17 tasks are Completed. EPIC-001, EPIC-003 and EPIC-004 are Completed. EPIC-002
   and the initiative stay In Progress: TASK-006 waits for the owner's ADR-016 sign-off (AC 1) and
   its AC 11 and AC 18 amendments.
+- 2026-11-05 — **ADR-016 Accepted; TASK-006 and EPIC-002 Completed; all 17 tasks Completed.** The
+  owner approved ADR-016 as built, with owner question 1's decision (a), and adopted TASK-006's AC 11
+  and AC 18 amendments (Deviations 22 and 12). All four epics are Completed. Program owner question
+  11 takes its default, accept. The exit criteria (§8), checked one by one:
+  - all four epics Completed, every task Completed: **met**;
+  - every task's SMP compatibility gate passed at merge, and TASK-003 merged after SMP TASK-003
+    was on SMP `main`: **met** (each task's gate record; TASK-003 AC 17);
+  - every audit PoC is a committed regression test, or its task records why not: **met** (each
+    task's PoC AC). None reproduces at the closing commit: **not yet checkable**, because the
+    closing commit does not exist yet. The evidence so far is at code identical to it or earlier:
+    Spine CI 41875102030 at `ce0b9c9e` ran the committed regression tests green; TASK-004's three
+    PoCs do not reproduce at `f6132470`; SMP INIT-027 EPIC-004 TASK-012's PoC sweep at `49fad9c0`
+    found every PoC assertion refused except the cases its record lists as zero-value only, by
+    design, or pending an owner decision. The PoCs are re-run at the closing commit when it exists;
+  - the program owner questions answered or their defaults recorded: **met** (question 11 above;
+    the others' defaults are recorded in each affected task);
+  - `KNOWN-LIMITATIONS.md`, `security-model.md`, ADR-008 and ADR-009 match the shipped behaviour,
+    and ADR-016 is Accepted: **met** (each task's documentation AC; ADR-016 Accepted today);
+  - the closing commit is named in the last task's Implementation Notes: **open**, it follows the
+    initiative's close;
+  - "A follow-up security review of the same surfaces, plus the areas the audit did not cover
+    (§2), is scheduled.": **open, for the owner.** The 2026-10-22 review behind INIT-024 covered
+    the same surfaces before this initiative closed, and INIT-024 lists git pack and fsck
+    internals as out of scope, so it does not cover §2's areas. No review is scheduled yet.
+
+  The initiative stays In Progress until the owner schedules that review.
 
 ---
 
