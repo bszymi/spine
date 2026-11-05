@@ -6,7 +6,7 @@ status: In Progress
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md
@@ -97,6 +97,10 @@ They are still real defects for anyone who runs `spine serve`.
 | TASK-014 | Reviewer workflow updates go through governance; `write_context` limited to the run's assignee | F7, P3-6 | 3 | EPIC-001 TASK-004 (soft: EPIC-001 TASK-016; EPIC-002 TASK-007 for its AC 19) | `standalone-service`, `verify-r1-5`, `verify-r1-12` |
 | TASK-015 | SSE field safety, shared-mode tenant scoping, git-endpoint auth and gitpool token-host scoping | P3-28, P3-29, P3-30, latent gitpool | 3 | EPIC-001 TASK-016 | `gitpool_tokenleak`, `verify-r1-3`, `standalone-service` |
 | TASK-012 | Standalone git-state safety: explicit convergence target, serialized working tree, bounded merge retries | F8, F9, P3-27 | 4 | EPIC-001 TASK-002, EPIC-001 TASK-004, EPIC-002 TASK-005 | `skeptic_conv`, `verify-r1-11`, `gap2-git-state-concurrenc`, `verify-r2-2` |
+
+**Status (2026-11-05):** TASK-013, TASK-014 and TASK-015 are Completed (on 2026-11-05 the owner
+accepted TASK-013's Deviation 10 and confirmed TASK-015's OQ2 "never"). TASK-012 is In Progress;
+its "Status after GitHub CI" note lists what remains. The epic stays In Progress.
 
 ---
 

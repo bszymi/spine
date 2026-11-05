@@ -718,6 +718,11 @@ questions stay in that task.
   commit. TASK-001 AC 10: SMP CI run 42001537129 at SMP `main` `6bd97ac9` (`.spine-revision`
   `ce0b9c9e`) passed every job; TASK-001 stays In Progress for AC 9 and AC 13. Seven of the 17
   tasks are Completed; the epics and the initiative stay In Progress.
+- 2026-11-05 — **Owner rulings; TASK-009, TASK-013 and TASK-015 Completed.** The owner waived
+  TASK-009 AC19 (`make test-integration`'s two failures, the same on `main`; the
+  `TestRunModeDatabaseDefault` fixture defect is filed as a follow-up there), accepted TASK-013's
+  Deviation 10 (AC 16), and confirmed TASK-015 OQ2 "never". Ten of the 17 tasks are Completed;
+  the epics and the initiative stay In Progress.
 
 ---
 

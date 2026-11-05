@@ -2,12 +2,12 @@
 id: TASK-009
 type: Task
 title: "enc:v2 secret envelope (key id + AAD + key ring) and subscription-secret re-encryption sweep"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
@@ -998,6 +998,7 @@ the test DB, and the run is recorded in the Implementation Notes.
     - `go test ./...`, `go vet ./...`, `make lint` (golangci-lint incl. gosec) and
       `make lint-security` pass.
     - `make test-integration` passes locally against the test DB (recorded).
+      *2026-11-05: waived by the owner (Status after GitHub CI, below).*
 20. **Fail-first evidence and PoC parity** (recorded in the Implementation Notes).
     - **Committed ports.** They do not compile against `61994fe`, which is expected for an
       additive API. Their behaviour is shown failing on `61994fe` semantics by these mutations:
@@ -1613,6 +1614,12 @@ an owner waiver (or follow-up) for AC19's pre-existing `make test-integration` f
 signal), so `platform-binding` verification does not need a restart of every process; a Spine CI job
 that runs the `-tags integration` start-up wiring tests (`TestBuildServeWorkspaces_*`), so the file-mode
 and db-branch hops are pinned in CI, not only locally.
+*2026-11-05, with the owner's AC19 waiver:* fix `TestRunModeDatabaseDefault` (`adapters/store`). Its
+raw `INSERT` leaves the nullable `workflow_version_label` column NULL, and the run scanner reads
+that column straight into a `string`, so `GetRun` fails. Either the scanner accepts NULL (as it
+does for `current_step_id` and `branch_name`) or the test sets the column.
+`TestAWSClient_Contract_LocalStack` needs a LocalStack that runs `secretsmanager`; that is an
+environment gap, not a defect.
 
 ### Integration (wave 2 merge) (2026-10-08)
 
@@ -1720,3 +1727,9 @@ All `s2f_*` databases were dropped afterwards, and no container was started.
   - **AC19:** the waiver for `make test-integration`'s pre-existing failures
     (`TestRunModeDatabaseDefault`, and `TestAWSClient_Contract_LocalStack`, which needs LocalStack),
     still outstanding (review round 2).
+- **2026-11-05: AC19 waived by the owner; Completed.** The owner waived AC19 (`make
+  test-integration` passes). Its two failures fail the same way on `main` and are outside this
+  task: `TestRunModeDatabaseDefault` is a test-fixture defect in `adapters/store`, filed under
+  Follow-ups above, and `TestAWSClient_Contract_LocalStack` needs a LocalStack with
+  `secretsmanager`. That was the last open item. The owner questions stay at their recorded
+  defaults (Orchestrator ruling, above), and no AC needs the owner's decision.

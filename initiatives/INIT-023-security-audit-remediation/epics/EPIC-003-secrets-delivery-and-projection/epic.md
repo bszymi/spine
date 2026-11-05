@@ -6,7 +6,7 @@ status: In Progress
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md
@@ -92,6 +92,10 @@ Nothing in this epic adds runtime schema.
 
 All three tasks are wave 2 and independent of each other. EPIC-001 TASK-003 rebases on
 TASK-011, and EPIC-002 TASK-006 is blocked by it.
+
+**Status (2026-11-05):** TASK-009 and TASK-010 are Completed (TASK-009's last item, AC19, was
+waived by the owner on 2026-11-05). TASK-011 is In Progress; its "Status after GitHub CI" note
+lists what remains. The epic stays In Progress.
 
 ---
 
