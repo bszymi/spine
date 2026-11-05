@@ -71,7 +71,10 @@ const maxIndexedFieldBytes = 1024
 //     unwrapped (a parse error, never ErrProjectionRoundTrip).
 //  2. def := json.Marshal of yamlsafe.Decode(content) decoded into `any`
 //     — byte-for-byte the encoder the projection has always used, so an
-//     accepted file stores unchanged JSONB.
+//     accepted file stores unchanged JSONB. Before it encodes, a mapping
+//     with a non-string key and a NaN or infinite number are refused
+//     explicitly (refuseUnencodable): the set of files that encode must
+//     not depend on the encoding/json engine (INIT-024 TASK-014).
 //  3. Refuse U+0000 in any key or string value (walked on the decoded
 //     value, never a byte search: the six-character text `\u0000` in a
 //     description is legitimate).
