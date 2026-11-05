@@ -21,6 +21,12 @@ stored projection JSON of an accepted workflow is unchanged.
   1.26.
 - **golangci-lint v2.15.0** (`GOLANGCI_LINT_VERSION` in the Makefile; v2.11.4 cannot load Go 1.27
   code).
+- **JSON on the wire (operators).** Where a string holds invalid UTF-8, which only git-derived
+  text such as a path can, Go 1.27's encoder writes the U+FFFD replacement character itself where
+  Go 1.26 wrote the escape `�`. This applies to live API responses and SSE frames. The
+  decoded value is the same, and stored JSON is unchanged (PostgreSQL re-serialises jsonb).
+  Webhook bodies are read back from jsonb, so they do not change either. Every other v1
+  behaviour Spine relies on was measured unchanged (the task's JSON audit).
 
 ### Fixed
 
