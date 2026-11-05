@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -475,6 +477,8 @@ var ErrInvalidDatabaseURL = errors.New("invalid database connection string")
 //     the query or in key=value form — and the string itself replaced by
 //     "xxxxx". Connect and ping errors (pgconn.ConnectError names host,
 //     user and database) normally carry none and keep their wrapping.
+//   - The reason's quoted fragments of the string are replaced too
+//     (maskQuotedFragments, INIT-024 TASK-013).
 //
 // A replaced error does not wrap the original: its Error() is the leak.
 func connStringFreeError(err error, databaseURL string) error {
@@ -489,7 +493,7 @@ func connStringFreeError(err error, databaseURL string) error {
 		if i := strings.LastIndex(msg, "`: "); i >= 0 {
 			reason = msg[i+len("`: "):]
 		}
-		reason = maskSecrets(reason, databaseURL, secrets)
+		reason = maskSecrets(maskQuotedFragments(reason, databaseURL), databaseURL, secrets)
 		if reason == "" {
 			return ErrInvalidDatabaseURL
 		}
@@ -503,14 +507,99 @@ func connStringFreeError(err error, databaseURL string) error {
 }
 
 // maskSecrets replaces the connection string and each credential in msg.
+// Longer credentials go first, so a short one (a piece of a password)
+// cannot break up a longer one and leave its remainder in the text.
 func maskSecrets(msg, databaseURL string, secrets []string) string {
 	if databaseURL != "" {
 		msg = strings.ReplaceAll(msg, databaseURL, "xxxxx")
 	}
+	secrets = append([]string(nil), secrets...)
+	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
 	for _, s := range secrets {
 		msg = strings.ReplaceAll(msg, s, "xxxxx")
 	}
 	return msg
+}
+
+// quotedFragment matches a double-quoted segment of a pgx error's reason,
+// %q-escaped or not.
+var quotedFragment = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+// maskQuotedFragments replaces each quoted segment of a parse error's
+// reason that quotes text of databaseURL (INIT-024 TASK-013).
+//
+// pgx v5.11.0's parse errors quote the part of a malformed string they
+// stopped at: a keyword read up to a space (`missing "=" after "…"`), a
+// query pair without '=', a URI component that does not decode. In a
+// malformed string that part can be a piece of a password — the text
+// after an unquoted space or an unencoded '&', or the tail an unencoded
+// '@' moved into the host — which connStringSecrets, reading the string
+// as well-formed, does not list. A segment that is a parameter name
+// (isParamName: "password" in `extra key/value separator "=" in URI query
+// parameter: "password"`) is kept, as is one shorter than 3 bytes: neither
+// is a value, and the name says what to fix.
+func maskQuotedFragments(reason, databaseURL string) string {
+	return quotedFragment.ReplaceAllStringFunc(reason, func(q string) string {
+		texts := []string{q[1 : len(q)-1]}
+		if u, err := strconv.Unquote(q); err == nil && u != texts[0] {
+			texts = append(texts, u)
+		}
+		for _, s := range texts {
+			if len(s) >= 3 && strings.Contains(databaseURL, s) && !isParamName(s, databaseURL) {
+				return `"xxxxx"`
+			}
+		}
+		return q
+	})
+}
+
+// isParamName reports whether every occurrence of s in databaseURL is a
+// parameter name: at the start of the string or after '?', '&' or
+// whitespace, and followed by '='.
+func isParamName(s, databaseURL string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; ; {
+		j := strings.Index(databaseURL[i:], s)
+		if j < 0 {
+			return true
+		}
+		start, end := i+j, i+j+len(s)
+		if start > 0 && !strings.ContainsRune("?& \t\n\r\v\f", rune(databaseURL[start-1])) {
+			return false
+		}
+		if end >= len(databaseURL) || databaseURL[end] != '=' {
+			return false
+		}
+		i = end
+	}
+}
+
+// URLUserinfoPassword returns the password of a postgres:// or
+// postgresql:// connection string's userinfo, read as widely as either
+// URI parser Spine has used reads it: from the first ':' up to the last
+// '@' before the first '/' (INIT-024 TASK-013). pgx v5.11.0 ends the
+// userinfo at the first '@', as libpq does; net/url (and pgx v5.9.2) at
+// the last. So an unencoded '@' in a password splits it under v5.11.0,
+// and its tail becomes part of the host, which connect errors name.
+// Callers mask the result and each of its '@'-separated pieces.
+func URLUserinfoPassword(databaseURL string) (string, bool) {
+	rest, ok := strings.CutPrefix(databaseURL, "postgres://")
+	if !ok {
+		if rest, ok = strings.CutPrefix(databaseURL, "postgresql://"); !ok {
+			return "", false
+		}
+	}
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	at := strings.LastIndexByte(rest, '@')
+	if at < 0 {
+		return "", false
+	}
+	_, pw, ok := strings.Cut(rest[:at], ":")
+	return pw, ok
 }
 
 // connStringCredential matches a password or sslpassword setting in a
@@ -529,7 +618,13 @@ func connStringSecrets(databaseURL string) []string {
 			return
 		}
 		out = append(out, v)
+		// pgx v5.9.2 decoded a query value as net/url does (`+` is a
+		// space); v5.11.0 decodes every component as libpq does (`+` is
+		// literal). List both decodings.
 		if dec, err := url.QueryUnescape(v); err == nil && dec != v && len(dec) >= 3 {
+			out = append(out, dec)
+		}
+		if dec, err := url.PathUnescape(v); err == nil && dec != v && len(dec) >= 3 {
 			out = append(out, dec)
 		}
 	}
@@ -546,6 +641,12 @@ func connStringSecrets(databaseURL string) []string {
 	for _, m := range connStringCredential.FindAllStringSubmatch(databaseURL, -1) {
 		add(m[1])
 		add(m[2])
+	}
+	if pw, ok := URLUserinfoPassword(databaseURL); ok {
+		add(pw)
+		for _, piece := range strings.Split(pw, "@") {
+			add(piece)
+		}
 	}
 	return out
 }

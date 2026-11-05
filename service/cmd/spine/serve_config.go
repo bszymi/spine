@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -359,14 +361,87 @@ func parseEventLogNotifyBridge(raw string) bool {
 
 // requireSecureDBURL rejects connection strings that use sslmode=disable
 // unless SPINE_INSECURE_LOCAL=1 is set.
-func requireSecureDBURL(url string) error {
-	if !strings.Contains(url, "sslmode=disable") {
+func requireSecureDBURL(dbURL string) error {
+	if !sslModeDisabled(dbURL) {
 		return nil
 	}
 	if os.Getenv("SPINE_INSECURE_LOCAL") == "1" {
 		return nil
 	}
 	return fmt.Errorf("database URL uses sslmode=disable; set SPINE_INSECURE_LOCAL=1 to acknowledge (local development only) or use sslmode=require/verify-full")
+}
+
+// sslModeDisabled reports whether dsn sets sslmode to disable in any
+// spelling pgx reads as disable (INIT-024 TASK-013).
+//
+// The gate used to look for the literal text "sslmode=disable". pgx
+// v5.11.0 parses URIs as libpq does: it trims spaces around a query key
+// and value, and the last of a repeated parameter wins, so
+// `?sslmode= disable` and `?sslmode=require&sslmode= disable` now connect
+// without TLS (v5.9.2 refused the first and kept TLS for the second), and
+// the literal check passed both. Percent-encoding (`%64isable`,
+// `ssl%6Dode`) and key/value spacing, quoting and escapes (`sslmode =
+// disable`, `sslmode='disable'`) passed it with every pgx release.
+//
+// Every occurrence that reads as disable refuses, not only the one pgx
+// applies: refusing is the safe side, and SPINE_INSECURE_LOCAL=1 is the
+// same acknowledgement. Settings pgx merges from the environment
+// (PGSSLMODE) are not read here, as before.
+func sslModeDisabled(dsn string) bool {
+	if strings.Contains(dsn, "sslmode=disable") {
+		return true
+	}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		// Every '?'- or '&'-separated pair in the string, wherever pgx
+		// takes the query to start, decoded as pgx decodes a query
+		// component: spaces around it trimmed, percent-escapes decoded,
+		// '+' literal.
+		for _, pair := range strings.FieldsFunc(dsn, func(r rune) bool { return r == '?' || r == '&' }) {
+			k, v, ok := strings.Cut(pair, "=")
+			if ok && uriSetting(k) == "sslmode" && uriSetting(v) == "disable" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, m := range kvSSLMode.FindAllStringSubmatch(dsn, -1) {
+		if kvSettingValue(m[1]) == "disable" {
+			return true
+		}
+	}
+	return false
+}
+
+// uriSetting decodes one URI query component the way pgx v5.11.0 does,
+// leniently: an invalid escape leaves the component as written (pgx then
+// refuses the string).
+func uriSetting(s string) string {
+	s = strings.Trim(s, " ")
+	if dec, err := url.PathUnescape(s); err == nil {
+		s = dec
+	}
+	return strings.Trim(s, " ")
+}
+
+// kvSSLMode matches an sslmode setting in a key/value connection string:
+// the keyword, optional whitespace, '=', optional whitespace, and a
+// quoted or unquoted value with backslash escapes.
+var kvSSLMode = regexp.MustCompile(`(?:^|\s)sslmode\s*=\s*('(?:[^'\\]|\\.)*'|(?:[^\s\\]|\\.)+)`)
+
+// kvSettingValue unquotes a key/value setting's value: pgx v5.11.0, like
+// libpq, drops each backslash and keeps the character after it.
+func kvSettingValue(v string) string {
+	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
+		v = v[1 : len(v)-1]
+	}
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if v[i] == '\\' && i+1 < len(v) {
+			i++
+		}
+		b.WriteByte(v[i])
+	}
+	return b.String()
 }
 
 // resolveRuntimeEnv returns the normalized SPINE_ENV value: production,

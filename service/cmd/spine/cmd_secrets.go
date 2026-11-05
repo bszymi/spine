@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -435,18 +436,38 @@ func describeDBError(err error, dsn string) string {
 		return "invalid database connection string (details withheld: it may carry credentials)"
 	}
 	msg := err.Error()
-	for _, secret := range dsnSecrets(dsn) {
+	// Longest first, so a piece of a password cannot break up the whole
+	// and leave the rest of it in the text.
+	secrets := dsnSecrets(dsn)
+	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	for _, secret := range secrets {
 		msg = strings.ReplaceAll(msg, secret, "xxxxx")
 	}
 	return msg
 }
 
 // dsnSecrets lists the credential values a connection string carries.
+//
+// pgx v5.11.0 ends a URI's userinfo at the first '@' (libpq's rule);
+// net/url, which url.Parse below follows, at the last. An unencoded '@' in
+// a password therefore splits it, and its tail becomes part of the host
+// that a connect error names (INIT-024 TASK-013), so every '@'-separated
+// piece of 3 bytes or more is listed too.
 func dsnSecrets(dsn string) []string {
 	var out []string
 	add := func(v string) {
 		if v = strings.Trim(v, "'"); v != "" {
 			out = append(out, v)
+		}
+	}
+	if pw, ok := workspace.URLUserinfoPassword(dsn); ok {
+		for _, piece := range strings.Split(pw, "@") {
+			if len(piece) >= 3 && piece != pw {
+				add(piece)
+				if dec, err := url.PathUnescape(piece); err == nil && dec != piece {
+					add(dec)
+				}
+			}
 		}
 	}
 	if u, err := url.Parse(dsn); err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql") {
