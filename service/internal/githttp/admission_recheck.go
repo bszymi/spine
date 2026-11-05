@@ -285,11 +285,19 @@ func (s *recheckSession) handle(conn net.Conn) {
 		}
 		lines = append(lines, RefUpdate{OldSHA: f[0], NewSHA: f[1], Ref: f[2]})
 	}
-	// The decision ends with the connection: an answer after the
-	// deadline could not be written anyway (the hook then refuses).
+	// The decision ends with the connection. A decision that returns
+	// after its context ended (the deadline passed, or close) gets no
+	// answer, whatever it returned, so the hook refuses. The connection's
+	// deadline alone does not stop the write: its timer is separate from
+	// the context's, so an answer could still go out just after the
+	// deadline (INIT-024 TASK-012).
 	dctx, cancel := context.WithDeadline(s.ctx, deadline)
 	defer cancel()
-	reply(s.decide(dctx, lines))
+	msgs := s.decide(dctx, lines)
+	if dctx.Err() != nil {
+		return
+	}
+	reply(msgs)
 }
 
 // recheckAdmission is the server's apply-time decision for a push the

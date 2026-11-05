@@ -463,3 +463,61 @@ func TestRecheck_StalledDecisionIsBoundedAndCancelled(t *testing.T) {
 		}
 	})
 }
+
+// TestRecheck_NoAnswerAfterTheDecisionContextEnded (INIT-024 TASK-012):
+// a decision that returns after its context ended gets no answer,
+// whatever it returned, so the hook refuses. The context here ends
+// through the request's context while the connection's own deadline is a
+// minute away and the session stays open, so only the server's check of
+// the decision's context keeps the answer off the wire.
+func TestRecheck_NoAnswerAfterTheDecisionContextEnded(t *testing.T) {
+	line := strings.Repeat("a", 40) + " " + strings.Repeat("b", 40) + " refs/heads/x"
+	for _, tc := range []struct {
+		name string
+		msgs []string
+	}{
+		{"an admission", nil},
+		{"a refusal", []string{"push refused"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, cancelParent := context.WithCancel(context.Background())
+			defer cancelParent()
+			started := make(chan struct{})
+			s, err := startRecheck(parent, time.Minute, func(ctx context.Context, _ []RefUpdate) []string {
+				close(started)
+				<-ctx.Done()
+				return tc.msgs
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.close()
+			type result struct {
+				got string
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				got, err := recheckExchange(s.socket, recheckHello, s.token, line)
+				done <- result{got, err}
+			}()
+			select {
+			case <-started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the decision never started")
+			}
+			cancelParent()
+			select {
+			case r := <-done:
+				if r.err != nil {
+					t.Fatal(r.err)
+				}
+				if r.got != "" {
+					t.Errorf("an answer after the decision's context ended: %q", r.got)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the connection stayed open after the decision's context ended")
+			}
+		})
+	}
+}
