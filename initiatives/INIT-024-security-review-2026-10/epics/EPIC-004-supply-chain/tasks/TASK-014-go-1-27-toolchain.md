@@ -366,6 +366,7 @@ run only) were compared on identical code. Excluding the 249 pre-existing findin
 | Round | Head | Review sub-session (model) | Findings | Disposition |
 |---|---|---|---|---|
 | 1 | `ba29ce56` (code complete; base `0e58a6a6`) | `01a1acc2-e2c9-77e3-bc45-aacd16d2ebe2` (`gpt-6.1-sol`, `source: {"subagent":"review"}`, cwd = this worktree) | none. "patch is correct", confidence 0.88. Its sandbox could not bind test ports, so it ran the touched tests only | nothing to fix |
+| 2 | `7116dbcf` (final code and these notes; base `24136df6`) | `01a1ad4d-2511-7081-bfcb-58743a9d10e1` (`gpt-6.1-sol`, review sub-session, cwd = this worktree) | none. "patch is correct", confidence 0.90. The same sandbox limit on port binding | nothing to fix |
 
 ### SMP handoff
 
