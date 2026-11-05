@@ -2,12 +2,12 @@
 id: TASK-013
 type: Task
 title: "Admin-only skill management, actor role ceiling, and bootstrap-admin token hygiene"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
@@ -1287,7 +1287,7 @@ the fix.
 | 13 | `TestBootstrapSecurity_AdminMintedTokensSurviveRotation` (a `tok_` token named `smp-admin-bootstrap`, made strictly older than the rotation). |
 | 14 | `service/cmd/spine/smp_admin_token_test.go`: `TestValidateSMPAdminToken` (the AC table plus the 32-char/8-distinct floor both sides; no message echoes the token, each names the variable and the remedy) and `TestServeRefusesWeakSMPAdminTokenInProduction`. |
 | 15 | Only the Design §12 tests changed (plus gofmt import order in those files, Deviation 6); no existing `Test…` in `serve_delivery_test.go` changed. `go build ./...`, `go vet ./...`, `go test ./...` pass. |
-| 16 | `bootstrap_admin_idempotency_test.go` updated (old bearer 401 via new `…ExpectingUnauthorized` steps at both sites, id regex at both sites, old row revoked / new row live in both row-count steps). **Partial against the literal gate:** both `TestBootstrapInternalAdmin_*` scenarios pass against Postgres (filtered run, command below, and CI's `scenario-git-http` job step `^TestBootstrapInternalAdmin_`), but `make test-scenario` as a whole is **red**, with the same 30 pre-existing failures as `main`. The filtered run stands in for the gate — **Deviation 10, which needs the owner's explicit acceptance**. |
+| 16 | `bootstrap_admin_idempotency_test.go` updated (old bearer 401 via new `…ExpectingUnauthorized` steps at both sites, id regex at both sites, old row revoked / new row live in both row-count steps). **Partial against the literal gate:** both `TestBootstrapInternalAdmin_*` scenarios pass against Postgres (filtered run, command below, and CI's `scenario-git-http` job step `^TestBootstrapInternalAdmin_`), but `make test-scenario` as a whole is **red**, with the same 30 pre-existing failures as `main`. The filtered run stands in for the gate — **Deviation 10, which needs the owner's explicit acceptance** (*accepted 2026-11-05*). |
 | 17 | `dev/lint-boundaries.sh` OK with no allowlist change; golangci-lint 0 new issues; `cmd/embed-smoketest` OK. |
 | 18 | SMP compatibility gate below: all pass, no SMP file changed. |
 | 19 | `git diff main...HEAD -- migrations/` is empty; `adapters/store/interfaces.go` (`store.AuthStore`) unchanged. |
@@ -1359,7 +1359,7 @@ Run with `go test -overlay` on mutated copies (no repository file touched); **33
 9. **The runbook section is §5.6** under "5. Rotating Credentials"; its failure-modes table adds the
    Warn/Error log lines operators will see.
 10. **AC 16's gate is a filtered scenario run, not `make test-scenario`** (recorded in review round
-    2; **needs the owner's explicit acceptance**). AC 16 says "`make test-scenario` passes". It
+    2; **needs the owner's explicit acceptance**; *accepted by the owner on 2026-11-05*). AC 16 says "`make test-scenario` passes". It
     does not, on this branch or on `main`: run sequentially on each with its own database, both fail
     the **identical 30 tests** (fixture, harness, actor-API and gateway scenarios — none touches a
     route or code path TASK-013 changes; see Review round 2), which is why Spine CI scopes its
@@ -1656,3 +1656,9 @@ All `s2i_*` databases were dropped afterwards; the only container started was re
   step that Deviation 10 relies on included. Remaining (owner):
   - **AC 16:** the explicit acceptance of Deviation 10, the filtered scenario run and that CI step
     in place of `make test-scenario`.
+- **2026-11-05: Deviation 10 accepted by the owner; Completed.** The owner accepted Deviation 10
+  for AC 16: the filtered Postgres scenario run and CI's `scenario-git-http` step
+  `^TestBootstrapInternalAdmin_` stand in for `make test-scenario`, whose 30 failures are the same
+  on `main` and outside this task. That was the last open item. The owner questions stay at their
+  recorded defaults (Orchestrator rulings and owner-question defaults, above), and no AC needs the
+  owner's decision.
