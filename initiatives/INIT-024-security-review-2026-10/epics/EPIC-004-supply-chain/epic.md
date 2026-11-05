@@ -55,6 +55,7 @@ fork.
 | ID | Title | Findings | Wave | Blocked by | SMP impact |
 |---|---|---|---|---|---|
 | TASK-009 | Toolchain and dependency bumps, Dockerfile and CI pinning, govulncheck, Dependabot | SC-01 (Spine half), SC-06, SC-08, SC-09 | 2 (first in practice) | — | yes: MVS raises SMP's pgx, x/text and chi |
+| TASK-014 | Go 1.27 toolchain: pins, golangci-lint, and JSON that does not depend on the encoding/json engine | Dependabot #598 | follow-up (2026-11-05) | — | yes: SMP's Go 1.27 move needs this commit (explicit non-string-key refusal) |
 
 ---
 

@@ -219,6 +219,7 @@ Task IDs are unique across the initiative, as in INIT-023.
 | EPIC-003 | TASK-007 | Session and auth hygiene: SSE revalidation, no pre-auth ServiceSet, explicit `SPINE_ENV`, evidence provenance | N-14, N-15, N-16, N-17 | M | no |
 | EPIC-003 | TASK-008 | Wire the multi-workspace scheduler into shared-mode `spine serve` | P3-27 (open half) | M | no |
 | EPIC-004 | TASK-009 | Toolchain and dependency bumps, Dockerfile and CI pinning, govulncheck, Dependabot | SC-01 (Spine), SC-06, SC-08, SC-09 | S | yes (MVS) |
+| EPIC-004 | TASK-014 | Go 1.27 toolchain: pins, golangci-lint, and JSON that does not depend on the encoding/json engine (replaces Dependabot #598) | — | S | yes (SMP Go 1.27 re-pin) |
 | EPIC-005 | TASK-010 | Initiative close: integration, gates, documentation and the SMP hand-off | — | S | yes (closing pin) |
 
 **Grouping notes.**
