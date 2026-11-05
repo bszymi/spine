@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transp
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -1526,10 +1526,20 @@ integration branch (SMP TASK-001 to TASK-003).
     (review round 2).
   - **AC 10:** SMP's CI green with `../spine` at a pin that contains this task (SMP pins
     `49fad9c0`). SMP's first run since the push, 41859131740 at SMP `main` `efe1dec2`, failed
-    `test`, `integration` and `images` for SMP-side causes, which SMP is fixing.
+    `test`, `integration` and `images` for SMP-side causes, which SMP is fixing. *Met
+    2026-11-05 (below).*
   - **AC 13 (orchestrator):** no PR was opened; the task merged to `main` as `ee3c249e`, which
     reached GitHub with the push. The PR description is the draft above. Record that as the
     evidence, or amend the AC.
+- **2026-11-05: AC 10 met; stays In Progress.** SMP CI run 42001537129 at SMP `main` `6bd97ac9`
+  passed every job: test, integration, rds-compat (trusted and untrusted), images, docker, vuln,
+  lint, build, both frontends, alert-rules, changes and build-context (terraform was skipped by its
+  paths filter). That commit's `.spine-revision` is Spine `ce0b9c9e`, which contains this task
+  (its merge `ee3c249e`). Later runs are green too: SMP CI 42006928212 and Scenario Tests
+  42006925337 (90 passed, 0 failed, 2 skipped), both at SMP `df63f5b9`. Remaining, both with the
+  owner or the orchestrator:
+  - **AC 9:** ratify the two recorded deviations (above).
+  - **AC 13:** record the merge without a PR as the evidence, or amend the AC (above).
 
 ## Design check
 
