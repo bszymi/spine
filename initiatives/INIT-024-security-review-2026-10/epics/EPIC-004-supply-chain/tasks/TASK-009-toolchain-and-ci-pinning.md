@@ -7,7 +7,7 @@ epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-004-supply-chain/
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-004-supply-chain/epic.md
@@ -256,7 +256,7 @@ interface (absent in v5.9.2 and v5.10.0).
 Also informational: `govulncheck -tags integration,scenario -test ./...` on the branch reports
 0 reachable, the same 3 module-level chi IDs.
 
-### Gates (branch head before this notes commit, `66cd0915`; logs in SMP repo `tmp/init027-orchestration/i24/t009/`)
+### Gates (branch head before this notes commit, `66cd0915`; logs in SMP repo `local-scratch/i24/t009/`)
 
 | Gate | Command | Result |
 |---|---|---|
@@ -344,7 +344,7 @@ Also informational: `govulncheck -tags integration,scenario -test ./...` on the 
 
 ### Review round 1 (2026-10-23, head `9e166eb2`): five P3s fixed
 
-The orchestrator saved the review at SMP repo `tmp/init027-orchestration/i24/t009-reviews/REVIEW.md`.
+The orchestrator saved the review at SMP repo `local-scratch/i24/t009-reviews/REVIEW.md`.
 It had no P1/P2 and five P3s, each fixed per the orchestrator's rulings. Commits:
 - `b2fff876`: pincheck rework, ci.yml, dependabot.yml comments;
 - `36465947`: docs;
@@ -415,7 +415,7 @@ commands for the owner or CI are `docker build --tag spine:ci .` (the CI `image-
 `make docker-build`, and `make test-db-up` / `docker compose -f docker-compose.test.yaml up -d`
 followed by `docker compose -f docker-compose.test.yaml ps`, on a machine that may pull.
 
-**Gates for the round** (on `29489ef8`; logs in SMP repo `tmp/init027-orchestration/i24/t009/r1/`):
+**Gates for the round** (on `29489ef8`; logs in SMP repo `local-scratch/i24/t009/r1/`):
 
 | Gate | Result |
 |---|---|
@@ -468,7 +468,7 @@ SMP: against the integration head, SMP `82899ace` builds and vets unchanged unde
 `-mod=readonly` and selects the same pgx v5.9.2 / x/text v0.42.0 / x/sync v0.23.0 / chi v5.2.5,
 so **no SMP go.mod or go.sum change** is needed (the handoff above holds).
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |
@@ -489,3 +489,17 @@ Codex (`codex review --base main`, plain, from the integration worktree): round 
 review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
 actionable regressions were identified"). It covered every merged task and coordination commit,
 including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this
+  initiative's closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus
+  TASK-010's git-identity fix) passed all 8 jobs. That closes what waited for CI: AC 4's Dockerfile
+  build (`image-build`: the pinned bases build, and the image runs with the shipped git), AC 2 and
+  AC 5 on GitHub (`vuln`, `toolchain-parity`), AC 6 (every pinned job ran), and `git-floor` on the
+  pinned `golang:1.26.10-bookworm` image. GitHub's Dependabot runs at `fd35f802` and `ce0b9c9e`
+  succeeded (AC 7). Remaining:
+  - **AC 8 (a live check):** bring both compose stacks up on a host that may pull the pinned images:
+    `make test-db-up`, then `docker compose -f docker-compose.test.yaml ps`, and `make docker-up`.
+    GitHub's scenario job pulled and ran the same pinned `postgres:18-bookworm` digest; the compose
+    stacks and the pinned LocalStack have not been brought up anywhere.

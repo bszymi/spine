@@ -43,7 +43,7 @@ jobs:
     name: ADR-017 boundary lint
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -81,7 +81,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -89,7 +89,24 @@ jobs:
         with:
           go-version: '1.26.10'
 
+      # INIT-024 / TASK-010 (GitHub CI after the push): git is given no
+      # identity and may not guess one. The runner configures no
+      # user.name and its user has an empty GECOS name, so a test that
+      # needs an identity it was not given fails here (run 41856447149) — but on a developer's machine git guessed
+      # one from the passwd entry and the host name, and the same test
+      # passed. user.useConfigOnly turns that guess off on every host, so
+      # `make test` (the same environment) fails the same way locally.
+      # Step-scoped, not job-scoped, so actions/checkout's own git
+      # commands keep their configuration. A repository's own
+      # user.name/user.email and identity variables a test sets still
+      # apply.
       - name: Unit tests
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: user.useConfigOnly
+          GIT_CONFIG_VALUE_0: 'true'
         run: go test ./...
 
   # INIT-023 / EPIC-001 / TASK-001: the git push scenarios
@@ -134,7 +151,7 @@ jobs:
     env:
       SPINE_TEST_DATABASE_URL: postgres://spine_test:spine_test@localhost:5433/spine_test?sslmode=disable
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -335,7 +352,7 @@ jobs:
     container:
       image: golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -364,7 +381,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -412,7 +429,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -435,7 +452,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: boundary-lint
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 

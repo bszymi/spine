@@ -2,10 +2,10 @@
 id: INIT-023
 type: Initiative
 title: Security Audit Remediation
-status: Pending
+status: In Progress
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-10-20
+last_updated: 2026-11-05
 links:
   - type: related_to
     target: /initiatives/INIT-018-branch-protection/initiative.md
@@ -62,7 +62,7 @@ task ships with its PR, its codex pass and its regression tests. The PoCs become
 
 **The audit record.** The full report and its PoCs contain working exploit steps, so neither is
 committed to either repository. The owner holds them, in the SMP working tree under the
-git-ignored `tmp/init027-orchestration/spine-audit/` (`REPORT.md`, `poc/`). This initiative
+git-ignored `local-scratch/spine-audit/` (`REPORT.md`, `poc/`). This initiative
 summarises each finding in one line (§7c). Each task restates only what its fix needs.
 
 **The SMP half.** SMP owns its own git gateway, its git plumbing and its event receiver, and it
@@ -594,6 +594,8 @@ questions stay in that task.
 11. **Accept the descoped and narrowed items in §7d.**
     - *Default:* accept, including the correction that F7's update-capable planning runs are in
       scope (TASK-014).
+    - *Answered 2026-11-05: accept (the default), by the owner's delegation to the recorded
+      defaults.*
 12. **Partial close.** If a standalone-only Spine task (TASK-012 … TASK-016) stalls, does SMP
     EPIC-004 wait for the INIT-023 closing commit?
     - *Default:* wait.
@@ -697,6 +699,68 @@ questions stay in that task.
   Proposed until signed off; TASK-006 AC 11/18, TASK-008 AC 10/11/21 and TASK-012
   AC 15 wording amendments; whether an approved governance merge restarts its
   retry count. Tasks stay In Progress until GitHub CI runs. Not pushed.
+- 2026-11-04 — **Pushed; statuses after GitHub CI.** The owner approved the push. Spine `main` on
+  GitHub now carries INIT-023 (waves 1–4, `a560c210`) and INIT-024 (its closing commit `fd35f802`,
+  then `ce0b9c9e`, a git-identity fix the first run found). GitHub CI run 41875102030 at `ce0b9c9e`
+  passed all 8 jobs (41856447149 at `fd35f802` failed only `go test ./...`, on that defect).
+  Completed: TASK-002, TASK-005, TASK-007, TASK-010, TASK-014 and TASK-017. The other eleven stay In
+  Progress; each task's "Status after GitHub CI" note lists what is left:
+  - owner: the ADR-016 sign-off (TASK-006 AC 1, OQ1); TASK-015 OQ2; AC amendments or rulings in
+    TASK-003 (AC 5, 11.4), TASK-006 (AC 11, 18), TASK-008 (AC 10, 11, 14, 21), TASK-012 (AC 15) and
+    TASK-016 (AC 16); waivers in TASK-009 (AC19), TASK-011 (AC 18, 24, 26) and TASK-013 (AC 16);
+  - owner or orchestrator: TASK-001 AC 9's deviations, TASK-012 AC 23's waiver, and the records for
+    TASK-001 AC 13 and TASK-003 AC 16 and AC 17;
+  - checks: TASK-004 AC 14 (the audit PoCs at the merge commit) and TASK-001 AC 10 (SMP's CI green;
+    its first run since the push is red for SMP-side causes).
+
+  All four epics and the initiative are In Progress.
+- 2026-11-05 — **TASK-004 Completed; TASK-001 AC 10 met.** TASK-004's AC 14 check ran: the three
+  original audit PoCs (`poc/git`, `poc/parsing`, `poc/verify-r1-8`), run with `go test -overlay`
+  against the merge commit `d23b897` and against `main` `f6132470`, do not reproduce at either
+  commit. TASK-001 AC 10: SMP CI run 42001537129 at SMP `main` `6bd97ac9` (`.spine-revision`
+  `ce0b9c9e`) passed every job; TASK-001 stays In Progress for AC 9 and AC 13. Seven of the 17
+  tasks are Completed; the epics and the initiative stay In Progress.
+- 2026-11-05 — **Owner rulings; TASK-009, TASK-013 and TASK-015 Completed.** The owner waived
+  TASK-009 AC19 (`make test-integration`'s two failures, the same on `main`; the
+  `TestRunModeDatabaseDefault` fixture defect is filed as a follow-up there), accepted TASK-013's
+  Deviation 10 (AC 16), and confirmed TASK-015 OQ2 "never". Ten of the 17 tasks are Completed;
+  the epics and the initiative stay In Progress.
+- 2026-11-05 — **Owner rulings; TASK-001, TASK-003, TASK-008, TASK-011, TASK-012 and TASK-016
+  Completed.** By delegation to the recorded recommendations, the owner ratified TASK-001 AC 9's
+  two deviations and accepted its direct merge `ee3c249e` as AC 13's evidence; adopted the proposed
+  amendments to TASK-003 AC 5 and AC 11.4 and recorded its AC 16 and AC 17 as met; adopted the
+  wording amendments to TASK-008 AC 10, 11, 14 and 21; waived TASK-011's `make test-scenario`
+  clauses (AC 18, AC 26) and accepted SMP's GitHub CI for its AC 24; waived TASK-012 AC 23 and
+  accepted Deviation 16 for AC 15's push half; and ratified TASK-016's DC-8 amendment (AC 16).
+  Sixteen of the 17 tasks are Completed. EPIC-001, EPIC-003 and EPIC-004 are Completed. EPIC-002
+  and the initiative stay In Progress: TASK-006 waits for the owner's ADR-016 sign-off (AC 1) and
+  its AC 11 and AC 18 amendments.
+- 2026-11-05 — **ADR-016 Accepted; TASK-006 and EPIC-002 Completed; all 17 tasks Completed.** The
+  owner approved ADR-016 as built, with owner question 1's decision (a), and adopted TASK-006's AC 11
+  and AC 18 amendments (Deviations 22 and 12). All four epics are Completed. Program owner question
+  11 takes its default, accept. The exit criteria (§8), checked one by one:
+  - all four epics Completed, every task Completed: **met**;
+  - every task's SMP compatibility gate passed at merge, and TASK-003 merged after SMP TASK-003
+    was on SMP `main`: **met** (each task's gate record; TASK-003 AC 17);
+  - every audit PoC is a committed regression test, or its task records why not: **met** (each
+    task's PoC AC). None reproduces at the closing commit: **not yet checkable**, because the
+    closing commit does not exist yet. The evidence so far is at code identical to it or earlier:
+    Spine CI 41875102030 at `ce0b9c9e` ran the committed regression tests green; TASK-004's three
+    PoCs do not reproduce at `f6132470`; SMP INIT-027 EPIC-004 TASK-012's PoC sweep at `49fad9c0`
+    found every PoC assertion refused except the cases its record lists as zero-value only, by
+    design, or pending an owner decision. The PoCs are re-run at the closing commit when it exists;
+  - the program owner questions answered or their defaults recorded: **met** (question 11 above;
+    the others' defaults are recorded in each affected task);
+  - `KNOWN-LIMITATIONS.md`, `security-model.md`, ADR-008 and ADR-009 match the shipped behaviour,
+    and ADR-016 is Accepted: **met** (each task's documentation AC; ADR-016 Accepted today);
+  - the closing commit is named in the last task's Implementation Notes: **open**, it follows the
+    initiative's close;
+  - "A follow-up security review of the same surfaces, plus the areas the audit did not cover
+    (§2), is scheduled.": **open, for the owner.** The 2026-10-22 review behind INIT-024 covered
+    the same surfaces before this initiative closed, and INIT-024 lists git pack and fsck
+    internals as out of scope, so it does not cover §2's areas. No review is scheduled yet.
+
+  The initiative stays In Progress until the owner schedules that review.
 
 ---
 

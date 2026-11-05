@@ -2,10 +2,10 @@
 id: TASK-008
 type: Task
 title: "Submit ownership, step-output evidence and compare-and-swap state writes"
-status: In Progress
+status: Completed
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-19
+last_updated: 2026-11-05
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -169,7 +169,7 @@ merge before this task is built (see "Dependencies").
 
 **Verified at design time.** The audit shipped no PoC for these three items, so this design wrote
 four PoCs. They are `_work/task008/zz_task008_poc_test.go` beside this artifact
-(`tmp/init027-orchestration/spine-init023/_work/task008/`). They compile against `61994fe` through
+(`local-scratch/spine-init023/_work/task008/`). They compile against `61994fe` through
 `go test -overlay _work/task008/overlay.json -run TestTASK008_ ./core/engine/`, and **all four fail
 there**:
 
@@ -1051,10 +1051,17 @@ must make it fail again.
       - nil, with no event, on the publish miss;
       - no retry execution on the `failStepWithClassification` miss;
       - the assignment row is cancelled on the `ClaimStep` miss.
+
+    > **Amended by the owner (2026-11-05)** (review round 2, Deviation 18): the last row reads "the
+    > assignment row is removed on the `ClaimStep` miss (cancelled when the assignment store lacks
+    > `engine.AssignmentRowDeleter`)".
 11. **Fallback is unchanged.** With a store lacking the capability (`mockRunStore`), the §3 writers
     call `UpdateStepExecution` exactly as before. `TestStepWrites_FallbackWithoutCapability` records
     the calls. The whole existing `go test ./core/engine/` suite passes without editing any existing
     test.
+
+    > **Amended by the owner (2026-11-05)** (review round 1, Deviation 2): "… without editing any
+    > existing test other than the TASK-005 tests that pinned the removed re-route".
 12. **Scheduler and gateway fallbacks.**
     - A submit that completes the step between `ListActiveStepExecutions` and the timeout write
       leaves it `completed`, with no `step_timeout` event and no `TimeoutsDetected` increment.
@@ -1104,6 +1111,12 @@ must make it fail again.
     - (i) After the submit, `run.CommitMeta["spine.evidence.<execution_id>"]` decodes to the same
       `branch_change` and `required_outputs_unchanged` as the event. A workflow outcome
       `commit: {spine.evidence.x: …}` is stripped (TASK-005's `stripReserved`).
+
+    > **Amended by the owner (2026-11-05)** (review round 2, Deviation 17): AC 14 gains case (j).
+    > Head ≠ previous, with the fake `Diff` returning no entry, gives `status:"unchanged"`,
+    > `changed_paths:0`, `reason:"head_moved_tree_unchanged"` and `required_outputs_unchanged:true`,
+    > and the Warn is logged only after the terminal write applied; on a real repository an empty
+    > commit, and a change plus its revert, are flagged the same way.
 15. **Event IDs.** Two attempts of the same step emit two distinct `step_completed` IDs containing
     their execution IDs. Re-routing a completed execution through the crash-recovery callback emits
     the same ID again. The publish step's event carries the documented base fields.
@@ -1177,6 +1190,12 @@ must make it fail again.
         any later execution exists;
       - is the only non-test caller pattern left for re-routing:
         `grep -n 'SubmitStepResult(' service/cmd/spine/*.go` prints nothing.
+
+    > **Amended by the owner (2026-11-05)** (review round 1, Deviations 4 and 6): the mutation
+    > clause reads "deleting the terminal check in `SubmitStepResult` fails the first; deleting it
+    > and the snapshot handoff fails the second". The `RecoverCompletedStep` row reads "… or when a
+    > later execution exists, except exactly one waiting successor under the deterministic id, which
+    > is resumed".
 22. *(Design check.)* **Auto-ack under the capability.** With a fake that implements
     `StepExecutionTransitioner`, a submission on an `assigned` execution completes and routes.
     The terminal write expects `(in_progress, actor)`. Mutation: re-using the pre-ack snapshot
@@ -1547,7 +1566,7 @@ after it.
 | `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (`s008_scen`, registry `s008_reg` migrated from `migrations/registry`) vs a `git archive main` export on `s008_scen_main` / `s008_reg_main` | 31 top-level FAIL on both trees, the **same sorted set** (the known pre-existing 30 + `TestWorkspace_ScopedServices`; e.g. the three `run_lifecycle_edge_cases_test.go` tests abort in fixture seeding — `INIT-EC1` is not a valid artifact id — before any engine code runs). Branch 200 PASS (`main` 198 + the two new scenarios), 0 `--- SKIP`. The named files: `cancel_from_partially_merged_test.go`, `publish_step_test.go`, `standard_run_test.go` all PASS; the `run_lifecycle_edge_cases_test.go` three pass on both trees with their fixture ids made numeric (`-overlay` only). Final run on `ccfe4ea4` (the earlier runs on `4ade922d` and `bd3b3c50` matched too). |
 | CI `scenario-git-http` job, its four steps scripted verbatim (`bash -eo pipefail`, own `s008_ci`) | `TestGitHTTP_*` 20 PASS (8 `TestGitHTTP_Push*`), `TestBootstrapInternalAdmin_*` 2 PASS, `TestWorkflowLifecycle_*` 4 PASS, `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS, 0 SKIP |
 | CI `git-floor` steps in `golang:1.26-bookworm` (git 2.39.5, read-only mounts, `GOPROXY=off`), plus `./core/engine/ ./adapters/scheduler/ ./adapters/store/ ./core/actor/` | all ok |
-| `golangci-lint run --new-from-rev main` (`tmp/init027-orchestration/bin/golangci-lint`) on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario ./service/scenariotest/...` | 0 issues each (5 gocritic findings on the first pass fixed in `be492156`) |
+| `golangci-lint run --new-from-rev main` (`local-scratch/bin/golangci-lint`) on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario ./service/scenariotest/...` | 0 issues each (5 gocritic findings on the first pass fixed in `be492156`) |
 | `--enable-only=gosec --build-tags=integration,scenario` on the touched packages | 0 issues |
 | `gofmt -l` on every changed `.go` file | empty (three touched files — `core/engine/release.go`, `adapters/scheduler/recovery.go`, `core/actor/gateway.go` — had pre-existing import-order drift that `gofmt -w` fixed) |
 | `git diff --stat main -- migrations/` | empty |
@@ -1835,7 +1854,7 @@ tasks stay recorded as defaults, pending the owner; none was re-decided.
 **Gates.** The code gates ran on `a6acc720` unless the row names `96cf8e40`. The only code
 change after `96cf8e40` is `a6acc720`'s `HEAD` rewrite in `MergeBases`, which no engine or
 scenario caller reaches (they pass `main` or object ids). Logs are in
-`spine-management-platform/tmp/init027-orchestration/w4/agents/int-spine/`.
+`local-scratch/w4/agents/int-spine/`.
 
 | Gate | Result |
 |---|---|
@@ -1969,7 +1988,7 @@ No SMP command failed, so there is no compatibility break, and no run against `.
 - Docker: the only containers were the `git-floor` run, the two Linux-only SMP runs and the
   `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
   VM had 5.8 GB free at the lowest check.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+- Logs: `local-scratch/w4/agents/gate-spine/`.
 
 ### Integration follow-up (wave 4) (2026-10-19)
 
@@ -1996,3 +2015,19 @@ into `core/engine/state_cas_test.go`:
 
 Gates and codex for the follow-up as a whole are in TASK-003's "Post-merge fix (wave 4
 integration)" note.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs, this task's store compare-and-swap
+  and step-output evidence step included. Remaining (owner): the wording amendments the Handoffs
+  list, for AC 11 and AC 21 (proposed in review round 1) and for AC 10 and AC 14 (review round 2;
+  Deviations 18 and 17).
+- **2026-11-05: AC 10, 11, 14 and 21 amended by the owner; Completed.** The owner adopted the
+  proposed wording for all four (inline notes on each AC): AC 10, a lost claim's row is removed;
+  AC 11, the two TASK-005 tests that pinned the removed re-route were edited; AC 14, case (j), a
+  moved head with an unchanged tree is flagged; AC 21, the mutation clause and the
+  `RecoverCompletedStep` successor rule. AC 20's scenario row stays "as on `main`" under the
+  orchestrator's rule for the known pre-existing failures. Those were the last open items; the
+  owner questions stay at their recorded defaults, and no AC needs the owner's decision.

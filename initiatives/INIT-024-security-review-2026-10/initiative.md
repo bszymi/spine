@@ -2,10 +2,10 @@
 id: INIT-024
 type: Initiative
 title: Security Review Remediation (2026-10)
-status: Pending
+status: In Progress
 owner: bszymi
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: related_to
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md
@@ -213,6 +213,8 @@ Task IDs are unique across the initiative, as in INIT-023.
 | EPIC-002 | TASK-003 | Checkout and merge amplification budget, pre-receive tree limits, SMP-facing `MeasureTree` | N-1 | L | yes (API; own half) |
 | EPIC-002 | TASK-004 | Read-path robustness: streamed listings, no DWIM fallback for reserved names, unforgeable log records, bounded evidence diff | N-6, N-10, N-11, N-12 | M | yes (shared listings) |
 | EPIC-002 | TASK-005 | Standalone push-gate races: case-folding storage, the review-freeze window, git slot starvation | N-8, N-9, N-13 | M | no (parity note) |
+| EPIC-002 | TASK-011 | Aggregate checkout bound: one writer per branch, bounded in-flight checkout bytes (added by the TASK-010 cross-task review) | X-1 | M | no at the bump |
+| EPIC-002 | TASK-012 | Push re-check: no answer once the decision's deadline has passed (added after GitHub CI run 42047981897) | R-1 | S | no |
 | EPIC-003 | TASK-006 | Workspace-scoped trusted-CIDR clone in shared mode | N-2 | S | no |
 | EPIC-003 | TASK-007 | Session and auth hygiene: SSE revalidation, no pre-auth ServiceSet, explicit `SPINE_ENV`, evidence provenance | N-14, N-15, N-16, N-17 | M | no |
 | EPIC-003 | TASK-008 | Wire the multi-workspace scheduler into shared-mode `spine serve` | P3-27 (open half) | M | no |
@@ -378,6 +380,19 @@ Each task works with its stated default. Tasks cite these as "INIT-024 owner que
   cross-task review (two skeptics: N-1 and N-2 closed) added TASK-011 (aggregate checkout bound),
   merged on Spine local `main` (`ea77cff6`) and into the close branch. Tasks stay In Progress until
   GitHub CI runs on the pushed closing commit. Not pushed (owner question 1: hold).
+- 2026-11-04: pushed with the owner's approval (owner question 1): Spine `main` `fd35f802` (the
+  closing commit), then `ce0b9c9e` (TASK-010's git-identity fix, found by the first run). GitHub CI
+  run 41875102030 at `ce0b9c9e` passed all 8 jobs; the first run, 41856447149 at `fd35f802`, failed
+  only `go test ./...`, on that identity defect. TASK-001 … TASK-008 and TASK-011 are Completed, and
+  EPIC-001, EPIC-002 and EPIC-003 with them. TASK-009 stays In Progress for one live check (AC 8,
+  the compose bring-up on a host that may pull), so EPIC-004, TASK-010 (its AC 1), EPIC-005 and the
+  initiative are In Progress. With the owner: the repository settings in §7d, and the owner
+  questions, which stay at their recorded defaults.
+- 2026-11-05: GitHub CI run 42047981897 at `main` `39841330` (an INIT-023 status commit) failed one
+  subtest of TASK-005's apply-time re-check, which showed that the re-check server could still
+  answer just after a decision's deadline. TASK-012 (EPIC-002) was added and is Completed: the server
+  now sends no answer once the decision's context has ended. EPIC-002 stays Completed; SMP's pin is
+  unaffected (`service/internal` is not importable by SMP).
 
 ---
 

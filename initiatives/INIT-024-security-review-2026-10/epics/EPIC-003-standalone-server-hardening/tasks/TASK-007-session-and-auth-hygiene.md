@@ -2,12 +2,12 @@
 id: TASK-007
 type: Task
 title: "Session and auth hygiene: SSE revalidation, no pre-auth ServiceSet, explicit SPINE_ENV, evidence provenance"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
@@ -220,7 +220,7 @@ SMP, and SMP's `dev/lint-spine-internals` forbids `service/...` and `cmd/...`).
 
 "Red at the base" = the branch's new test file copied into a `git archive init/INIT-024-scaffold`
 extracted under scratch `t007/base` (since cleaned of the copies; re-create with `git archive
-init/INIT-024-scaffold | tar -x -C <dir>`). Logs are in SMP `tmp/init027-orchestration/i24/t007/`.
+init/INIT-024-scaffold | tar -x -C <dir>`). Logs are in SMP `local-scratch/i24/t007/`.
 
 1. **Regression N-14** — `TestEventStream_ClosesOnRevocation`
    (`service/internal/gateway/sse_revalidation_test.go`), the SA-3 PoC ported: a real `httptest`
@@ -667,7 +667,7 @@ single mode. Later coordination involving this task:
   context's logger already carries; they now log it once (`TestPreauthLog_NamesTheWorkspaceOnce`,
   red without the change: every line carried two).
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |
@@ -695,3 +695,10 @@ the line only on an I/O error or a crash. `TestPreauth_PendingRenormalisationIsI
 cannot bypass either (`5ae1e563`, `5ae28915`). The property is unchanged: a pending
 renormalisation is invisible to an unauthenticated caller on `/api/v1` and `/git`. Gates: see
 TASK-003's Integration A, phase 4.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs. Every AC is met, and the owner questions stay at their
+  recorded defaults.

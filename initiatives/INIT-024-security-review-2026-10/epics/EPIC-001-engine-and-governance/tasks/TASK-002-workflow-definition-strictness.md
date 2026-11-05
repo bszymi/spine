@@ -2,12 +2,12 @@
 id: TASK-002
 type: Task
 title: "Workflow definition strictness: shipped validate steps fail closed, one YAML document, nested workflow directories guarded"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-001-engine-and-governance/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-001-engine-and-governance/epic.md
@@ -197,7 +197,7 @@ workflow definition, or the guard over it, is less strict than the rest of the s
 
 Branch `init/INIT-024-TASK-002-workflow-definition-strictness`, cut from `init/INIT-024-scaffold`
 `12376b55` (no Go file differs from `a560c210`). Diff base: `git diff init/INIT-024-scaffold...HEAD`.
-Scratch (git-ignored, SMP working tree): `tmp/init027-orchestration/i24/t002/`. Databases used the
+Scratch (git-ignored, SMP working tree): `local-scratch/i24/t002/`. Databases used the
 prefix `s24002_` and were dropped.
 
 ### Owner questions (defaults recorded, pending the owner)
@@ -368,7 +368,7 @@ sub-session (`source: {"subagent":"review"}`, `cwd` = the worktree), model confi
 
 ### Review round 1 (no P1/P2; three P3s fixed)
 
-Report: SMP `tmp/init027-orchestration/i24/t002-reviews/REVIEW.md`, over `f6c81316`.
+Report: SMP `local-scratch/i24/t002-reviews/REVIEW.md`, over `f6c81316`.
 
 1. **The backstop governed the whole directory** (`422cb162`). It added each matched file's parent
    as a prefix entry, so a script, README or nested file the same merge changed beside a
@@ -441,7 +441,7 @@ TASK-001's `recordLifecycleStarter` (different functions); `go vet` of `core/eng
 plus `core/workflow`, `workflows` and `adapters/projection` passed at the phase-1 head. No
 coordination commit was needed.
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |
@@ -462,3 +462,10 @@ Codex (`codex review --base main`, plain, from the integration worktree): round 
 review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
 actionable regressions were identified"). It covered every merged task and coordination commit,
 including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs; GitHub CI was the one item under "Not run". Every AC is met,
+  and the owner questions stay at their recorded defaults.

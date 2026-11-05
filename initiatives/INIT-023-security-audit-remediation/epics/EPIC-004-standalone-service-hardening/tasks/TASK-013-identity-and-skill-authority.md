@@ -2,12 +2,12 @@
 id: TASK-013
 type: Task
 title: "Admin-only skill management, actor role ceiling, and bootstrap-admin token hygiene"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-10-07
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
@@ -136,7 +136,7 @@ All seven audit PoCs reproduce unchanged with `go test -overlay`:
 The design below was prototyped against `61994fe` and SMP `80995559` with `go test -overlay`. No
 repository file was changed.
 
-- Prototype sources: `spine-management-platform/tmp/init027-orchestration/spine-init023/prototypes/TASK-013/`.
+- Prototype sources: `local-scratch/spine-init023/prototypes/TASK-013/`.
 - Overlays: `…/_work/task013/`.
 
 Results:
@@ -1144,7 +1144,7 @@ TASK-012 carries this change, and that task's gates must include AC 18.
 The design was checked adversarially against Spine `61994fe` and SMP `80995559`:
 - the audit PoCs were re-run against HEAD and against the prototype overlay;
 - new probes were run with `go test -overlay`, under
-  `tmp/init027-orchestration/spine-init023/_work/task013-check/`;
+  `local-scratch/spine-init023/_work/task013-check/`;
 - SMP callers were grepped.
 
 Neither repository was modified. The designer's text is kept, and each change is marked inline as
@@ -1287,7 +1287,7 @@ the fix.
 | 13 | `TestBootstrapSecurity_AdminMintedTokensSurviveRotation` (a `tok_` token named `smp-admin-bootstrap`, made strictly older than the rotation). |
 | 14 | `service/cmd/spine/smp_admin_token_test.go`: `TestValidateSMPAdminToken` (the AC table plus the 32-char/8-distinct floor both sides; no message echoes the token, each names the variable and the remedy) and `TestServeRefusesWeakSMPAdminTokenInProduction`. |
 | 15 | Only the Design §12 tests changed (plus gofmt import order in those files, Deviation 6); no existing `Test…` in `serve_delivery_test.go` changed. `go build ./...`, `go vet ./...`, `go test ./...` pass. |
-| 16 | `bootstrap_admin_idempotency_test.go` updated (old bearer 401 via new `…ExpectingUnauthorized` steps at both sites, id regex at both sites, old row revoked / new row live in both row-count steps). **Partial against the literal gate:** both `TestBootstrapInternalAdmin_*` scenarios pass against Postgres (filtered run, command below, and CI's `scenario-git-http` job step `^TestBootstrapInternalAdmin_`), but `make test-scenario` as a whole is **red**, with the same 30 pre-existing failures as `main`. The filtered run stands in for the gate — **Deviation 10, which needs the owner's explicit acceptance**. |
+| 16 | `bootstrap_admin_idempotency_test.go` updated (old bearer 401 via new `…ExpectingUnauthorized` steps at both sites, id regex at both sites, old row revoked / new row live in both row-count steps). **Partial against the literal gate:** both `TestBootstrapInternalAdmin_*` scenarios pass against Postgres (filtered run, command below, and CI's `scenario-git-http` job step `^TestBootstrapInternalAdmin_`), but `make test-scenario` as a whole is **red**, with the same 30 pre-existing failures as `main`. The filtered run stands in for the gate — **Deviation 10, which needs the owner's explicit acceptance** (*accepted 2026-11-05*). |
 | 17 | `dev/lint-boundaries.sh` OK with no allowlist change; golangci-lint 0 new issues; `cmd/embed-smoketest` OK. |
 | 18 | SMP compatibility gate below: all pass, no SMP file changed. |
 | 19 | `git diff main...HEAD -- migrations/` is empty; `adapters/store/interfaces.go` (`store.AuthStore`) unchanged. |
@@ -1359,7 +1359,7 @@ Run with `go test -overlay` on mutated copies (no repository file touched); **33
 9. **The runbook section is §5.6** under "5. Rotating Credentials"; its failure-modes table adds the
    Warn/Error log lines operators will see.
 10. **AC 16's gate is a filtered scenario run, not `make test-scenario`** (recorded in review round
-    2; **needs the owner's explicit acceptance**). AC 16 says "`make test-scenario` passes". It
+    2; **needs the owner's explicit acceptance**; *accepted by the owner on 2026-11-05*). AC 16 says "`make test-scenario` passes". It
     does not, on this branch or on `main`: run sequentially on each with its own database, both fail
     the **identical 30 tests** (fixture, harness, actor-API and gateway scenarios — none touches a
     route or code path TASK-013 changes; see Review round 2), which is why Spine CI scopes its
@@ -1395,7 +1395,7 @@ No design point required a schema change.
 
 ### SMP compatibility gate (AC 18)
 
-`/Users/bartoszszymichowski/42sid/i23/s-T013/smp`, detached at SMP `main` `7d4e7cc9`, `../spine` =
+`local-worktree`, detached at SMP `main` `7d4e7cc9`, `../spine` =
 this worktree, no `vendor/`, no `tmp/`, no SMP file changed (`git status` clean after every step).
 Databases: shared PostgreSQL 17.10 + pgvector, own `s013_smp_it` (platform migrations via
 `go run ./dev/apply-migrations -set platform -dir migrations`) and `s013_spine_rt`
@@ -1512,7 +1512,7 @@ Named in the CHANGELOG (log shape).
 | `git diff main...HEAD -- migrations/`; `store.AuthStore` | empty; unchanged (no `adapters/` change at all) |
 | `codex review --base main` (plain, on `26e9a84`) | "No actionable regressions were found in the changes relative to the supplied merge base." No P1/P2 findings; nothing rejected. |
 
-**SMP compatibility gate (round 1).** `/Users/bartoszszymichowski/42sid/i23/s-T013/smp` at
+**SMP compatibility gate (round 1).** `local-worktree` at
 `7d4e7cc9`, `../spine` = this worktree, no `vendor/` or `tmp/`, `git status` clean throughout. The
 only round-1 change that reaches SMP is in `core/auth/bootstrap.go`: a Warn in a branch SMP's
 single-bearer calls never take, and comments.
@@ -1586,7 +1586,7 @@ test), `6d746fa` (docs), then this notes commit.
 | `git diff main...HEAD -- migrations/`; `adapters/` | empty; untouched (no schema change) |
 | `codex review --base main` (plain, on `6d746fa` plus this file's uncommitted notes) | "No actionable regressions were identified." No P1/P2 findings; nothing rejected. |
 
-**SMP compatibility gate (round 2).** `/Users/bartoszszymichowski/42sid/i23/s-T013/smp` at
+**SMP compatibility gate (round 2).** `local-worktree` at
 `7d4e7cc9`, `../spine` = this worktree, `git status` clean throughout. The only round-2 change that
 reaches SMP is **comments** in `core/auth/bootstrap.go` (test files do not reach SMP).
 
@@ -1647,3 +1647,18 @@ file, after which `go vet` and `go test -race ./adapters/git/...` were re-run, o
 | SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 38 SMP packages depending on a changed Spine package (`go list -test -deps`) plus `./internal/customer/...` (67 packages): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2i_smp_spine_runtime` and `s2i_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. Extra: eventdelivery, projectionwriter, stepevents testgate: 35 passed, 6 allowed skips. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope). |
 
 All `s2i_*` databases were dropped afterwards; the only container started was removed.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs, the `^TestBootstrapInternalAdmin_`
+  step that Deviation 10 relies on included. Remaining (owner):
+  - **AC 16:** the explicit acceptance of Deviation 10, the filtered scenario run and that CI step
+    in place of `make test-scenario`.
+- **2026-11-05: Deviation 10 accepted by the owner; Completed.** The owner accepted Deviation 10
+  for AC 16: the filtered Postgres scenario run and CI's `scenario-git-http` step
+  `^TestBootstrapInternalAdmin_` stand in for `make test-scenario`, whose 30 failures are the same
+  on `main` and outside this task. That was the last open item. The owner questions stay at their
+  recorded defaults (Orchestrator rulings and owner-question defaults, above), and no AC needs the
+  owner's decision.

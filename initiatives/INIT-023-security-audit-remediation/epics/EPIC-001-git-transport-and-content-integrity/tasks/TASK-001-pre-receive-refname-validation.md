@@ -2,12 +2,12 @@
 id: TASK-001
 type: Task
 title: "Reject NUL/control-byte and invalid refs on every pre-receive command line"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-10-07
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -130,7 +130,7 @@ documentation touches.
 >   - `KNOWN-LIMITATIONS.md` → Security Notes;
 >   - the `CHANGELOG.md` "Unreleased" staging section.
 > - **Prototype.** The prototype under
->   `tmp/init027-orchestration/spine-init023/prototypes/TASK-001/` (`overlay.json`) implements
+>   `local-scratch/spine-init023/prototypes/TASK-001/` (`overlay.json`) implements
 >   exactly these three non-test files. It also carries the five test files named in the ACs.
 
 ## Design
@@ -332,7 +332,7 @@ All existing tests pass un *[designer's text truncated here]*
 > mid-sentence at 11,330 bytes (last written 19:22). The rest of §5 and every later section were
 > never written: Decisions, Owner questions, Acceptance Criteria, Out of scope and Implementation
 > Notes. **Everything from here to the end of the file is design-check text.** It is built from:
-> - the designer's prototype (`tmp/init027-orchestration/spine-init023/prototypes/TASK-001/`);
+> - the designer's prototype (`local-scratch/spine-init023/prototypes/TASK-001/`);
 > - the sibling SMP INIT-027/EPIC-004 TASK-001 (`batch7/E4-TASK-001-nul-ref-push-gate.md`), kept at
 >   parity;
 > - the runs recorded against each AC.
@@ -668,6 +668,11 @@ without answers, using the stated defaults.)*
        - a byte-identical commit.
      - These scenarios skip locally without `SPINE_TEST_DATABASE_URL`, so a local run proves nothing
        for them.
+   > **Owner ruling (2026-11-05).** Both recorded deviations are ratified: the CI job runs the
+   > `TestGitHTTP_*` scenarios this AC names (it fails on any skip), in place of the whole scenario
+   > suite, whose 30 failures are the same on `main` and outside this task; and "`make lint`" is
+   > read as "no new issues" (0 new; the repository-wide baseline is unchanged). See Deviations
+   > and Review round 1.
 10. **SMP compatibility (this task makes no SMP change).**
     - **Suites:**
       - with `../spine` at this task's merge commit, SMP's CI (which has no `vendor/`) is green;
@@ -711,6 +716,11 @@ without answers, using the stated defaults.)*
     - This PR's merge commit is the one that SMP's later `.spine-revision` bump names.
     - The PR description links SMP INIT-027/EPIC-004 TASK-001.
     - It states that SMP's parser fix does **not** wait for this task.
+    > **Owner ruling (2026-11-05): met by the direct merge.** No PR was opened. The task merged to
+    > `main` as `ee3c249e`, which is on GitHub `main`. SMP's later `.spine-revision` bumps name
+    > `main` commits that contain it (`49fad9c0`, then `ce0b9c9e`). The PR description it would
+    > have carried is recorded in Implementation Notes ("PR description (draft, AC 13)"): it links
+    > SMP INIT-027/EPIC-004 TASK-001 and states that SMP's parser fix does not wait for this task.
 
 ## Out of scope / follow-ups
 
@@ -922,7 +932,8 @@ The worktree itself was never reverted.
   optional).
 - **Added: the byte-sweep test, and the delete test's `release/*` row.** These keep parity with
   SMP AC 5 and AC 2.
-- **AC 9, CI wiring scoped to `TestGitHTTP_*`.** Closest safe alternative.
+- **AC 9, CI wiring scoped to `TestGitHTTP_*`.** Closest safe alternative. *(Ratified by the
+  owner on 2026-11-05.)*
   - **Why scoped.** The full `go test -tags scenario ./service/scenariotest/...` is **not green on
     `main`**. Locally, `-p 1` against PostgreSQL 17 gave the same 31-failure set on a pristine
     `main` export and on this branch (before the fixture fix); after it, 30. The failures are
@@ -1161,7 +1172,8 @@ against real git and Docker) before anything was changed.
     scenario package.
   - **Reading of the AC.** A green `make lint` needs a repository-wide cleanup. That is out of
     scope for a P1 fix whose diff scope AC 11 limits. AC 9's lint clause is therefore read as
-    "no new issues", and that is recorded as a deviation.
+    "no new issues", and that is recorded as a deviation. *(Ratified by the owner on
+    2026-11-05.)*
 - **AC 4: SHA-256 PASS not yet observed on the ubuntu runner. Partly closed.**
   - **Touched packages on Linux.** In `golang:1.26-bookworm` (Linux, git 2.39.5, `CI=true`), every
     touched-package test passes:
@@ -1513,6 +1525,40 @@ integration branch (SMP TASK-001 to TASK-003).
 > this PR.
 > It ships independently, with no `.spine-revision` bump. This PR's merge commit is the one SMP's
 > later `.spine-revision` bump names (SMP TASK-012 adds the `Evaluate` pin test).
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. That closes this task's Spine-side
+  post-push clauses: AC 4 (the SHA-256 test fails rather than skips under `CI`, so it passed on the
+  ubuntu runner) and AC 9's `scenario-git-http` job on GitHub. Remaining:
+  - **AC 9:** the two recorded deviations, the CI job scoped to `TestGitHTTP_*` and "`make lint`
+    passes" read as no new issues, still await the owner's or the orchestrator's ratification
+    (review round 2).
+  - **AC 10:** SMP's CI green with `../spine` at a pin that contains this task (SMP pins
+    `49fad9c0`). SMP's first run since the push, 41859131740 at SMP `main` `efe1dec2`, failed
+    `test`, `integration` and `images` for SMP-side causes, which SMP is fixing. *Met
+    2026-11-05 (below).*
+  - **AC 13 (orchestrator):** no PR was opened; the task merged to `main` as `ee3c249e`, which
+    reached GitHub with the push. The PR description is the draft above. Record that as the
+    evidence, or amend the AC.
+- **2026-11-05: AC 10 met; stays In Progress.** SMP CI run 42001537129 at SMP `main` `6bd97ac9`
+  passed every job: test, integration, rds-compat (trusted and untrusted), images, docker, vuln,
+  lint, build, both frontends, alert-rules, changes and build-context (terraform was skipped by its
+  paths filter). That commit's `.spine-revision` is Spine `ce0b9c9e`, which contains this task
+  (its merge `ee3c249e`). Later runs are green too: SMP CI 42006928212 and Scenario Tests
+  42006925337 (90 passed, 0 failed, 2 skipped), both at SMP `df63f5b9`. Remaining, both with the
+  owner or the orchestrator:
+  - **AC 9:** ratify the two recorded deviations (above).
+  - **AC 13:** record the merge without a PR as the evidence, or amend the AC (above).
+- **2026-11-05: AC 9 deviations ratified and AC 13 recorded by the owner; Completed.** The owner
+  ratified AC 9's two recorded deviations: the CI job scoped to the `TestGitHTTP_*` scenarios the
+  AC names, and "`make lint`" read as no new issues. For AC 13 the owner accepted the direct merge
+  as the evidence: `ee3c249e` is on GitHub `main`, SMP's `.spine-revision` bumps (`49fad9c0`, then
+  `ce0b9c9e`) contain it, and the PR description draft above is the record. Those were the last
+  open items; the owner questions stay at their recorded defaults, and no AC needs the owner's
+  decision.
 
 ## Design check
 

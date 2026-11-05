@@ -2,12 +2,12 @@
 id: TASK-017
 type: Task
 title: "Declared artifact-status lifecycle and run-owned merge cascade (opt-in)"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-16
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
@@ -1174,13 +1174,13 @@ real `git.CLIClient` unless stated, and assert `main` (and the bound SHA) unchan
 An adversarial check of this design against Spine `61994fe` and SMP `80995559`. The designer's
 text is kept; every change is marked **Design-check note (2026-10-06)** in place.
 
-**Reproduced first.** The four design-phase PoCs in `tmp/init027-orchestration/spine-init023/_work/task017/`
+**Reproduced first.** The four design-phase PoCs in `local-scratch/spine-init023/_work/task017/`
 pass on `61994fe` via `go test -overlay` (standard run publishes any status; owned illegal
 transition; workflow create accepts foreign `commit.status`; planning cascade touches exactly the 3
 added artifacts). The corpus check counts 11 Spine and 10 SMP `commit.status` outcomes, all inside
 the proposed table.
 
-**New design-check PoCs** (`tmp/init027-orchestration/spine-init023/_work/task017-check/`, run
+**New design-check PoCs** (`local-scratch/spine-init023/_work/task017-check/`, run
 from `../spine` with `go test -overlay <overlay>.json -run TestDesignCheck_ -v ./core/engine/`; no
 file is written to either repository, and the Spine tree stays clean):
 
@@ -1411,7 +1411,7 @@ and the replay SC gate (deviation 8); found with tests, not by a reviewer.
 
 ### SMP compatibility gate
 
-SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T017/smp`, detached at SMP `main`
+SMP checkout `local-worktree`, detached at SMP `main`
 `1ae9b0e3` (`.spine-revision` `d23b897`), `../spine` → this worktree, `GOFLAGS=-mod=readonly`, no
 SMP edit:
 
@@ -1604,7 +1604,7 @@ asks under the bound name → `SCGateMainHolds`, `MainSideRename`; MR14 `RepoPat
 | Mutants MR1–MR15 re-run on the final code | all caught |
 | `codex review --base main` (plain) | on `194bc6bd`: review sub-session `01a14475-b46b-7171-ba3b-361e4adf628c`, model `gpt-6.1-sol`: two P2 (R1-7, R1-8), both real and fixed in `629f9b9d`. On `629f9b9d`: sub-session `01a14481-bab9-7cf1-8c8d-34c9c0004485`, model `gpt-6.1-sol`: "No actionable defects were identified in the changes relative to the specified merge base." |
 
-**SMP compatibility gate (final code).** `/Users/bartoszszymichowski/42sid/i23/s-T017/smp` at SMP
+**SMP compatibility gate (final code).** `local-worktree` at SMP
 `main` `1ae9b0e3`, `../spine` → this worktree, `GOFLAGS=-mod=readonly`, no SMP edit: `go build
 ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject` pass;
 `go test -race -count=1 -p 4` on the 12 SMP packages importing a changed Spine package
@@ -1663,7 +1663,7 @@ in KNOWN-LIMITATIONS ("pairs renames with git's rename detection"), so nothing c
 | No pre-existing test file modified (`git diff --diff-filter=MDR main...HEAD -- '*_test.go'`) | empty |
 | `codex review --base main` (plain, no model override) | on `220d817a`: review sub-session `01a144c9-75e8-7eb1-9894-4ca87cff048a`, model `gpt-6.1-sol` (every `model` field in the session): "No actionable regressions were identified. The lifecycle enforcement, merge-result verification, and production wiring are consistent with the documented scope and limitations." No finding to fix or reject |
 
-**SMP compatibility gate (review round 2, on `220d817a`).** `/Users/bartoszszymichowski/42sid/i23/s-T017/smp`
+**SMP compatibility gate (review round 2, on `220d817a`).** `local-worktree`
 at SMP `main` `1ae9b0e3` (`.spine-revision` `d23b897`), `../spine` → this worktree,
 `GOFLAGS=-mod=readonly`, no SMP edit:
 - `go build ./...` and `go vet ./...` (plain, `-tags integration`, `-tags scenario`, `-tags faultinject`) pass.
@@ -1749,7 +1749,7 @@ TASK-006's note).
 **Gates.** The code gates ran on `a6acc720` unless the row names `96cf8e40`. The only code
 change after `96cf8e40` is `a6acc720`'s `HEAD` rewrite in `MergeBases`, which no engine or
 scenario caller reaches (they pass `main` or object ids). Logs are in
-`spine-management-platform/tmp/init027-orchestration/w4/agents/int-spine/`.
+`local-scratch/w4/agents/int-spine/`.
 
 | Gate | Result |
 |---|---|
@@ -1889,4 +1889,11 @@ No SMP command failed, so there is no compatibility break, and no run against `.
 - Docker: the only containers were the `git-floor` run, the two Linux-only SMP runs and the
   `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
   VM had 5.8 GB free at the lowest check.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+- Logs: `local-scratch/w4/agents/gate-spine/`.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** Spine `main` was pushed on 2026-11-04 with the owner's approval. GitHub
+  CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802` plus INIT-024
+  TASK-010's git-identity fix) passed all 8 jobs, the status-lifecycle scenarios and pooled
+  validator step included. Every AC is met, and the owner questions stay at their recorded defaults.

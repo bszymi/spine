@@ -2,10 +2,10 @@
 id: TASK-011
 type: Task
 title: "Projection sync integrity: close the workflow parser differential, stop dropped Diff errors, follow the authoritative ref, scope artifacts_dir"
-status: In Progress
+status: Completed
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-14
+last_updated: 2026-11-05
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -352,7 +352,7 @@ Verified with overlay probes on 2026-10-06:
 
 > **Design-check note (2026-10-06): two content classes pass `Parse` but must still be rejected
 > here, or they wedge the sync as "infrastructure".** Re-verified with an independent overlay
-> probe (`tmp/init027-orchestration/spine-init023/design-check/task011/zz_probe_task011_test.go`).
+> probe (`local-scratch/spine-init023/design-check/task011/zz_probe_task011_test.go`).
 >
 > 1. **U+0000 in any string.** `name: "a\0b"`, or a `\0` inside `commit:` / `config:` map
 >    values, passes `Parse` *and* the round trip.
@@ -1306,6 +1306,8 @@ Notes. The audit PoCs become the tests in ACs 4, 12, 15 and 19.
       engine.AuthoritativeBranch`.
     - The same assertion holds for `serve_wiring`.
     - `make test-scenario` passes with the harness option set.
+      *Waived by the owner (2026-11-05): the suite's 30 failures are the same on `main` (0
+      outcome differences, review round 2 G3) and outside this task.*
     - *Design-check amendment (2026-10-06).* Wiring over a repository with no `refs/heads/main`
       logs exactly one startup Warn naming `refs/heads/main` (§4 note, item 4) and does not fail
       startup.
@@ -1370,6 +1372,12 @@ Notes. The audit PoCs become the tests in ACs 4, 12, 15 and 19.
       `TestWorker_Integration_ProjectsSeededRepo` (still `idle`, `task-default` present) and
       `TestWorker_Integration_SurfacesMalformedArtifact` (still `error`).
     - No SMP edits are allowed. The commands and results go in Implementation Notes.
+    - *Owner ruling (2026-11-05): met through SMP's GitHub CI.* The local run replayed the two
+      DB-backed worker tests as overlay twins (Deviation 11), because the local server allowed no
+      `ws_*` databases. SMP's GitHub CI runs the literal suites: the `test` job runs every listed
+      package, and the integration job runs the DB-backed ones with `TEST_PROVISIONING_DSN`, failing
+      on any unexpected skip. SMP CI 42001537129 at SMP `6bd97ac9`, whose `.spine-revision` is Spine
+      `ce0b9c9e` (it contains this task), passed every job.
 25. **SMP seeded corpus, run locally.** A `go test -overlay` test (no files written into SMP) runs
     `FullRebuild` over a temporary repository seeded from SMP's `governedsources` tree. The tree
     includes `workflows/steps/*.yaml`. The result:
@@ -1383,10 +1391,16 @@ Notes. The audit PoCs become the tests in ACs 4, 12, 15 and 19.
     - `go test -race ./adapters/projection/... ./core/workflow/... ./core/artifact/...` is green.
     - `go test -tags integration ./adapters/projection/...` is green against the test DB.
     - `make test-scenario` is green.
+      *Waived by the owner (2026-11-05), as for AC 18.*
     - Lint is at the existing baseline, including the ADR-017 boundary lint.
     - `codex review` leaves no open P1 or P2.
     - The four original audit PoCs, compiled with `-overlay` against the merged tree, now fail
       their vulnerability assertions. The PR body records this.
+      *No PR was opened (the task merged directly to `main`); Implementation Notes, "Audit PoCs
+      (AC 26)", is the record. On `main` itself (Spine `49fad9c0`), SMP INIT-027 EPIC-004
+      TASK-012's PoC sweep (2026-10-23) found the same outcomes as the amendment below expects:
+      refused, except the two by-design cases (the root `workflows/` file, and the zero-value
+      service that follows `HEAD`).*
     - *Design-check amendment (2026-10-06): the per-PoC expected outcome against the merged tree.*
       All five PoC functions reproduce at `61994fe` (re-run 2026-10-06).
       - **`…FoldedKeyDifferential` and `…FoldedOutcomeOverride`:** fail at `projectWorkflow`,
@@ -1501,7 +1515,7 @@ Adversarial design check, 2026-10-06, against Spine `61994fe` and SMP `80995559`
   was probed against attack bodies, the 15 shipped files, and all 55 workflow-shaped Go string
   literals in both repositories.
 - A git 2.54 scratch repository tested ref shadowing and gitlink reads.
-- The probe sources and overlays are in `tmp/init027-orchestration/spine-init023/design-check/task011/`.
+- The probe sources and overlays are in `local-scratch/spine-init023/design-check/task011/`.
 
 **What held:**
 - Every `file:line` reference that a design claim rests on was opened, about 60 across both
@@ -1792,7 +1806,7 @@ committed):
 
 ### SMP compatibility gate
 
-`/Users/bartoszszymichowski/42sid/i23/s-T011/smp` detached at SMP `7d4e7cc9`, `../spine` = this
+`local-worktree` detached at SMP `7d4e7cc9`, `../spine` = this
 worktree, no `vendor/`, no SMP file modified (`git status` empty after every run). Packages: the 31
 that depend on a changed Spine package (`go list -deps`) plus `internal/docmemory`.
 
@@ -2208,3 +2222,20 @@ Recorded in full on TASK-003 ("Adversarial review of the follow-up"); fixed in `
   `TestIncrementalSync_FileEntryRecordingATreeOrCommitAdvances` pin both; each fails without the
   fix. AC 28 (branch validation ignores `ReadErrors`) is unchanged: such a file is a refusal now,
   not a read error, so `TestValidateBranch_FileEntryRecordingANonBlobObjectFails` fails it.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. Remaining (owner; gaps G3 and G4 of
+  review round 2):
+  - **AC 18 (third bullet) and AC 26:** a waiver or an amended AC for "`make test-scenario` passes"
+    (the failures equal `main`'s).
+  - **AC 24:** a waiver or a deferral for the `TEST_PROVISIONING_DSN` SMP suites.
+- **2026-11-05: owner rulings on AC 18, AC 24 and AC 26; Completed.** The owner waived "`make
+  test-scenario` passes" in AC 18 (third bullet) and AC 26: the suite's 30 failures are the same on
+  `main` (0 outcome differences) and outside this task. For AC 24 the owner accepted SMP's GitHub
+  CI as the run of the literal suites: SMP CI 42001537129 at SMP `6bd97ac9` (`.spine-revision`
+  `ce0b9c9e`) ran them, the DB-backed ones with `TEST_PROVISIONING_DSN`, and passed. Those were
+  the last open items; the owner questions stay at their recorded defaults, and no AC needs the
+  owner's decision.

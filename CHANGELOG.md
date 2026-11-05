@@ -6,6 +6,58 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-005 TASK-010: GitHub CI after the push — git identity)
+
+The first GitHub CI run after the INIT-023/INIT-024 push (run 41856447149) failed three tests:
+GitHub's runner gives git no identity, while the machine every earlier run used had one. The tests
+were right: the paths they exercise fail the same way in a real deployment with no git identity. No
+runtime schema change.
+
+### Fixed
+
+- **Commits and merges no longer need a git identity on the host.** Where git has none — Spine's
+  standalone image (its `spine` user has no GECOS name, and the image configures no `user.name`),
+  or any host with no `user.name`/`user.email` in any git config — every commit and merge the git
+  client made in a repository Spine did not provision itself was refused "Committer identity
+  unknown": the authoritative repository an operator mounts, a workspace cloned from an existing
+  Spine repository (provisioning sets a repo-local identity only on the repositories it
+  initialises), and every code-repository clone. Artifact and workflow writes failed `500
+  git_error`, and a governed merge failed its run. Now, when git cannot resolve an identity, the
+  commit records `Spine <spine@spine.local>` (the quarantine commit's identity since INIT-023
+  TASK-012) as committer, and as author only where the caller names none (merge commits, system
+  commits). An actor's commit keeps the actor as author.
+
+### Changed (operators)
+
+- An identity git resolves is kept exactly: the repository's own config, the global or system
+  config, `GIT_COMMITTER_*`/`GIT_AUTHOR_*`, or git's own guess from the passwd entry and the host
+  name where that guess works. Configure one when commits must carry another committer. A partial
+  identity (a name without an address) is replaced whole by Spine's.
+
+### Changed (embedders)
+
+- **`git.CLIClient.Commit`, `Merge` (every strategy but `fast-forward`), `MergeBound`,
+  `CommitFilesOnto` and `git.StageAndCommit` probe the identity first:** `git var
+  GIT_COMMITTER_IDENT`, and `GIT_AUTHOR_IDENT` where the commit has no explicit author, in the
+  repository with the command's environment — skipped when that environment names the identity
+  completely. When git resolves it, the commit or merge runs exactly as before (same argv, same
+  environment, same commit). Only git's own identity refusal brings in the fallback; a probe that
+  fails for any other reason adds nothing. Embedders that configure a committer (SMP's embedded
+  scopes set one repo-local) make the same commits as before, at the cost of one or two `git var`
+  processes per commit or merge.
+- New test helper `testutil.NoGitIdentity(t)`: no git config, no identity variables, and
+  `user.useConfigOnly=true`, so git refuses to guess an identity on any host.
+
+### Tests and CI
+
+- `make test` and the `ci.yml` `go test ./...` step run with no global or system git config and
+  `user.useConfigOnly=true`, so a test that depends on the host's git identity fails locally as it
+  fails on GitHub. `TestP36_R12_ReviewFreeze_InjectionNeverReachesMain` now also checks that the
+  governed merge happened: on the identity-less runner it failed the run and the test passed
+  vacuously.
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-002 TASK-011: aggregate checkout bound)
 
 Closes the P3 the TASK-010 cross-task review found next to N-1: the checkout budget bounded one

@@ -2,12 +2,12 @@
 id: TASK-005
 type: Task
 title: "Standalone push-gate races: case-folding storage, the review-freeze window, git slot starvation"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-27
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
@@ -178,7 +178,7 @@ is standalone-only; it carries a parity note for SMP's own gateway.
 `init/INIT-024-wave3-base` `55789b28` (integration A with TASK-003 merged: TASK-001/002/003/006/007/
 008/009 in). Run on macOS (APFS, case- and normalization-insensitive), git 2.54.0, go 1.26.10, and on
 git 2.39.5 in the local `golang:1.26-bookworm` image (Linux, case-sensitive) for the `git-floor` job.
-Scratch logs: SMP repo `tmp/init027-orchestration/i24/t005/`. Line references below are to the
+Scratch logs: SMP repo `local-scratch/i24/t005/`. Line references below are to the
 branch.)*
 
 ### Rulings and owner-question defaults (recorded, pending the owner)
@@ -436,7 +436,7 @@ is internal to Spine), so it needs its own:
 
 ### Review round 1 (2026-10-28; security + correctness review of `f4baae12`: 0 P1/P2, 2 P3, P4s)
 
-Report: SMP repo `tmp/init027-orchestration/i24/t005-reviews/REVIEW.md`; the reviewer's probes and
+Report: SMP repo `local-scratch/i24/t005-reviews/REVIEW.md`; the reviewer's probes and
 mutants `i24/t005-rev/`. Rulings by the coordinator. Red runs at `f4baae12`: `go test -overlay`
 mapping the five githttp source files and the seams file to their `f4baae12` content (plus a
 no-op `pgrSetProbeRetry`), the round-1 internals-only test file removed (`rr1/overlay-f4ba.json`,
@@ -542,3 +542,11 @@ Gates at `fcf54411`:
 Codex (`codex review --base init/INIT-024-integration-a-p4`, `gpt-6.1-sol`): round 1, session
 `01a18ee8-725f-7db2-81ac-f88c8ee60e53` on `fcf54411`: no findings. No second round was needed.
 Statuses stay as they are; nothing is pushed.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs, among them `git-floor` on the pinned image and the
+  `scenario-git-http` job on Linux storage, where the real probe runs. Every AC is met, and the
+  owner questions stay at their recorded defaults.

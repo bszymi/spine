@@ -2,12 +2,12 @@
 id: TASK-004
 type: Task
 title: "Confine worktree writes against symlinked path components and .git/"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-14
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -1252,7 +1252,8 @@ every "fails on 61994fe" claim below was measured against `main` and holds for `
     `NOT REPRODUCED` for both the absolute and relative variants. Re-run after review round 1 at
     `04e7486` with the same result, and after review round 2 at `55d6863` with the same result
     (`poc/git` and `poc/parsing` pass with the non-nil refusal logged). **Still partial:** it
-    must be re-run on the merge commit.
+    must be re-run on the merge commit. *2026-11-05: met; re-run at the merge commit `d23b897`
+    and at `main` `f6132470` with the same result (Status after GitHub CI, below).*
 15. **AC15** — (a) `TestF5_WorkflowUpdate_LeafLinkToDevZero_RefusedWithoutRead`: refused
     `ErrInvalidParams`/`ErrUnsafePath` in < 0.1 s, `TotalAlloc` growth < 16 MiB; on `main` its
     watchdog ends the process at 0.19 s with HeapAlloc 264 MiB. (b) `TestTree_ReadFileOverLimit`:
@@ -1321,7 +1322,7 @@ every "fails on 61994fe" claim below was measured against `main` and holds for `
 
 ### SMP compatibility gate
 
-SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T004/smp` (detached at SMP `main` `7d4e7cc9`,
+SMP checkout `local-worktree` (detached at SMP `main` `7d4e7cc9`,
 `../spine` = this worktree, no `vendor/`, `go.mod`/`go.sum` unchanged after every run). Build,
 vet, unit and Spine-runtime suites were run twice, at `3f7a7c3` and again at `946456f` (same
 results); the platform-DB suites at `3f7a7c3`:
@@ -1357,7 +1358,7 @@ results); the platform-DB suites at `3f7a7c3`:
   ./internal/customer/workspace/workspacetest/` (SMP CI runs them).
 - `TestObjectsCopyModeLiveMinIO` (needs `TEST_MINIO_*`).
 - AC14 against the merge commit: run against the branch head; re-run with the same overlay after
-  the merge.
+  the merge. *Done 2026-11-05 (Status after GitHub CI, below).*
 - Databases used: `s004_scen`, `s004_scenmain`, `s004_scenh` (unused), `s004_proj`, `s004_smp_it`,
   `s004_spine_rt` on the shared PostgreSQL 17.10 (CI uses 18); all dropped after the gates.
 
@@ -1411,7 +1412,7 @@ against the code it guards (go test `-overlay` mutants, or a `git archive main` 
 | Mutants (`-overlay`) | All killed: no read `SameFile`; no walk `SameFile`; no clamp; pre-review `path.go`; `:` cut before the `\` split; pre-review `tree.go` (in-place rewrite, depth bound, hook test); no pin (Linux, 3 rows); `os.Root` → `filepath.Join` opens (10/15). |
 | `codex review --base main` (at `04e7486`) | "No actionable regressions were identified": no P1/P2/P3 to fix or reject |
 
-**SMP compatibility gate (round 1).** Checkout `/Users/bartoszszymichowski/42sid/i23/s-T004/smp`
+**SMP compatibility gate (round 1).** Checkout `local-worktree`
 (SMP `7d4e7cc9`, `../spine` = this worktree). `go.mod`/`go.sum` were byte-identical after every run.
 
 - `go build ./... && go vet ./... && go vet -tags integration ./...` → OK.
@@ -1470,7 +1471,7 @@ Commits `9aba2fd`…`55d6863` carry the fixes (see the commit table).
 | Mutants (`-overlay`) | all killed (finding 1: 8 mutants; finding 2: 2 bound mutants; codex: mode mutant) |
 | `codex review --base main` | at `3b6f542`: one P2 (fixed in `55d6863`); at `55d6863`: "No actionable regressions were identified" |
 
-**SMP compatibility gate (round 2).** Checkout `/Users/bartoszszymichowski/42sid/i23/s-T004/smp`
+**SMP compatibility gate (round 2).** Checkout `local-worktree`
 (SMP `7d4e7cc9`, `../spine` = this worktree). `go.mod` and `go.sum` were byte-identical after every
 run, and the checkout stayed clean. The gate was run at `3b6f542` and again at `55d6863`, with
 the same results:
@@ -1614,3 +1615,28 @@ directory. The read descriptor is blocking again before its first read. Windows 
 
 **Gates and the Codex round** are recorded once, in TASK-011's "Codex 6.1 catch-up" subsection
 (the same branch, the same runs).
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs; AC 16's Linux descriptor count ran
+  on GitHub's runner in the `go test ./...` job. Remaining:
+  - **AC 14 (a check):** run the three original audit PoCs (`poc/git`, `poc/parsing`,
+    `poc/verify-r1-8`) with `go test -overlay` against the merge commit (`main` `d23b897`, the wave
+    2 merge) and record the result here. They ran only against the branch head (review round 2,
+    "Gaps").
+- **2026-11-05: AC 14 met; Completed.** The three original audit PoCs (`poc/git`, `poc/parsing`,
+  `poc/verify-r1-8`; held out of tree) ran with `go test -overlay` (the PoC files overlaid into
+  `core/artifact/`, shape `go test -overlay <overlay.json> -count=1 -v -run <the PoC's tests>
+  ./core/artifact/`; go1.26.10, macOS) against two commits: the merge commit `main` `d23b897`
+  (the wave 2 merge, a detached read-only checkout whose `git status` stayed clean) and current
+  `main` `f6132470`. None reproduces, with the same result at both commits:
+  - `poc/git`: passes and logs the non-nil refusal `invalid_params: unsafe path: component
+    "a.md" is a symbolic link`;
+  - `poc/parsing`: passes; the refusal (`component "dir/a.md" is a symbolic link`) is logged;
+  - `poc/verify-r1-8`: both the absolute and the relative variant stop at their
+    `NOT REPRODUCED` fatal, and `Create` returns `invalid_params` for the symlinked component.
+
+  That was the last open item: every AC is met. The three owner questions stay at their stated
+  defaults (Orchestrator rulings, above), and no AC needs the owner's decision.

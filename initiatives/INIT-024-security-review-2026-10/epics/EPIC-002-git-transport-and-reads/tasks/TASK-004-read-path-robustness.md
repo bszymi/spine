@@ -2,12 +2,12 @@
 id: TASK-004
 type: Task
 title: "Read-path robustness: streamed listings, no DWIM fallback for reserved names, unforgeable log records, bounded evidence diff"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-27
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
@@ -218,7 +218,7 @@ above was re-located on that base: the functions this task changes are byte-iden
 `parseNameStatusZ` hash the same; `refgrammar.go`, `discovery.go`, `sweep.go`, `service.go` and
 `output_evidence.go` are unchanged), so a red run at the base is a red run at `a560c210`. Run on
 macOS, git 2.54.0, go 1.26.10, and on git 2.39.5 in the local `golang:1.26-bookworm` image for the
-`git-floor` job. Scratch: SMP repo `tmp/init027-orchestration/i24/t004/`.)*
+`git-floor` job. Scratch: SMP repo `local-scratch/i24/t004/`.)*
 
 ### Rulings and owner-question defaults (recorded, pending the owner)
 
@@ -452,7 +452,7 @@ after; `s24004_*` databases dropped. No SMP change.
 
 ### Review round 1 (2026-10-28; correctness + security review of `d1f5e6e1`: 0 P1/P2, one P3, P4s)
 
-Report: SMP repo `tmp/init027-orchestration/i24/t004-reviews/REVIEW.md`; probes `i24/t004-rev/`.
+Report: SMP repo `local-scratch/i24/t004-reviews/REVIEW.md`; probes `i24/t004-rev/`.
 Fixes on this branch, rulings by the coordinator:
 
 | Ruling | Finding | What was done | Tests (red at `d1f5e6e1` / mutation) |
@@ -571,3 +571,11 @@ Gates at `fcf54411`:
 Codex (`codex review --base init/INIT-024-integration-a-p4`, `gpt-6.1-sol`): round 1, session
 `01a18ee8-725f-7db2-81ac-f88c8ee60e53` on `fcf54411`: no findings. No second round was needed.
 Statuses stay as they are; nothing is pushed.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs. Every AC is met. The owner questions stay at their recorded
+  defaults, and open question 1 (an automatic `FullRebuild` fallback) stays a recorded follow-up
+  (TASK-010).

@@ -2,12 +2,12 @@
 id: TASK-003
 type: Task
 title: "Bounded blob reads and NUL-delimited Diff/ListFiles in the git CLI client"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-19
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -162,7 +162,7 @@ Line numbers refer to Spine `61994fe` unless stated. "SMP" means `spine-manageme
 
 ### Evidence (scaled PoCs, re-run 2026-10-06 against `61994fe`)
 
-The overlay tests in `tmp/init027-orchestration/spine-init023/_work/task003/` use only the
+The overlay tests in `local-scratch/spine-init023/_work/task003/` use only the
 `61994fe` API. All six **fail on `61994fe`** and are written to pass once this task lands:
 
 | PoC (source finding) | Result on `61994fe` |
@@ -976,6 +976,12 @@ explicit options, or derived from the exported defaults, so owner question 1 doe
    > (`ErrKindNotFound`). The test pins Kind and Message parity with the unbounded read on `main`
    > instead (Deviation 2). The proposed replacement text is in Implementation Notes, Review
    > round 2.
+   >
+   > **Amended by the owner (2026-11-05).** The two rows read: unknown ref → `ErrKindNotFound`,
+   > and path present in the working tree but not at the ref → `ErrKindNotFound` (both as on Spine
+   > `main` after TASK-002: `fatal: bad revision`), with Kind and Message equal to the unbounded
+   > `git show [eoo] <spec> --`. I2 is re-based from "every input `61994fe` handled" to "every input
+   > Spine `main` (after TASK-002) handled". `TestReadFile_ErrorKindParity` pins both rows.
 6. **Output ceiling.** With `WithMaxOutputBytes(4 KiB)`:
    - `ListFiles` over 300 files → `errors.Is(err, git.ErrOutputTooLarge)`;
    - `Log` over a commit whose message is 8 KiB → the same.
@@ -1043,6 +1049,14 @@ explicit options, or derived from the exported defaults, so owner question 1 doe
        > workflow is a `read_bounds` rejection and the sync advances; only
        > `.spine/branch-protection.yaml` stays a held sync error (Deviation 1). The proposed
        > replacement text is in Implementation Notes, Review round 2.
+       >
+       > **Amended by the owner (2026-11-05).** Item 4 reads: an oversized `workflows/x.yaml` is a
+       > `projection_workflow_rejected` with check `read_bounds` (TASK-011 D2): a verified previous
+       > row stays quarantined at its commit, a new file is not projected, no
+       > `projection_file_skipped` is emitted, and the state is `idle` at the new head. An oversized
+       > `.spine/branch-protection.yaml` holds the state at `error`, `LastSyncedCommit` does not
+       > advance, and the rules stay (I4). `TotalAlloc` < 2 MiB.
+       > `TestProjection_OversizedGovernanceFiles` pins it.
     5. `FullRebuild` over `initiatives/\xff/x.md`: `UpsertArtifactProjection` is **never called
        with invalid UTF-8**. The fake store fails the test if it is.
     6. An unsafe-named `workflows/a\tb.yaml` added on `main` is recorded and not projected.
@@ -1076,11 +1090,22 @@ explicit options, or derived from the exported defaults, so owner question 1 doe
     > **Implementation note (2026-10-14) — for the orchestrator to record.** It passes except for
     > three SMP tests that fail identically with Spine `main` (SMP TASK-004's tests pin SMP's
     > pre-wave-2 Spine; SMP TASK-008 / TASK-012 adapt them at the bump). See Review round 2.
+    >
+    > **Recorded (owner ruling, 2026-11-05): met.** The gate passed on SMP `f5c6fd6d` except
+    > three SMP tests that failed identically with Spine `main` `d23b897`, because SMP TASK-004's
+    > tests pinned SMP's pre-wave-2 Spine; SMP adapted them at the bump, and all three passed in the
+    > wave 4 acceptance gate (SMP `1ae9b0e3`). Discovery over SMP's own repository refused 0 files
+    > (Review round 1, the AC 16 note row).
 17. **Merge ordering.** The PR merges to Spine `main` only after SMP TASK-003 is on SMP `main`.
     The PR description names the SMP commit.
     > **Implementation note (2026-10-14) — the orchestrator's.** The precondition holds: SMP
     > TASK-003 is on SMP `main` `f5c6fd6d`. The PR and its description are not made from the
     > branch.
+    >
+    > **Recorded (owner ruling, 2026-11-05): met by the direct merge.** No PR was opened. SMP
+    > TASK-003 was on SMP `main` `f5c6fd6d` before this task reached Spine `main` in the wave 3
+    > merge (`ae513dca`), which is on GitHub `main`; this note names that SMP commit in place of a
+    > PR description.
 
 *ACs 18–22 were added by the 2026-10-06 design check.*
 
@@ -1501,7 +1526,7 @@ incremental workflow loop (AC 11.6).
 
 ### SMP compatibility gate
 
-`/Users/bartoszszymichowski/42sid/i23/s-T003/smp` detached at SMP `main` **`f5c6fd6d`** (EPIC-004 wave 1
+`local-worktree` detached at SMP `main` **`f5c6fd6d`** (EPIC-004 wave 1
 incl. SMP TASK-003, and TASK-004), `../spine` = this worktree, no `vendor/`, no `tmp/`; `git status`
 clean after every run. Final run at `a7d0478` (fresh, re-migrated databases); the earlier runs at
 `ff98809` and `ba2e1d2` gave the same results.
@@ -1624,7 +1649,7 @@ tmpfs-backed `pgvector/pgvector:pg18` container (PostgreSQL 18.4, `--pull=never`
 `platform_audit_retention`, `smp_prov`, posture `f`). The container and everything in it were
 removed at the end.
 
-**SMP compatibility gate at this round** (`/Users/bartoszszymichowski/42sid/i23/s-T003/smp`
+**SMP compatibility gate at this round** (`local-worktree`
 detached at **`f5c6fd6d`**, `../spine` = this worktree; `git status` clean after every run):
 
 | Command (in the SMP checkout) | Result |
@@ -1740,7 +1765,7 @@ re-review at `02000ff` raised nothing.
 | `codex review --base main` | Plain, it stops with `The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account`, as in every earlier round. With `-c model=gpt-5.6-sol`, the run at `d92e8cf` raised one P2 (C1, fixed in `02000ff`), and the run at `02000ff` said "No actionable correctness regressions were identified" |
 | `git diff --stat 61994fe -- migrations/`; `git diff --stat main...HEAD -- migrations go.mod go.sum` | empty (no schema change) |
 
-**SMP compatibility gate at this round** (`/Users/bartoszszymichowski/42sid/i23/s-T003/smp`
+**SMP compatibility gate at this round** (`local-worktree`
 detached at **`f5c6fd6d`**, `../spine` = this worktree; `git status` clean after every run):
 
 | Command (in the SMP checkout) | Result |
@@ -1843,7 +1868,7 @@ afterwards):
 | `-tags integration -race -p 1` (`SPINE_TEST_DATABASE_URL` = `s3i_it`; `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3i_reg`, migrated from `migrations/registry`) on the touched packages with integration tests | `adapters/delivery` 315, `adapters/projection` 180, `service/cmd/spine` 184, `service/internal/workspace` 225 PASS (subtests counted), 0 FAIL, 0 SKIP |
 | CI `scenario-git-http` job, its four steps run verbatim (`bash -eo pipefail`) on a fresh `s3i_ci3` | `TestGitHTTP_*` 20 PASS (8 `TestGitHTTP_Push*`), 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS; `TestWorkflowLifecycle_*` 4 PASS (incl. `_UpdateExisting`, `_UpdateExisting_DraftAuthorCannotReview`), with the harness's merge binding on; `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS; 0 SKIP |
 | `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` (`s3i_scen3`, registry `s3i_reg3` migrated) vs a `git archive main` export on its own databases | 31 top-level FAIL, the **same set as `main`**: the 30 known pre-existing failures plus `TestWorkspace_ScopedServices` (pre-existing with the registry URL set). With an unmigrated registry database both trees also fail `TestWorkspace_BatchMigration` and `TestWorkspace_Lifecycle` (33 each, identical sorted `--- FAIL` lists, 70 lines with subtests); `main` passes those two with the registry migrated (checked) |
-| `golangci-lint` v2.11.4 (`tmp/init027-orchestration/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
+| `golangci-lint` v2.11.4 (`local-scratch/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
 | `--enable-only=gosec` on the touched packages (`integration,scenario` tags) and on `./...` | 0 issues |
 | `gofmt -l` on every changed `.go` file | empty |
 | CI `git-floor` steps in the local `golang:1.26-bookworm` image (git 2.39.5; `--pull=never --rm`, read-only mounts, `GOPROXY=off`), plus `adapters/projection` | all ok; no container left |
@@ -1865,7 +1890,7 @@ Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3
 `s3c_*` (SMP) databases were created, and all were dropped afterwards; the SMP suites' own `ws_*`
 databases and roles were cleaned up by the suites (none left, checked). The only containers
 started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
-`spine-management-platform/tmp/init027-orchestration/wave3-int/`.
+`local-scratch/wave3-int/`.
 
 ### Cross-task review (wave 3) (2026-10-14)
 
@@ -1916,7 +1941,7 @@ the Docker VM had 6.2 GB free; the new real-git tests use only porcelain any git
 `localhost:55630`; only `s3f_*` databases were created and all were dropped afterwards; the SMP
 suites' `ws_*` databases and roles were cleaned up by the suites (none left, checked). No container
 was started apart from `docker run --rm alpine:3 df` disk checks. Logs:
-`spine-management-platform/tmp/init027-orchestration/wave3-fix-spine-s3f/`.
+`local-scratch/wave3-fix-spine-s3f/`.
 
 ### Acceptance (wave 3) (2026-10-14)
 
@@ -2004,7 +2029,7 @@ clean.
   suites ran and none after.
 - Docker: the only containers started were the `git-floor` run (`--rm`) and the `alpine:3 df`
   disk checks. Nothing was pulled. The Docker VM had 6.3 GB free.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w3final/`.
+- Logs: `local-scratch/w3final/`.
 
 ### Post-merge fix (wave 4 integration) (2026-10-19)
 
@@ -2166,7 +2191,7 @@ this worktree (`aadd43e5`) and `GOFLAGS=-mod=readonly`. The checkout was never m
 - Docker: the only containers were the `git-floor` run and an `alpine:3 df` check, both
   `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker VM had 6.1 GB free.
 - The throwaway mutation worktree `i23/s-int4/fu-mut` was removed with `git worktree remove`.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/fu-fix/`.
+- Logs: `local-scratch/w4/agents/fu-fix/`.
 
 ### Adversarial review of the follow-up (2026-10-20)
 
@@ -2303,4 +2328,26 @@ allowances skip on macOS; the other steps of SMP's integration job and the image
 created, all were dropped, and there were no `ws_*` databases or roles before the SMP suites or
 after them. The shared roles were untouched. Docker: the only container was the `git-floor` run
 (`--rm --pull=never`); nothing was pulled, built or pruned. Logs:
-`spine-management-platform/tmp/init027-orchestration/w4/agents/fu-fix2/`.
+`local-scratch/w4/agents/fu-fix2/`.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. That closes the GitHub CI item under
+  "Not run". Remaining:
+  - **AC 5 and AC 11.4 (owner):** the amendment, with the replacement texts proposed in review round
+    2 (Deviations 2 and 1).
+  - **AC 16 (orchestrator):** the record proposed in review round 2. The three SMP tests it names
+    passed in the wave 4 acceptance gate (SMP `1ae9b0e3` against the wave 4 tree, no failure).
+  - **AC 17 (orchestrator):** its precondition held (SMP TASK-003 was on SMP `main` `f5c6fd6d`
+    before the wave 3 merge, `ae513dca`); no PR was opened, so the PR-description clause needs the
+    orchestrator's record.
+- **2026-11-05: AC 5 and AC 11.4 amended, AC 16 and AC 17 recorded by the owner; Completed.** The
+  owner adopted the replacement texts from review round 2 for AC 5 (both miss rows are
+  `ErrKindNotFound`, as on `main` after TASK-002) and AC 11.4 (an oversized workflow is a
+  `read_bounds` rejection under TASK-011 D2; an oversized branch-protection file still holds the
+  sync). AC 16 and AC 17 are recorded as met (inline notes on each AC). AC 15's scenario row stays
+  "as on `main`" under the orchestrator's rule for the known pre-existing failures, as for TASK-005.
+  Those were the last open items; the owner questions stay at their recorded defaults, and no AC
+  needs the owner's decision.

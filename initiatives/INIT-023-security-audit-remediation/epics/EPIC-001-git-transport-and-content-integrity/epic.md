@@ -2,11 +2,11 @@
 id: EPIC-001
 type: Epic
 title: Git Transport and Content Integrity
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md
@@ -138,6 +138,14 @@ Make the git surface trustworthy:
 
 The PoC directories are under the audit's `poc/`, which is held out of tree (initiative §1).
 Each task commits the scaled-down regression test it derives from them.
+
+**Status (2026-11-05):** All five tasks are Completed. TASK-002 and TASK-004 closed first
+(TASK-004's last item, AC 14, the audit PoCs at the merge commit, was met on 2026-11-05). TASK-001,
+TASK-003 and TASK-016 closed on the owner's rulings of 2026-11-05: TASK-001's AC 9 deviations
+ratified and its direct merge recorded for AC 13; TASK-003's AC 5 and AC 11.4 amended and AC 16
+and AC 17 recorded; TASK-016's DC-8 amendment ratified. The acceptance criteria in §6 are met by
+the tasks; "one PR" for TASK-001 is its single merge commit `ee3c249e` (TASK-001 AC 13). The epic
+is Completed.
 
 ---
 

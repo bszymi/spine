@@ -2,12 +2,12 @@
 id: TASK-008
 type: Task
 title: "Wire the multi-workspace scheduler into shared-mode spine serve"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
@@ -206,7 +206,7 @@ this notes commit follows it. Status In Progress; the orchestrator closes it aft
 ### Per-AC evidence
 
 Red runs used a `git archive` of `init/INIT-024-scaffold` in the scratch dir
-(`tmp/init027-orchestration/i24/t008/base`), logs beside it (`red-base-*.log`).
+(`local-scratch/i24/t008/base`), logs beside it (`red-base-*.log`).
 
 | AC | Test(s) | At the scaffold base | On the branch |
 |---|---|---|---|
@@ -364,7 +364,7 @@ sub-session's JSONL):
 | 5 (on `b5448ea7`) | `01a177cc-a8ce-7441-b37e-70ab9cff1f17` | `gpt-6.1-sol` | P2: a workspace that stalls each tick's dispatch but ends before the next tick starves every later workspace (each tick restarts at the top); P2: the build goroutine is out of reach of the caller's recovery, so a build or builder panic ends the process | Fixed `e8c111fb`: a per-scan-kind dispatch cursor (the next tick of that kind starts with the workspaces a stalled tick left undispatched); the build goroutine recovers a panic (Error with stack; error wraps `ErrWorkspaceUnavailable`, panic value kept out of it). `TestMultiScheduler_StalledDispatchResumesWhereItStopped` — **red at `b5448ea7`**: "b-healthy scanned 0 times in 6 ticks"; `TestServicePool_BuildPanicIsAnInitializationError` — **red at `b5448ea7`**: `panic: builder hook failed` (test binary dies). Both green |
 
 The ruling's cap (3 codex rounds) is reached; **no codex round has run on `e8c111fb`**. Command:
-`cd /Users/bartoszszymichowski/42sid/i23/s24-T008/spine && codex review --base init/INIT-024-scaffold`.
+`cd local-worktree && codex review --base init/INIT-024-scaffold`.
 
 New behaviour outside `MultiScheduler` (standalone only; SMP's import graph contains
 `adapters/scheduler` through `core/engine` and no `service/...` package, checked with `go list
@@ -486,7 +486,7 @@ auto-merged. Integrator notes (1)–(3) above:
   once and still logs it for callers whose context lacks it (scheduler scans, projection sync).
   `TestPreauthLog_NamesTheWorkspaceOnce`.
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |
@@ -518,3 +518,11 @@ both waits. Gates at `a33e399c`, including `-race` and `-tags integration` on
 `service/internal/workspace` and `service/cmd/spine`, the scenario-git-http job (with
 `TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces`) and the SMP legs: see TASK-003's Integration A
 phase 3.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs, the shared-mode scheduler step included. Every AC is met; the
+  live `spine serve` run under "Not run" is covered by the lifecycle and db-mode tests and is not an
+  AC, and the owner questions stay at their recorded defaults.

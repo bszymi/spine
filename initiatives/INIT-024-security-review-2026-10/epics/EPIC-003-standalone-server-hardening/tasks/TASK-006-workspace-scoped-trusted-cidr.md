@@ -2,12 +2,12 @@
 id: TASK-006
 type: Task
 title: "Workspace-scoped trusted-CIDR clone in shared mode"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
@@ -328,7 +328,7 @@ no auth service at all still answers `503` to a bearer.
 
 ### Gates
 
-At `087bc243` (code identical to these notes' commit). Logs in SMP `tmp/init027-orchestration/i24/t006/`.
+At `087bc243` (code identical to these notes' commit). Logs in SMP `local-scratch/i24/t006/`.
 
 | Gate | Result |
 |---|---|
@@ -464,7 +464,7 @@ missing workspace's `401`, status, body and headers; red at `000c5461`: five `50
 in `serve_builders.go` (`buildGitHTTPHandler`): this task's `TrustedCIDRsByWorkspace` and
 TASK-003's `TreeBudget` are both kept.
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |
@@ -485,3 +485,10 @@ Codex (`codex review --base main`, plain, from the integration worktree): round 
 review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
 actionable regressions were identified"). It covered every merged task and coordination commit,
 including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs. Every AC is met; the live `spine serve` check under "Not run"
+  is an optional manual check, not an AC, and the owner questions stay at their recorded defaults.

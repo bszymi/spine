@@ -603,7 +603,11 @@ func commitFile(ctx context.Context, repoDir, path, message string, author Autho
 
 	cmd := newGitCmd(ctx, args...)
 	cmd.Dir = repoDir
-	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
+	env := []string{"GIT_LITERAL_PATHSPECS=1"}
+	// A committer (and, with no explicit author, an author) the host's
+	// git cannot resolve is Spine's (identity.go); a resolved one is kept.
+	env = append(env, identityFallbackEnv(ctx, repoDir, env, rolesFor(author))...)
+	cmd.Env = append(os.Environ(), env...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git commit %s: %s", path, strings.TrimSpace(string(out)))
 	}

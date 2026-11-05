@@ -2,12 +2,12 @@
 id: TASK-002
 type: Task
 title: "One ref grammar for the git CLI client: qualified branch arguments, validated refs, --end-of-options"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-10-07
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -1083,7 +1083,7 @@ unrelated "committer identity" reason in a clean container.
 
 There is a design-validation prototype. It is not the implementation; the tests in the Acceptance
 Criteria still have to be written properly. It lives at
-`tmp/init027-orchestration/spine-init023/prototypes/TASK-002/task-002-prototype.diff` in SMP and
+`local-scratch/spine-init023/prototypes/TASK-002/task-002-prototype.diff` in SMP and
 applies cleanly to `61994fe` (`git apply --check`).
 
 Test runs on 2026-10-06, overlay only:
@@ -1117,7 +1117,7 @@ Remaining differences from the prototype:
 >     `_work/task002-check/proto/tree/adapters/git/zz_dc_bypass_test.go`.
 > - **Amended design-check prototype.** It implements DC-1, DC-2, DC-4 and DC-6, but not DC-5 or
 >   DC-7, which were verified with shell probes.
->   - Diff: `tmp/init027-orchestration/spine-init023/_work/task002-check/task-002-design-check-amended.diff`.
+>   - Diff: `local-scratch/spine-init023/_work/task002-check/task-002-design-check-amended.diff`.
 >     It applies cleanly to `61994fe`.
 >   - Overlay: `_work/task002-check/overlay-amended.json`.
 >   - Results:
@@ -1141,7 +1141,7 @@ Adversarial check on 2026-10-06, against Spine `61994fe` and SMP `80995559`.
   re-run under both.
 
 **Repositories untouched.** Neither repository was modified. All artifacts are under
-`tmp/init027-orchestration/spine-init023/_work/task002-check/`.
+`local-scratch/spine-init023/_work/task002-check/`.
 
 | # | Change | Why |
 |---|---|---|
@@ -1332,7 +1332,7 @@ refs/heads/<n>`; `clone --no-tags -- <url> <path>`; `EnterBranch`: lookup, `work
 
 ### SMP compatibility gate
 
-SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T002/smp`, detached at SMP `7d4e7cc9`, `../spine`
+SMP checkout `local-worktree`, detached at SMP `7d4e7cc9`, `../spine`
 = this worktree, no `vendor/`, no `tmp/`; `GOFLAGS=-mod=readonly`; the checkout stayed clean. Run at
 `4b989d2` and re-run in full at the final code commit `0e98f31` (same results).
 
@@ -1700,3 +1700,13 @@ is invisible, and no shipped Spine or SMP workflow has a `convergence` or untype
 | SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 67 packages (dependents of a changed Spine package plus `./internal/customer/...`): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2f_smp_spine_runtime` and `s2f_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope) |
 
 All `s2f_*` databases were dropped afterwards, and no container was started.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** Spine `main` was pushed on 2026-11-04 with the owner's approval. GitHub
+  CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802` plus INIT-024
+  TASK-010's git-identity fix) passed all 8 jobs, among them the `git-floor` job on the shipped git
+  2.39.x in the pinned `golang:1.26.10-bookworm` image: AC 13's CI clause, the last open item. AC
+  14's scenario suite keeps review round 1's reading (the failures are `main`'s pre-existing set),
+  AC 15's run is recorded in these notes (no PR was opened), and the owner questions stay at their
+  recorded defaults.

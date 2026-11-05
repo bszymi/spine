@@ -2,12 +2,15 @@
 id: ADR-016
 type: ADR
 title: Governance-Path Guard on Governed Merges
-status: Proposed
+status: Accepted
 date: 2026-10-14
-decision_makers: Spine Architecture (owner sign-off on the authorization model pending — INIT-023 TASK-006 owner question 1)
+decision_makers: Spine Architecture; the owner (bszymi) signed off the authorization model on 2026-11-05 (INIT-023 TASK-006 owner question 1)
 ---
 
 # ADR-016 — Governance-Path Guard on Governed Merges
+
+**Accepted by the owner, 2026-11-05.** Proposed on 2026-10-14. The owner approved the decision as
+built, including the authorization model in §4 (INIT-023 TASK-006 owner question 1, option (a)).
 
 ---
 
@@ -57,7 +60,7 @@ If the set cannot be computed the merge is refused, never allowed. A failure tha
 
 ### 4. Authorization: an operator approves the exact bound commit
 
-This is TASK-006 owner question 1, default **(a)**:
+This is TASK-006 owner question 1, default **(a)**, which the owner signed off on 2026-11-05:
 
 - A governance-changing merge is **held**. The run stays in `committing`, nothing is merged (no code repository either), and the hold is recorded on the run's publish step (or, on a workflow with no publish step, its last completed step) as `error_detail.classification = governance_approval_required`, with a `governance.merge_held` event.
 - An actor with role **operator or higher** approves or rejects through an engine API (`DecideGovernanceMerge`; standalone `POST /runs/{run_id}/governance-decision`). The approval names the bound commit and is recorded server-side under reserved `runs.commit_meta` keys (`spine.governance_approval.*`) and audited by a `governance.merge_decided` event. It is never read from commit text, branch content or workflow-authored data: workflow outcomes cannot write reserved keys (TASK-005 strips them).

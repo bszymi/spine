@@ -2,10 +2,10 @@
 id: TASK-006
 type: Task
 title: "Governance-path guard on governed merges and protection-removal guard in projection"
-status: In Progress
+status: Completed
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-19
+last_updated: 2026-11-05
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -76,7 +76,7 @@ Line numbers refer to Spine `main` at `61994fe`. SMP references are to SMP `main
    - This is a durable governance takeover without operator authority.
 5. **Re-verified for this design (2026-10-06).** The three audit PoCs were compiled into
    Spine `61994fe` with `go test -overlay` (overlay at
-   `tmp/init027-orchestration/spine-init023/_work/task006/overlay_poc.json` in SMP). All
+   `local-scratch/spine-init023/_work/task006/overlay_poc.json` in SMP). All
    three PASS, which proves the hole:
    - `TestPOC_R12_SelfReviewedRunSlipsGovernanceFilesIntoMain` (`poc/verify-r1-2`): `main`
      ends with `rules: []` and a task-default that has no `review` step.
@@ -87,7 +87,7 @@ Line numbers refer to Spine `main` at `61994fe`. SMP references are to SMP `main
 
    > **Design-check note (2026-10-06): the planned changed-path computation can be bypassed.**
    > The three PoCs were re-run at `61994fe` and still PASS. A new probe,
-   > `tmp/init027-orchestration/spine-init023/_work/task006/designcheck/zz_dc_task006_crisscross_test.go`
+   > `local-scratch/spine-init023/_work/task006/designcheck/zz_dc_task006_crisscross_test.go`
    > (overlay `designcheck/overlay.json`, `go test -overlay … -run TestDesignCheck_TASK006 ./core/engine/`),
    > PASSES and shows the bypass with Spine's real `CLIClient`:
    > - the attacker's run branch merges another run's branch (R2, which tightened
@@ -1355,6 +1355,7 @@ Criteria).
    - (c) A second reviewer (role reviewer or higher, not the executor). This depends on TASK-007
      and is weaker than ADR-009 §5's operator-only intent.
    - Also: a new ADR-016 (default), or an in-place ADR-009 amendment?
+   - *Signed off by the owner on 2026-11-05: (a), in the new ADR-016, approved as built.*
 2. **Guarded paths.** Default: `.spine/`, `.spine.yaml`, `workflows/` in Spine. Should SMP TASK-010
    also guard AI-agent configuration (`.claude/`, `.codex/`, `.agents/`, `.mcp.json`,
    `CLAUDE.md`, `AGENTS.md`; `internal/executionmeta/agent_config.go`)? Default: **no**. That
@@ -1409,6 +1410,10 @@ Criteria).
      note.
    - `security-model.md`, `event-schemas.md`, `engine-state-machine.md` and
      `docs/git-push-guide.md` are updated.
+   > **Owner sign-off (2026-11-05).** The owner approved ADR-016 as built, with owner question 1's
+   > decision (a) (an operator approves the exact bound commit; the merge is held until then). The
+   > ADR is `Accepted`. It was accepted after the code merged; the owner's approval of the design
+   > as built stands in for the "before the code merges" ordering.
 2. **Zero value is v1.** `TestGovernanceGuard_ZeroValueKeepsV1Behaviour` shows that a run
    touching `.spine/branch-protection.yaml` and `workflows/` merges with no approval and no new
    events when `WithGovernanceGuard` is not called. The existing `core/engine`, `core/branchprotect`
@@ -1472,6 +1477,11 @@ Criteria).
     - `MergeRunBranch` returns an error that is not `ErrGovernanceApprovalRequired`;
     - `Merge` is never called;
     - the run stays `committing`.
+    > **Amended by the owner (2026-11-05)** (Deviation 22): the run stays `committing` for every
+    > error a retry can change (a `MergeBases` error, a malformed base, a pre-merge `Diff` error:
+    > `ErrUnavailable`). A merge that can never be evaluated (no merge base, or a `Diff` over the
+    > git output limit) is refused permanently on its first attempt and takes the `merge_failed`
+    > route, so no run is left undecidable (AC 29). `Merge` is never called in either case.
 12. **Idempotent hold.**
     - Three consecutive `MergeRunBranch` calls on a held run emit `governance.merge_held` with one
       identical event ID.
@@ -1504,6 +1514,9 @@ Criteria).
 18. **Projection regression with real git (the inverted `verify-r1-2` projection PoC).**
     `TestProtectionRemovalGuard_IncrementalSyncKeepsRulesOnSlippedPolicy` asserts everything §10
     lists. The same guard also refuses through `FullRebuild` (rules kept, `sync_state=error`).
+    > **Amended by the owner (2026-11-05)** (Deviation 12): the `FullRebuild` refusal keeps the
+    > rules and ends `idle`, not `error`, as owner question 7 and D17 rule for every refusal ("a
+    > refusal is not a sync error").
 19. **Projection, accepted cases** (real git, fake provenance reader):
     - an `override_event` record whose SHA is the pushed tip carrying `rules: []` → installed;
     - a consumed `governance_approval` record whose SHA is the merge commit → installed;
@@ -1780,7 +1793,7 @@ No runtime schema change (`git diff --name-only main...HEAD -- migrations go.mod
 - **OQ1** (default **(a)**): operator-or-above approval of the exact bound commit; the merge is held
   until approve or reject. Recorded in a **new ADR**: `ADR-016` was the next free number in
   `architecture/adr/` (ADR-001…015 exist; no sibling wave-4 worktree had taken it). The ADR is
-  `Proposed` until the owner signs off OQ1.
+  `Proposed` until the owner signs off OQ1. *(Signed off on 2026-11-05; ADR-016 is `Accepted`.)*
 - **OQ2:** guarded paths `.spine/`, `.spine.yaml`, `workflows/` and `<artifacts_dir>/workflows/`;
   AI-agent configuration not guarded.
 - **OQ3:** the ADR-008 lifecycle exemption is on in `spine serve`, off in the embedded zero value.
@@ -2384,7 +2397,7 @@ What changed for this task:
 **Gates.** The code gates ran on `a6acc720` unless the row names `96cf8e40`. The only code
 change after `96cf8e40` is `a6acc720`'s `HEAD` rewrite in `MergeBases`, which no engine or
 scenario caller reaches (they pass `main` or object ids). Logs are in
-`spine-management-platform/tmp/init027-orchestration/w4/agents/int-spine/`.
+`local-scratch/w4/agents/int-spine/`.
 
 | Gate | Result |
 |---|---|
@@ -2494,7 +2507,7 @@ findings read from the review sub-session JSONL under `~/.codex/sessions/2026/10
 session `01a154ce-eb74-7e82-90e2-2575bf420173`, no findings. Two clean rounds; no third was run.
 
 **Gates** (final code `f47131f4`; logs in
-`spine-management-platform/tmp/init027-orchestration/w4/agents/fix-spine/`, `chainD.out`,
+`local-scratch/w4/agents/fix-spine/`, `chainD.out`,
 `chainS.out` and the directories they name).
 
 | Gate | Result |
@@ -2601,7 +2614,7 @@ No SMP command failed, so there is no compatibility break, and no run against `.
 - Docker: the only containers were the `git-floor` run, the two Linux-only SMP runs and the
   `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
   VM had 5.8 GB free at the lowest check.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+- Logs: `local-scratch/w4/agents/gate-spine/`.
 
 ### Integration follow-up (wave 4) (2026-10-19)
 
@@ -2659,3 +2672,20 @@ skip):
 The golden-path lifecycle scenarios, run under the guard, are still held after the fix, and that
 is correct. Their synthetic actor `scenario-test-actor` drafts and reviews, so the exemption
 refuses them as "the reviewer is an author of the run". They run with the guard off, as before.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs, the governance-path guard scenario
+  and store step included. That closes the GitHub CI item under "Not run". Remaining (owner):
+  - **AC 1:** ADR-016 is `Proposed`; it becomes `Accepted` with the owner's sign-off on OQ1.
+  - **AC 11:** a ruling or an AC amendment for the permanent route of an unevaluable merge
+    (Deviation 22).
+  - **AC 18:** the amendment of the `FullRebuild` sentence (Deviation 12).
+- **2026-11-05: ADR-016 signed off and AC 11 and AC 18 amended by the owner; Completed.** The owner
+  approved ADR-016 as built, with owner question 1's decision (a), and the ADR is now `Accepted`
+  (AC 1). The owner adopted the AC 11 amendment (Deviation 22: a merge that can never be evaluated
+  is refused permanently; errors a retry can change keep the run `committing`) and the AC 18
+  amendment (Deviation 12: a `FullRebuild` refusal ends `idle`). Those were the last open items;
+  the other owner questions stay at their recorded defaults, and no AC needs the owner's decision.

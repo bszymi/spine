@@ -2,11 +2,11 @@
 id: EPIC-002
 type: Epic
 title: Governance Integrity
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md
@@ -84,6 +84,13 @@ The PoC directories are under the audit's `poc/`, which is held out of tree. Eac
 the exact PoC files it scales down into committed tests. The self-review chain behind F3
 (`skeptic-selfreview`) is TASK-007's separation-of-duties test. TASK-006 holds the governance
 paths regardless.
+
+**Status (2026-11-05):** All five tasks are Completed. TASK-005, TASK-007 and TASK-017 closed
+first. TASK-008 (the wording amendments to AC 10, 11, 14 and 21) and TASK-006 (ADR-016 signed off
+as built and now `Accepted`; AC 11 and AC 18 amended) closed on the owner's rulings of 2026-11-05.
+The acceptance criteria in §6 are met by the tasks; "every existing scenario test passes
+unchanged" holds as "the same outcomes as `main`" under the orchestrator's rule for the known
+pre-existing failures. The epic is Completed.
 
 ---
 

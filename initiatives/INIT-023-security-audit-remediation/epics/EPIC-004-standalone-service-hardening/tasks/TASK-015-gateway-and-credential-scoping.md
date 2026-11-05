@@ -2,12 +2,12 @@
 id: TASK-015
 type: Task
 title: "SSE field safety, shared-mode tenant scoping, git-endpoint auth and gitpool token-host scoping"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-14
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
@@ -203,7 +203,7 @@ TASK-016.
 It also includes the regression tests and migrated tests listed in the Acceptance Criteria.
 
 A design-phase prototype of every change is at
-`spine-management-platform/tmp/init027-orchestration/spine-init023/_work/task015/` (`README.txt`).
+`local-scratch/spine-init023/_work/task015/` (`README.txt`).
 It covers the overlay sources, migrated tests, regression tests and 13 mutation overlays, and
 compiles and passes against `61994fe`. It is a starting point, not a mandate.
 
@@ -906,6 +906,8 @@ The design works without answers to these, using the stated defaults.
    - *Alternative:* never. Every private code repo then needs `credentials_ref`. That is simpler,
      and nothing reachable today depends on it.
    - Shared mode never inherits, whatever the answer (Decision 9).
+   - **Owner ruling (2026-11-05): never.** The owner confirmed the orchestrator ruling (Orchestrator
+     rulings, below).
 
    > **Design-check note (2026-10-06): what "yes" grants, even in single mode.**
    > - Any operator can bind any repository on the primary's host (`repository.create` and
@@ -1287,7 +1289,7 @@ re-located on `d23b897`.)*
 | Question | Ruling | Where |
 |---|---|---|
 | OQ1 `SPINE_GIT_HTTP_DEV_NO_AUTH` strictness | Default: accepted only with `SPINE_ENV=development`; startup fails otherwise, including unset | `guardGitHTTPDevNoAuth`, `serveCmd` |
-| **OQ2** credential-less code repo on the primary's own host | **"Never" — an orchestrator ruling and a deviation from the design default ("yes, exact host and port"); recorded for the owner.** A code repo with no `credentials_ref` never uses the process push token or the process credential helper, on any host: no `WithProcessAuthHosts`, no `Credential.InheritProcessAuth`, no origin reads. Code repos are not wired in `spine serve` today, so nothing working is lost | `gitpool.NewCLIClientFactory`, `cliCloner.Clone` |
+| **OQ2** credential-less code repo on the primary's own host | **"Never" — an orchestrator ruling and a deviation from the design default ("yes, exact host and port"); recorded for the owner.** *Confirmed by the owner on 2026-11-05.* A code repo with no `credentials_ref` never uses the process push token or the process credential helper, on any host: no `WithProcessAuthHosts`, no `Credential.InheritProcessAuth`, no origin reads. Code repos are not wired in `spine serve` today, so nothing working is lost | `gitpool.NewCLIClientFactory`, `cliCloner.Clone` |
 | OQ3 tenant view of `/system/metrics` (shared mode) | Default: only the caller's `spine_workspace_pool_*` series; the full export at `GET /api/v1/platform/metrics` behind `SPINE_OPERATOR_TOKEN` | `handleMetrics`, `handlePlatformMetrics` |
 | OQ4 compose token-less clones | Default: dropped (the `/16` line removed); the override example documents runner-only recipes | `docker-compose.yaml`, `docker-compose.override.yaml.example` |
 | OQ5 `SPINE_DEV_MODE` to development-only | Default: unchanged | — |
@@ -1580,7 +1582,7 @@ No finding was rejected.
 
 ### SMP compatibility gate
 
-SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T015/smp`, detached at `f5c6fd6d`, no `vendor/`
+SMP checkout `local-worktree`, detached at `f5c6fd6d`, no `vendor/`
 or `tmp/`; `go list -m github.com/bszymi/spine` resolves to this worktree; `GOFLAGS=-mod=readonly`;
 `git status` clean after every step. Spine at `95f8fc1`.
 
@@ -1656,7 +1658,7 @@ top of `ea8fbf5`: `76bd161`, `3428fee`, `f8e3f6e`, `c4f01fe`, `a24bf89`.)*
 
 | Gap | Disposition |
 |---|---|
-| OQ2 "never" (orchestrator ruling) leaves AC 12's first half, AC 13 and AC 22's `InheritProcessAuth=true` half unbuilt and AC 21 trivially true | **Not closable here — needs the owner.** The ruling stands as recorded; the task should not be closed until the owner confirms OQ2. If the owner chooses "yes, exact host and port", §5.1–5.3 become mandatory (`RemoteURL` with the push-URL read, the origin re-check for a reused clone, `Credential.InheritProcessAuth`, `WithProcessAuthHosts`, `hostKey`, `codeRepoProcessAuthHosts`, AC 21 as a real test) |
+| OQ2 "never" (orchestrator ruling) leaves AC 12's first half, AC 13 and AC 22's `InheritProcessAuth=true` half unbuilt and AC 21 trivially true | **Not closable here — needs the owner.** *2026-11-05: the owner confirmed "never"; closed.* The ruling stands as recorded; the task should not be closed until the owner confirms OQ2. If the owner chooses "yes, exact host and port", §5.1–5.3 become mandatory (`RemoteURL` with the push-URL read, the origin re-check for a reused clone, `Credential.InheritProcessAuth`, `WithProcessAuthHosts`, `hostKey`, `codeRepoProcessAuthHosts`, AC 21 as a real test) |
 | AC 16 names `make lint` and `make test-integration`; only narrower commands were recorded | **Closed** by running the literal commands (table below): `make lint` (boundary lint + repo-wide `golangci-lint run`): 270 issues on the branch vs 275 on a `main` export, all pre-existing (5 fewer `gofmt`), 0 new by `--new-from-rev main`. (The earlier "179 vs 185" counted only the 10 touched packages.) `make test-integration` (`go test -tags integration ./...`, run with `-p 4 -count=1` on the shared machine) across every package, including `adapters/projection`, `adapters/delivery`, `adapters/store` and `adapters/secrets`: only the two known pre-existing failures. `make test-scenario`'s package set ran with `-p 1` |
 | AC 4 / AC 15 ask for the PoCs against the merge base and the merge commit | **Closed for the current `main`.** The merge-base runs are the "fails at the merge base" overlays above. `main` (`d23b897`) is an ancestor of the head (`git merge-base --is-ancestor`), so the merge commit's tree is the head's tree, and the PoCs re-run at `a24bf89` give the AC 15 outcomes. If `main` moves before the merge (for example TASK-014 landing first), the re-run on the actual merge commit is the orchestrator's merge-time step |
 | AC 10 / I4 held only for a single `service` value | ~~**Closed** by R3~~ R3 closed only the repeated form; the valueless form (`service&git-receive-pack`) stayed open until review round 2 (R2-1, R2-G1) |
@@ -1729,7 +1731,7 @@ integration guide), `f8914b8` (lint), `b4a0cd9` (HEAD guard test).)*
 | Gap | Disposition |
 |---|---|
 | R2-G1: AC 10 / I4 falsified by `info/refs?service&git-receive-pack` under the dev flag and from a direct trusted runner; the round-1 note "Closed by R3" does not hold | **Closed** by R2-1: the cases are in `TestP330_GitDevNoAuth_ReadsOnly` and `TestP330_DirectRunnerStillTrusted` as asked, the differential test covers the class, and the round-1 R3 row, AC-gap row and AC 10 evidence are corrected above (struck-through text kept for the record) |
-| R2-G2: AC 12's first half, AC 13 and AC 22's `InheritProcessAuth=true` half have no falsifiable test because OQ2 "never" left that code unbuilt; AC 21 holds trivially | **Not closable here — unchanged, needs the owner** (as recorded in round 1). The task must not be closed until the owner confirms OQ2; if the owner picks "yes, exact host and port", §5.1–5.3 and real tests for those ACs are mandatory before close |
+| R2-G2: AC 12's first half, AC 13 and AC 22's `InheritProcessAuth=true` half have no falsifiable test because OQ2 "never" left that code unbuilt; AC 21 holds trivially | **Not closable here — unchanged, needs the owner** (*2026-11-05: the owner confirmed "never"; closed*) (as recorded in round 1). The task must not be closed until the owner confirms OQ2; if the owner picks "yes, exact host and port", §5.1–5.3 and real tests for those ACs are mandatory before close |
 | R2-G3: everything else checked out | Noted. No change |
 
 #### Gates (code at `b4a0cd9`; artifact-only commit after)
@@ -1833,7 +1835,7 @@ afterwards):
 | `-tags integration -race -p 1` (`SPINE_TEST_DATABASE_URL` = `s3i_it`; `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3i_reg`, migrated from `migrations/registry`) on the touched packages with integration tests | `adapters/delivery` 315, `adapters/projection` 180, `service/cmd/spine` 184, `service/internal/workspace` 225 PASS (subtests counted), 0 FAIL, 0 SKIP |
 | CI `scenario-git-http` job, its four steps run verbatim (`bash -eo pipefail`) on a fresh `s3i_ci3` | `TestGitHTTP_*` 20 PASS (8 `TestGitHTTP_Push*`), 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS; `TestWorkflowLifecycle_*` 4 PASS (incl. `_UpdateExisting`, `_UpdateExisting_DraftAuthorCannotReview`), with the harness's merge binding on; `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS; 0 SKIP |
 | `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` (`s3i_scen3`, registry `s3i_reg3` migrated) vs a `git archive main` export on its own databases | 31 top-level FAIL, the **same set as `main`**: the 30 known pre-existing failures plus `TestWorkspace_ScopedServices` (pre-existing with the registry URL set). With an unmigrated registry database both trees also fail `TestWorkspace_BatchMigration` and `TestWorkspace_Lifecycle` (33 each, identical sorted `--- FAIL` lists, 70 lines with subtests); `main` passes those two with the registry migrated (checked) |
-| `golangci-lint` v2.11.4 (`tmp/init027-orchestration/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
+| `golangci-lint` v2.11.4 (`local-scratch/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
 | `--enable-only=gosec` on the touched packages (`integration,scenario` tags) and on `./...` | 0 issues |
 | `gofmt -l` on every changed `.go` file | empty |
 | CI `git-floor` steps in the local `golang:1.26-bookworm` image (git 2.39.5; `--pull=never --rm`, read-only mounts, `GOPROXY=off`), plus `adapters/projection` | all ok; no container left |
@@ -1855,7 +1857,7 @@ Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3
 `s3c_*` (SMP) databases were created, and all were dropped afterwards; the SMP suites' own `ws_*`
 databases and roles were cleaned up by the suites (none left, checked). The only containers
 started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
-`spine-management-platform/tmp/init027-orchestration/wave3-int/`.
+`local-scratch/wave3-int/`.
 
 ### Cross-task review (wave 3) (2026-10-14)
 
@@ -1905,7 +1907,7 @@ the Docker VM had 6.2 GB free; the new real-git tests use only porcelain any git
 `localhost:55630`; only `s3f_*` databases were created and all were dropped afterwards; the SMP
 suites' `ws_*` databases and roles were cleaned up by the suites (none left, checked). No container
 was started apart from `docker run --rm alpine:3 df` disk checks. Logs:
-`spine-management-platform/tmp/init027-orchestration/wave3-fix-spine-s3f/`.
+`local-scratch/wave3-fix-spine-s3f/`.
 
 ### Acceptance (wave 3) (2026-10-14)
 
@@ -1991,4 +1993,20 @@ clean.
   suites ran and none after.
 - Docker: the only containers started were the `git-floor` run (`--rm`) and the `alpine:3 df`
   disk checks. Nothing was pulled. The Docker VM had 6.3 GB free.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w3final/`.
+- Logs: `local-scratch/w3final/`.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. Remaining (owner): confirm OQ2. The
+  orchestrator ruled "never", so AC 12's first half, AC 13 and AC 22's `InheritProcessAuth=true`
+  half are unbuilt and AC 21 holds trivially. If the owner chooses "yes, exact host and port",
+  §5.1–5.3 and real tests for those ACs come before the close (review rounds 1 and 2).
+- **2026-11-05: OQ2 confirmed by the owner; Completed.** The owner confirmed OQ2 "never": a code
+  repository with no `credentials_ref` never uses the process push token or credential helper, on
+  any host. AC 12's first half, AC 13 and AC 22's `InheritProcessAuth=true` half stay not
+  applicable, AC 21 holds trivially and stays tested, and §5.1–5.3 are not built. The consequence
+  is the one recorded under the implementation notes: every private code repository needs its own
+  `credentials_ref`. That was the last open item. The other owner questions stay at their recorded
+  defaults (Orchestrator rulings, above), and no other AC needs the owner's decision.
