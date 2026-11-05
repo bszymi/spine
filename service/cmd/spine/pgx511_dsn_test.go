@@ -44,6 +44,13 @@ func TestRequireSecureDBURL_EverySpellingOfDisable(t *testing.T) {
 		{"disable as another parameter's value", "postgres://u:p@h:5432/db?sslmode=require&application_name=disable", false},
 		{"key/value require", "host=h user=u password=p sslmode=require application_name=disable", false},
 		{"key/value, disable in another value", "host=h user=u password=p application_name='sslmode = disable' sslmode=require", false},
+		// Text inside a quoted value is not a setting (codex review round 1).
+		{"key/value, disable inside a quoted password", "host=h user=u password='a sslmode = disable z' sslmode=require", false},
+		{"key/value, escaped quote inside the password", `host=h user=u password='a\' sslmode = disable z' sslmode=require`, false},
+		{"key/value, quoted disable", "host=h user=u password='a b' sslmode = 'disable'", true},
+		// Text inside the URL userinfo is not the query.
+		{"url, disable inside the password", "postgres://u:x?sslmode=%64isable&@h:5432/db?sslmode=require", false},
+		{"url, query after a password with ?", "postgres://u:x?y@h:5432/db?sslmode= disable", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := requireSecureDBURL(tc.dsn)
@@ -75,18 +82,24 @@ func TestRequireSecureDBURL_EverySpellingOfDisable(t *testing.T) {
 }
 
 // pgx v5.11.0 ends the userinfo at the first '@': a password with an
-// unencoded '@' is split, its tail becomes part of the host, and the
-// connect error names it. describeDBError masks every piece.
+// unencoded '@' is split, its tail becomes part of the host (a host list,
+// split at ','), and the connect error names it. describeDBError masks
+// every piece.
 func TestDescribeDBError_RawAtInPasswordLeaksNoPiece(t *testing.T) {
 	t.Setenv("PGPASSWORD", "")
-	const dsn = "postgres://u:TOPSECRET-C1@SECRETTAIL-C1@127.0.0.1:1/db?sslmode=disable&connect_timeout=2"
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, err := pgx.Connect(ctx, dsn)
-	if err == nil || !strings.Contains(err.Error(), "SECRETTAIL-C1") {
-		t.Fatalf("precondition: the connect error names the password's tail as the host, or the case is vacuous: %v", err)
-	}
-	if got := describeDBError(err, dsn); strings.Contains(got, "TOPSECRET") || strings.Contains(got, "SECRETTAIL") {
-		t.Fatalf("describeDBError carries a piece of the password: %q", got)
+	for _, dsn := range []string{
+		"postgres://u:TOPSECRET-C1@SECRETTAIL-C1@127.0.0.1:1/db?sslmode=disable&connect_timeout=2",
+		"postgres://u:TOPSECRET-C2@SECRETTAIL-C2a,SECRETTAIL-C2b@127.0.0.1:1/db?sslmode=disable&connect_timeout=2",
+		"postgres://u:TOPSECRET-C3@SECRETTAIL-C3a%2CSECRETTAIL-C3b@127.0.0.1:1/db?sslmode=disable&connect_timeout=2",
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err := pgx.Connect(ctx, dsn)
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "SECRETTAIL") {
+			t.Fatalf("precondition: the connect error names the password's tail as the host, or the case is vacuous: %v", err)
+		}
+		if got := describeDBError(err, dsn); strings.Contains(got, "TOPSECRET") || strings.Contains(got, "SECRETTAIL") {
+			t.Errorf("%s: describeDBError carries a piece of the password: %q", dsn, got)
+		}
 	}
 }

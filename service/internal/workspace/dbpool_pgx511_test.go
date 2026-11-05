@@ -74,6 +74,10 @@ func TestNewWorkspaceDBPool_RawAtInPasswordLeaksNoPiece(t *testing.T) {
 	for _, dsn := range []string{
 		"postgres://u:TOPSECRET-B3@SECRETTAIL-B3@127.0.0.1:1/db?sslmode=disable&connect_timeout=2",
 		"postgres://u:TOPSECRET-B4@SECRET%41TAIL-B4@127.0.0.1:1/db?sslmode=disable&connect_timeout=2",
+		// The tail is a host list: pgx splits it at ',' (also a decoded
+		// %2C) and names each host (codex review round 1).
+		"postgres://u:TOPSECRET-B5@SECRETTAIL-B5a,SECRETTAIL-B5b@127.0.0.1:1/db?sslmode=disable&connect_timeout=2",
+		"postgres://u:TOPSECRET-B6@SECRETTAIL-B6a%2CSECRETTAIL-B6b@127.0.0.1:1/db?sslmode=disable&connect_timeout=2",
 	} {
 		_, err := NewWorkspaceDBPool(ctx, "ws-x", dsn, PoolPolicy{})
 		if err == nil {
@@ -81,7 +85,8 @@ func TestNewWorkspaceDBPool_RawAtInPasswordLeaksNoPiece(t *testing.T) {
 		}
 		for _, s := range []string{"TOPSECRET", "SECRETTAIL", "SECRETATAIL"} {
 			if strings.Contains(err.Error(), s) {
-				t.Fatalf("connect error carries a piece of the password (%q): %v", s, err)
+				t.Errorf("%s: connect error carries a piece of the password (%q): %v", dsn, s, err)
+				break
 			}
 		}
 	}

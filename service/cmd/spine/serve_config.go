@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -383,33 +382,54 @@ func requireSecureDBURL(dbURL string) error {
 // `ssl%6Dode`) and key/value spacing, quoting and escapes (`sslmode =
 // disable`, `sslmode='disable'`) passed it with every pgx release.
 //
-// Every occurrence that reads as disable refuses, not only the one pgx
-// applies: refusing is the safe side, and SPINE_INSECURE_LOCAL=1 is the
-// same acknowledgement. Settings pgx merges from the environment
-// (PGSSLMODE) are not read here, as before.
+// The settings are read with pgx v5.11.0's structure (uriQuerySettings,
+// keywordValueSettings), so text inside a password or another quoted
+// value is not taken for a setting. Every sslmode setting that reads as
+// disable refuses, not only the one pgx applies: refusing is the safe
+// side, and SPINE_INSECURE_LOCAL=1 is the same acknowledgement. The
+// literal check stays first, so nothing the gate refused before passes
+// now. Settings pgx merges from the environment (PGSSLMODE) are not read
+// here, as before.
 func sslModeDisabled(dsn string) bool {
 	if strings.Contains(dsn, "sslmode=disable") {
 		return true
 	}
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		// Every '?'- or '&'-separated pair in the string, wherever pgx
-		// takes the query to start, decoded as pgx decodes a query
-		// component: spaces around it trimmed, percent-escapes decoded,
-		// '+' literal.
-		for _, pair := range strings.FieldsFunc(dsn, func(r rune) bool { return r == '?' || r == '&' }) {
-			k, v, ok := strings.Cut(pair, "=")
-			if ok && uriSetting(k) == "sslmode" && uriSetting(v) == "disable" {
-				return true
-			}
-		}
-		return false
+	var settings [][2]string
+	if rest, ok := strings.CutPrefix(dsn, "postgres://"); ok {
+		settings = uriQuerySettings(rest)
+	} else if rest, ok := strings.CutPrefix(dsn, "postgresql://"); ok {
+		settings = uriQuerySettings(rest)
+	} else {
+		settings = keywordValueSettings(dsn)
 	}
-	for _, m := range kvSSLMode.FindAllStringSubmatch(dsn, -1) {
-		if kvSettingValue(m[1]) == "disable" {
+	for _, kv := range settings {
+		if kv[0] == "sslmode" && kv[1] == "disable" {
 			return true
 		}
 	}
 	return false
+}
+
+// uriQuerySettings returns the query settings of a connection URI (the
+// text after its scheme) where pgx v5.11.0 finds them: the userinfo ends
+// at the first '@' before any '/', the query begins at the first '?' after
+// it, and its pairs are split at '&'. Each key and value is decoded as
+// pgx decodes it (uriSetting).
+func uriQuerySettings(rest string) [][2]string {
+	if i := strings.IndexAny(rest, "@/"); i >= 0 && rest[i] == '@' {
+		rest = rest[i+1:]
+	}
+	q := strings.IndexByte(rest, '?')
+	if q < 0 {
+		return nil
+	}
+	var out [][2]string
+	for _, pair := range strings.Split(rest[q+1:], "&") {
+		if k, v, ok := strings.Cut(pair, "="); ok {
+			out = append(out, [2]string{uriSetting(k), uriSetting(v)})
+		}
+	}
+	return out
 }
 
 // uriSetting decodes one URI query component the way pgx v5.11.0 does,
@@ -423,25 +443,58 @@ func uriSetting(s string) string {
 	return strings.Trim(s, " ")
 }
 
-// kvSSLMode matches an sslmode setting in a key/value connection string:
-// the keyword, optional whitespace, '=', optional whitespace, and a
-// quoted or unquoted value with backslash escapes.
-var kvSSLMode = regexp.MustCompile(`(?:^|\s)sslmode\s*=\s*('(?:[^'\\]|\\.)*'|(?:[^\s\\]|\\.)+)`)
-
-// kvSettingValue unquotes a key/value setting's value: pgx v5.11.0, like
-// libpq, drops each backslash and keeps the character after it.
-func kvSettingValue(v string) string {
-	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
-		v = v[1 : len(v)-1]
-	}
-	var b strings.Builder
-	for i := 0; i < len(v); i++ {
-		if v[i] == '\\' && i+1 < len(v) {
-			i++
+// keywordValueSettings returns the settings of a key/value connection
+// string as pgx v5.11.0 (like libpq) reads them: a keyword, optional
+// whitespace, '=', optional whitespace, then a value that is quoted
+// ('…', ending at the first unescaped quote) or runs to the next
+// whitespace; in both, a backslash is dropped and the character after it
+// kept. Where pgx refuses the string (whitespace inside a keyword, an
+// unterminated quote, no '='), reading stops: pgx does not connect.
+func keywordValueSettings(s string) [][2]string {
+	const ws = " \t\n\r\v\f"
+	var out [][2]string
+	s = strings.TrimLeft(s, ws)
+	for len(s) > 0 {
+		eq := strings.IndexByte(s, '=')
+		if eq < 0 {
+			break
 		}
-		b.WriteByte(v[i])
+		key := strings.Trim(s[:eq], ws)
+		if strings.ContainsAny(key, ws) {
+			break
+		}
+		s = strings.TrimLeft(s[eq+1:], ws)
+		var val strings.Builder
+		if strings.HasPrefix(s, "'") {
+			i := 1
+			for ; i < len(s) && s[i] != '\''; i++ {
+				if s[i] == '\\' {
+					if i++; i == len(s) {
+						break
+					}
+				}
+				val.WriteByte(s[i])
+			}
+			if i >= len(s) {
+				break
+			}
+			s = s[i+1:]
+		} else {
+			i := 0
+			for ; i < len(s) && !strings.ContainsRune(ws, rune(s[i])); i++ {
+				if s[i] == '\\' {
+					if i++; i == len(s) {
+						break
+					}
+				}
+				val.WriteByte(s[i])
+			}
+			s = s[i:]
+		}
+		out = append(out, [2]string{key, val.String()})
+		s = strings.TrimLeft(s, ws)
 	}
-	return b.String()
+	return out
 }
 
 // resolveRuntimeEnv returns the normalized SPINE_ENV value: production,

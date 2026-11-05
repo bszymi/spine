@@ -576,15 +576,49 @@ func isParamName(s, databaseURL string) bool {
 	}
 }
 
-// URLUserinfoPassword returns the password of a postgres:// or
+// UserinfoPasswordPieces returns the password of a postgres:// or
+// postgresql:// connection string's userinfo and every piece of it that
+// pgx v5.11.0 can print on its own (INIT-024 TASK-013): nil for any other
+// string. Callers mask each one.
+//
+// pgx v5.11.0 ends the userinfo at the first '@', as libpq does; net/url
+// (and pgx v5.9.2) at the last. An unencoded '@' in a password therefore
+// splits it, and its tail becomes the host part: pgx percent-decodes it,
+// splits it into a host list at ',', and reads ports after ':', IPv6
+// brackets and a query after '?'. Connect errors name every host. So the
+// password (raw and decoded) is cut at each of those delimiters, and each
+// piece is returned with the whole.
+func UserinfoPasswordPieces(databaseURL string) []string {
+	pw, ok := urlUserinfoPassword(databaseURL)
+	if !ok {
+		return nil
+	}
+	forms := []string{pw}
+	if dec, err := url.PathUnescape(pw); err == nil && dec != pw {
+		forms = append(forms, dec)
+	}
+	out := append([]string(nil), forms...)
+	for _, f := range forms {
+		for _, piece := range strings.FieldsFunc(f, isURIDelimiter) {
+			if piece != f {
+				out = append(out, piece)
+			}
+		}
+	}
+	return out
+}
+
+// isURIDelimiter reports whether r separates the parts of a connection
+// URI that pgx v5.11.0 reads and may print on their own.
+func isURIDelimiter(r rune) bool {
+	return strings.ContainsRune("@,:[]/?&=#", r)
+}
+
+// urlUserinfoPassword returns the password of a postgres:// or
 // postgresql:// connection string's userinfo, read as widely as either
 // URI parser Spine has used reads it: from the first ':' up to the last
-// '@' before the first '/' (INIT-024 TASK-013). pgx v5.11.0 ends the
-// userinfo at the first '@', as libpq does; net/url (and pgx v5.9.2) at
-// the last. So an unencoded '@' in a password splits it under v5.11.0,
-// and its tail becomes part of the host, which connect errors name.
-// Callers mask the result and each of its '@'-separated pieces.
-func URLUserinfoPassword(databaseURL string) (string, bool) {
+// '@' before the first '/'.
+func urlUserinfoPassword(databaseURL string) (string, bool) {
 	rest, ok := strings.CutPrefix(databaseURL, "postgres://")
 	if !ok {
 		if rest, ok = strings.CutPrefix(databaseURL, "postgresql://"); !ok {
@@ -642,11 +676,8 @@ func connStringSecrets(databaseURL string) []string {
 		add(m[1])
 		add(m[2])
 	}
-	if pw, ok := URLUserinfoPassword(databaseURL); ok {
-		add(pw)
-		for _, piece := range strings.Split(pw, "@") {
-			add(piece)
-		}
+	for _, piece := range UserinfoPasswordPieces(databaseURL) {
+		add(piece)
 	}
 	return out
 }

@@ -450,9 +450,10 @@ func describeDBError(err error, dsn string) string {
 //
 // pgx v5.11.0 ends a URI's userinfo at the first '@' (libpq's rule);
 // net/url, which url.Parse below follows, at the last. An unencoded '@' in
-// a password therefore splits it, and its tail becomes part of the host
-// that a connect error names (INIT-024 TASK-013), so every '@'-separated
-// piece of 3 bytes or more is listed too.
+// a password therefore splits it, and its tail becomes the host part that
+// a connect error names, host by host (INIT-024 TASK-013), so every piece
+// workspace.UserinfoPasswordPieces finds is listed too: the whole, and
+// each piece of 3 bytes or more.
 func dsnSecrets(dsn string) []string {
 	var out []string
 	add := func(v string) {
@@ -460,14 +461,9 @@ func dsnSecrets(dsn string) []string {
 			out = append(out, v)
 		}
 	}
-	if pw, ok := workspace.URLUserinfoPassword(dsn); ok {
-		for _, piece := range strings.Split(pw, "@") {
-			if len(piece) >= 3 && piece != pw {
-				add(piece)
-				if dec, err := url.PathUnescape(piece); err == nil && dec != piece {
-					add(dec)
-				}
-			}
+	for i, piece := range workspace.UserinfoPasswordPieces(dsn) {
+		if i == 0 || len(piece) >= 3 {
+			add(piece)
 		}
 	}
 	if u, err := url.Parse(dsn); err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql") {
