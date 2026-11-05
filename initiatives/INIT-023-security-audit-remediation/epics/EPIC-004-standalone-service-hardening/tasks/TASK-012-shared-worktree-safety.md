@@ -2,12 +2,12 @@
 id: TASK-012
 type: Task
 title: "Standalone git-state safety: explicit convergence target, serialized working tree, bounded merge retries"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 # Also blocked by spine TASK-002 (CLIClient ref grammar and Merge/Checkout argv), transitively
 # through TASK-005. Add the blocked_by link once TASK-002's epic path is fixed in this initiative.
 # Design check (2026-10-06): TASK-002's path is fixed, so the link is added below. TASK-011 is
@@ -1218,6 +1218,15 @@ binding (the mutation table refers to them).
         starts with `retries exhausted (attempts=4, max_retries=3): ` exactly once.
     - A second call returns `false`.
     - `maxRetries` 0 always returns `false`.
+
+    > **Owner ruling (2026-11-05): Deviation 16 accepted for the push half.** A transient failure
+    > that leaves nothing on the target is bounded and abandoned as above
+    > (`TestMergeRetry_TransientMergeIsBoundedThenAbandoned`). A transient *push* failure after the
+    > merge landed on the local target is not abandoned: the run stays `committing` and is retried
+    > until the push lands, with an Error log once past the budget
+    > (`TestMergeRetry_TransientPushIsRetriedUntilItLands`). The exemption covers one committing
+    > episode; after a permanent push rejection sends the run back to `execute`, the next episode is
+    > bounded again (review round 2, finding 4).
 16. **P3-27, scheduler** (`adapters/scheduler`, fake store).
     - With `WithCommitRetry(fn, 3, 0)` and `WithCommitExhausted(ex)`:
       - an exhausted run calls `ex(ctx, id, 3)` and **not** `fn`;
@@ -1295,7 +1304,11 @@ binding (the mutation table refers to them).
     - `go test -race ./adapters/git/... ./core/engine/... ./core/divergence/... ./adapters/scheduler/...`;
     - `make test-scenario` **with the test database up** (`SPINE_TEST_DATABASE_URL`). Without it,
       253 of 264 scenarios skip;
+      *Waived by the owner (2026-11-05): the 31 failures are identical on `main` and outside this
+      task (review round 1, G1).*
     - `make lint`, including `lint-boundaries`, and `golangci-lint run --new-from-rev main`;
+      *Owner ruling (2026-11-05): read as "no new issues", as for TASK-001 AC 9. The full run fails
+      only with pre-existing issues on both trees, 0 new (review round 1, G2).*
     - `make lint-security`, with no new gosec finding;
     - `gofmt -l` lists no file this task adds or changes, beyond the import-order differences
       that already exist at `61994fe` in `core/divergence/convergence.go`,
@@ -2492,3 +2505,10 @@ integration)" note.
     `main`).
   - **AC 15:** a ruling on the push half (Deviation 16); INIT-023 §7f lists it as an owner wording
     amendment.
+- **2026-11-05: AC 23 waived and AC 15's push half ruled by the owner; Completed.** The owner
+  waived AC 23's "`make test-scenario` passes" (31 failures, identical on `main`) and read its
+  "`make lint`" as no new issues (0 new, as for TASK-001 AC 9). For AC 15 the owner accepted
+  Deviation 16: a transient push failure after the merge landed is retried until the push lands,
+  never abandoned, because abandoning would leave a landed merge for the next writer's push to
+  publish; failures that leave nothing on the target stay bounded. Those were the last open items;
+  the owner questions stay at their recorded defaults, and no AC needs the owner's decision.

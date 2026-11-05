@@ -2,12 +2,12 @@
 id: TASK-016
 type: Task
 title: "Ref-class push admission in the standalone git gateway (run, plan, divergence, init and non-branch refs)"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -451,6 +451,8 @@ at `:463-471` is unchanged.
 > - It cannot be closed at this layer without a real post-unpack hook (Decision 5). TASK-005's
 >   SHA-bound merge is the content-integrity control: what lands late is never what gets merged
 >   unless someone validates and approves it again.
+> - *Amended (review round 1; ratified by the owner on 2026-11-05):* `ReadTimeout` bounds only the
+>   upload, so the window has no fixed bound. See AC 16.
 > - **Required:** document the window in `docs/git-push-guide.md`'s new run-branch section
 >   (§7 item 4), and list it in Out of scope. **Not required:** any code change. AC 16 now
 >   checks the documentation.
@@ -1043,6 +1045,9 @@ The design works without answers, using the stated defaults.
         submitted, bounded by the server `ReadTimeout`;
         *Review round 1 note: that bound is wrong (it covers the upload only); the docs now state
         that the window has no fixed bound (finding R1-2/R1-4).*
+        *Amendment ratified by the owner (2026-11-05): the clause reads "a push started while
+        bound may land after the step is submitted; the window has no fixed bound, and TASK-005's
+        SHA-bound merge is the content control".*
       - that the `spine` namespace is reserved under any case-fold spelling (DC-1).
 17. **Gates.**
     - `go build ./...`, `go vet ./...` and `go test ./...` are green.
@@ -1568,7 +1573,7 @@ gaps. Each was checked against the code and reproduced before acting.
 - **AC 16 / DC-8 now contradicts its original "bounded by `ReadTimeout`" clause.** It is superseded
   in place by the round-1 annotation, because no time bound exists. **Owner ratification
   requested.** This is an open question, not a code change; the follow-up in `epic.md` is where a
-  bound would come from.
+  bound would come from. *(Ratified by the owner on 2026-11-05.)*
 - **Every numbered AC maps to a test or a check.** No action.
 
 **Mutation checks (review round 2)**, each applied alone through `go test -overlay`:
@@ -1715,3 +1720,9 @@ All `s2f_*` databases were dropped afterwards, and no container was started.
   - **AC 16 / DC-8 (owner):** ratify the amendment that replaced the "bounded by `ReadTimeout`"
     clause (no time bound exists; review round 2). INIT-024 TASK-005 has since added an apply-time
     re-check of run-branch admission, and the docs describe it.
+- **2026-11-05: AC 16 / DC-8 amendment ratified by the owner; Completed.** The owner ratified the
+  amendment: the admission-time window has no fixed bound (the server `ReadTimeout` covers only the
+  upload), and TASK-005's SHA-bound merge stays the content control. Since then INIT-024 TASK-005
+  (Completed) re-checks run-branch admission after the pack is received, before refs move. That was
+  the last open item; the owner questions stay at their recorded defaults, and no AC needs the
+  owner's decision.

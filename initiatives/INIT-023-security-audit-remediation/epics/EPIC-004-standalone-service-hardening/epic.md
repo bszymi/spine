@@ -2,7 +2,7 @@
 id: EPIC-004
 type: Epic
 title: Standalone Service Hardening
-status: In Progress
+status: Completed
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
@@ -98,9 +98,12 @@ They are still real defects for anyone who runs `spine serve`.
 | TASK-015 | SSE field safety, shared-mode tenant scoping, git-endpoint auth and gitpool token-host scoping | P3-28, P3-29, P3-30, latent gitpool | 3 | EPIC-001 TASK-016 | `gitpool_tokenleak`, `verify-r1-3`, `standalone-service` |
 | TASK-012 | Standalone git-state safety: explicit convergence target, serialized working tree, bounded merge retries | F8, F9, P3-27 | 4 | EPIC-001 TASK-002, EPIC-001 TASK-004, EPIC-002 TASK-005 | `skeptic_conv`, `verify-r1-11`, `gap2-git-state-concurrenc`, `verify-r2-2` |
 
-**Status (2026-11-05):** TASK-013, TASK-014 and TASK-015 are Completed (on 2026-11-05 the owner
-accepted TASK-013's Deviation 10 and confirmed TASK-015's OQ2 "never"). TASK-012 is In Progress;
-its "Status after GitHub CI" note lists what remains. The epic stays In Progress.
+**Status (2026-11-05):** All four tasks are Completed. TASK-014 closed first; TASK-013
+(Deviation 10 accepted), TASK-015 (OQ2 "never" confirmed) and TASK-012 (AC 23 waived, AC 15's push
+half ruled) closed on the owner's rulings of 2026-11-05. The acceptance criteria in §6 are met by
+the tasks. The F9/P3-27 retry bound applies as TASK-012 AC 15 now reads: a transient push failure
+after the merge landed is retried until it lands. SMP's GitHub CI at the pin `ce0b9c9e` (SMP CI
+42001537129) passed every job. The epic is Completed.
 
 ---
 

@@ -2,10 +2,10 @@
 id: TASK-008
 type: Task
 title: "Submit ownership, step-output evidence and compare-and-swap state writes"
-status: In Progress
+status: Completed
 work_type: security
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -1051,10 +1051,17 @@ must make it fail again.
       - nil, with no event, on the publish miss;
       - no retry execution on the `failStepWithClassification` miss;
       - the assignment row is cancelled on the `ClaimStep` miss.
+
+    > **Amended by the owner (2026-11-05)** (review round 2, Deviation 18): the last row reads "the
+    > assignment row is removed on the `ClaimStep` miss (cancelled when the assignment store lacks
+    > `engine.AssignmentRowDeleter`)".
 11. **Fallback is unchanged.** With a store lacking the capability (`mockRunStore`), the §3 writers
     call `UpdateStepExecution` exactly as before. `TestStepWrites_FallbackWithoutCapability` records
     the calls. The whole existing `go test ./core/engine/` suite passes without editing any existing
     test.
+
+    > **Amended by the owner (2026-11-05)** (review round 1, Deviation 2): "… without editing any
+    > existing test other than the TASK-005 tests that pinned the removed re-route".
 12. **Scheduler and gateway fallbacks.**
     - A submit that completes the step between `ListActiveStepExecutions` and the timeout write
       leaves it `completed`, with no `step_timeout` event and no `TimeoutsDetected` increment.
@@ -1104,6 +1111,12 @@ must make it fail again.
     - (i) After the submit, `run.CommitMeta["spine.evidence.<execution_id>"]` decodes to the same
       `branch_change` and `required_outputs_unchanged` as the event. A workflow outcome
       `commit: {spine.evidence.x: …}` is stripped (TASK-005's `stripReserved`).
+
+    > **Amended by the owner (2026-11-05)** (review round 2, Deviation 17): AC 14 gains case (j).
+    > Head ≠ previous, with the fake `Diff` returning no entry, gives `status:"unchanged"`,
+    > `changed_paths:0`, `reason:"head_moved_tree_unchanged"` and `required_outputs_unchanged:true`,
+    > and the Warn is logged only after the terminal write applied; on a real repository an empty
+    > commit, and a change plus its revert, are flagged the same way.
 15. **Event IDs.** Two attempts of the same step emit two distinct `step_completed` IDs containing
     their execution IDs. Re-routing a completed execution through the crash-recovery callback emits
     the same ID again. The publish step's event carries the documented base fields.
@@ -1177,6 +1190,12 @@ must make it fail again.
         any later execution exists;
       - is the only non-test caller pattern left for re-routing:
         `grep -n 'SubmitStepResult(' service/cmd/spine/*.go` prints nothing.
+
+    > **Amended by the owner (2026-11-05)** (review round 1, Deviations 4 and 6): the mutation
+    > clause reads "deleting the terminal check in `SubmitStepResult` fails the first; deleting it
+    > and the snapshot handoff fails the second". The `RecoverCompletedStep` row reads "… or when a
+    > later execution exists, except exactly one waiting successor under the deterministic id, which
+    > is resumed".
 22. *(Design check.)* **Auto-ack under the capability.** With a fake that implements
     `StepExecutionTransitioner`, a submission on an `assigned` execution completes and routes.
     The terminal write expects `(in_progress, actor)`. Mutation: re-using the pre-ack snapshot
@@ -2005,3 +2024,10 @@ integration)" note.
   and step-output evidence step included. Remaining (owner): the wording amendments the Handoffs
   list, for AC 11 and AC 21 (proposed in review round 1) and for AC 10 and AC 14 (review round 2;
   Deviations 18 and 17).
+- **2026-11-05: AC 10, 11, 14 and 21 amended by the owner; Completed.** The owner adopted the
+  proposed wording for all four (inline notes on each AC): AC 10, a lost claim's row is removed;
+  AC 11, the two TASK-005 tests that pinned the removed re-route were edited; AC 14, case (j), a
+  moved head with an unchanged tree is flagged; AC 21, the mutation clause and the
+  `RecoverCompletedStep` successor rule. AC 20's scenario row stays "as on `main`" under the
+  orchestrator's rule for the known pre-existing failures. Those were the last open items; the
+  owner questions stay at their recorded defaults, and no AC needs the owner's decision.
