@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -227,6 +229,12 @@ func exactNumbers(v any) (any, error) {
 // without a second decode. Kept byte-for-byte identical to the encoder
 // projectWorkflow used before INIT-023 TASK-011 — SMP reads the stored
 // JSONB raw, so the shape of an accepted file must not change.
+//
+// Before json.Marshal it refuses, explicitly, the decoded shapes Go
+// 1.26's encoding/json refused (refuseUnencodable, INIT-024 TASK-014).
+// The set of files that project must not depend on the JSON engine the
+// binary was built with: Go 1.27's v2-backed engine accepts some of them,
+// and SMP compiles this package with its own toolchain.
 func encodeProjection(content []byte) ([]byte, any, error) {
 	node, err := yamlsafe.Decode(content)
 	if err != nil {
@@ -236,11 +244,77 @@ func encodeProjection(content []byte) ([]byte, any, error) {
 	if err := node.Decode(&raw); err != nil {
 		return nil, nil, fmt.Errorf("decode workflow document: %v", err)
 	}
+	if err := refuseUnencodable(raw, ""); err != nil {
+		return nil, nil, err
+	}
 	def, err := json.Marshal(raw)
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode workflow definition: %v", err)
 	}
 	return def, raw, nil
+}
+
+// refuseUnencodable walks a value yaml.v3 decoded into `any` and refuses
+// the two shapes whose JSON encoding is not stable across encoding/json
+// engines (INIT-024 TASK-014):
+//
+//   - A map[interface{}]interface{}: yaml.v3 builds one for a mapping
+//     whose keys are not all plain strings — an integer, boolean, null,
+//     float or timestamp key, or a key with a tag other than !!str (a
+//     `!!binary` key decodes to a string, but the mapping is still built
+//     this way). Go 1.26's json.Marshal refused the type whatever its keys
+//     (UnsupportedTypeError), so the projection refused the file. Go
+//     1.27's v2-backed engine marshals integer and string keys as JSON
+//     strings and accepts it: `{1: x}` became `{"1":"x"}`, and a
+//     `!!binary ZGVzY3JpcHRpb24=` key became "description". Refusing the
+//     type, not only the non-string keys, is exactly the Go 1.26 set, so
+//     SMP on either Go version and Spine agree on which files project.
+//     It also keeps the property INIT-023 TASK-011 relies on: a stored
+//     key is the key a YAML reader sees.
+//   - A NaN or ±Inf float (`.nan`, `.inf`): JSON has no representation.
+//     Both engines refuse it today; the explicit check keeps the round
+//     trip from resting on that.
+//
+// Nothing else yaml.v3 produces for `any` (string, bool, int, int64,
+// uint64, finite float64, nil, []any, map[string]any) is encoded
+// differently by the two engines, except a string holding invalid UTF-8
+// (only a !!binary value can), which both coerce to U+FFFD and the
+// DeepEqual in ProjectionDefinition refuses.
+//
+// The error names the location, never the value. Keys are visited in
+// sorted order, so a file with several such shapes always reports the
+// same one.
+func refuseUnencodable(v any, at string) error {
+	switch t := v.(type) {
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) {
+			return fmt.Errorf("%s is a non-finite number (JSON has no NaN or infinity)", locationOr(at))
+		}
+	case map[any]any:
+		where := "the top-level mapping"
+		if at != "" {
+			where = "the mapping at " + at
+		}
+		return fmt.Errorf("%s has a key that is not a plain YAML string (the projection stores JSON, whose object keys are strings)", where)
+	case map[string]any:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if err := refuseUnencodable(t[k], joinLocation(at, k)); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for i, child := range t {
+			if err := refuseUnencodable(child, fmt.Sprintf("%s[%d]", locationOr(at), i)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func roundTripErr(path string, cause error) error {

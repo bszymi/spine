@@ -180,6 +180,84 @@ func TestProjectionDefinition_RefusesRoundTripFailures(t *testing.T) {
 	}
 }
 
+// nonStringKeyInputs pass strict Parse, but a mapping in each has a key
+// yaml.v3 does not read as a plain string, so decoding into `any` gives a
+// map[interface{}]interface{} (INIT-024 TASK-014). Go 1.26's json.Marshal
+// refused that type whatever its keys, and so the projection refused
+// these files. Go 1.27 turns on the v2-backed encoding/json engine, which
+// marshals integer and tagged-string keys as JSON strings (`{"1":"x"}`)
+// and would accept most of them. The refusal is now explicit, so these
+// files are refused under every Go version: SMP compiles this package
+// with its own toolchain.
+func nonStringKeyInputs() map[string]string {
+	commit := func(m string) string { return rtBase + rtStepsWith("", ", commit: "+m) }
+	return map[string]string{
+		"int_key":             commit("{1: x}"),
+		"negative_int_key":    commit("{-1: x}"),
+		"bool_key":            commit("{true: x}"),
+		"null_key":            commit("{~: x}"),
+		"float_key":           commit("{1.5: x}"),
+		"timestamp_key":       commit("{2026-10-06: x}"),
+		"mixed_keys":          commit("{a: x, 1: y}"),
+		"binary_tagged_key":   commit("{!!binary aGk=: x}"),
+		"int_key_block_style": rtBase + "steps:\n  - id: a\n    name: A\n    type: manual\n    outcomes:\n      - id: ok\n        name: OK\n        next_step: end\n        commit:\n          1: x\n",
+		"custom_tagged_key":   commit("{!k a: x}"),
+		// The key reads as `description` once decoded, so strict Parse
+		// takes it for the known field; a YAML viewer shows a base64 blob.
+		"top_level_binary_tagged_key": strings.Replace(rtBase, "description: d", "!!binary ZGVzY3JpcHRpb24=: d", 1) + rtSteps,
+		"validation_config":           rtBase + rtStepsWith("    validation:\n      - type: t\n        config: {1: x}\n", ""),
+		"precondition_config":         rtBase + rtStepsWith("    preconditions:\n      - type: t\n        config: {2: y}\n", ""),
+	}
+}
+
+func TestProjectionDefinition_RefusesNonStringMappingKeys(t *testing.T) {
+	for name, body := range nonStringKeyInputs() {
+		t.Run(name, func(t *testing.T) {
+			if _, err := workflow.Parse("workflows/task-default.yaml", []byte(body)); err != nil {
+				t.Fatalf("precondition: Parse must accept this input, got %v", err)
+			}
+			_, def, err := workflow.ProjectionDefinition("workflows/task-default.yaml", []byte(body))
+			if err == nil {
+				t.Fatalf("expected ErrProjectionRoundTrip, got def=%s", def)
+			}
+			if !errors.Is(err, workflow.ErrProjectionRoundTrip) {
+				t.Fatalf("expected ErrProjectionRoundTrip, got %v", err)
+			}
+			// The explicit check refuses it, not the JSON encoder: the
+			// result must not depend on which encoding/json engine the
+			// binary was built with.
+			if !strings.Contains(err.Error(), "not a plain YAML string") {
+				t.Fatalf("the refusal must come from the explicit mapping-key check, got %v", err)
+			}
+		})
+	}
+}
+
+// INIT-024 TASK-014: `.nan` and `.inf` are strings to strict Parse (the
+// fields hold strings) but floats to the `any` decode, and JSON cannot
+// hold them. Both encoding/json engines refuse them; the explicit check
+// keeps the refusal independent of the engine.
+func TestProjectionDefinition_RefusesNonFiniteNumbers(t *testing.T) {
+	for name, body := range map[string]string{
+		"nan_name":          strings.Replace(rtBase, "name: n", "name: .nan", 1) + rtSteps,
+		"inf_description":   strings.Replace(rtBase, "description: d", "description: .inf", 1) + rtSteps,
+		"neg_inf_in_commit": rtBase + rtStepsWith("", ", commit: {k: -.inf}"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := workflow.Parse("workflows/task-default.yaml", []byte(body)); err != nil {
+				t.Fatalf("precondition: Parse must accept this input, got %v", err)
+			}
+			_, def, err := workflow.ProjectionDefinition("workflows/task-default.yaml", []byte(body))
+			if !errors.Is(err, workflow.ErrProjectionRoundTrip) {
+				t.Fatalf("expected ErrProjectionRoundTrip, got err=%v def=%s", err, def)
+			}
+			if !strings.Contains(err.Error(), "non-finite number") {
+				t.Fatalf("the refusal must come from the explicit check, got %v", err)
+			}
+		})
+	}
+}
+
 // Review round 1 (finding H): a value the projection row's btree-indexed
 // columns cannot hold — PostgreSQL refuses an index entry over about
 // 2.7 KB — is a round-trip rejection, not a store error that wedges the
