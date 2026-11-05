@@ -136,7 +136,7 @@ All seven audit PoCs reproduce unchanged with `go test -overlay`:
 The design below was prototyped against `61994fe` and SMP `80995559` with `go test -overlay`. No
 repository file was changed.
 
-- Prototype sources: `spine-management-platform/tmp/init027-orchestration/spine-init023/prototypes/TASK-013/`.
+- Prototype sources: `local-scratch/spine-init023/prototypes/TASK-013/`.
 - Overlays: `…/_work/task013/`.
 
 Results:
@@ -1144,7 +1144,7 @@ TASK-012 carries this change, and that task's gates must include AC 18.
 The design was checked adversarially against Spine `61994fe` and SMP `80995559`:
 - the audit PoCs were re-run against HEAD and against the prototype overlay;
 - new probes were run with `go test -overlay`, under
-  `tmp/init027-orchestration/spine-init023/_work/task013-check/`;
+  `local-scratch/spine-init023/_work/task013-check/`;
 - SMP callers were grepped.
 
 Neither repository was modified. The designer's text is kept, and each change is marked inline as
@@ -1395,7 +1395,7 @@ No design point required a schema change.
 
 ### SMP compatibility gate (AC 18)
 
-`/Users/bartoszszymichowski/42sid/i23/s-T013/smp`, detached at SMP `main` `7d4e7cc9`, `../spine` =
+`local-worktree`, detached at SMP `main` `7d4e7cc9`, `../spine` =
 this worktree, no `vendor/`, no `tmp/`, no SMP file changed (`git status` clean after every step).
 Databases: shared PostgreSQL 17.10 + pgvector, own `s013_smp_it` (platform migrations via
 `go run ./dev/apply-migrations -set platform -dir migrations`) and `s013_spine_rt`
@@ -1512,7 +1512,7 @@ Named in the CHANGELOG (log shape).
 | `git diff main...HEAD -- migrations/`; `store.AuthStore` | empty; unchanged (no `adapters/` change at all) |
 | `codex review --base main` (plain, on `26e9a84`) | "No actionable regressions were found in the changes relative to the supplied merge base." No P1/P2 findings; nothing rejected. |
 
-**SMP compatibility gate (round 1).** `/Users/bartoszszymichowski/42sid/i23/s-T013/smp` at
+**SMP compatibility gate (round 1).** `local-worktree` at
 `7d4e7cc9`, `../spine` = this worktree, no `vendor/` or `tmp/`, `git status` clean throughout. The
 only round-1 change that reaches SMP is in `core/auth/bootstrap.go`: a Warn in a branch SMP's
 single-bearer calls never take, and comments.
@@ -1586,7 +1586,7 @@ test), `6d746fa` (docs), then this notes commit.
 | `git diff main...HEAD -- migrations/`; `adapters/` | empty; untouched (no schema change) |
 | `codex review --base main` (plain, on `6d746fa` plus this file's uncommitted notes) | "No actionable regressions were identified." No P1/P2 findings; nothing rejected. |
 
-**SMP compatibility gate (round 2).** `/Users/bartoszszymichowski/42sid/i23/s-T013/smp` at
+**SMP compatibility gate (round 2).** `local-worktree` at
 `7d4e7cc9`, `../spine` = this worktree, `git status` clean throughout. The only round-2 change that
 reaches SMP is **comments** in `core/auth/bootstrap.go` (test files do not reach SMP).
 

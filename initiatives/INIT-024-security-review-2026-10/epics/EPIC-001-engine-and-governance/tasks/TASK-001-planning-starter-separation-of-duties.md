@@ -133,7 +133,7 @@ This task closes **N-3** from the 2026-10-22 review.
   missing, so SMP must add the test in obligation 4.
 - **SMP obligations** before `SMP_STEP_SEPARATION_OF_DUTIES` is turned on with this Spine. They are
   for SMP EPIC-004 TASK-012's closing bump; detail is in the review record
-  `tmp/init027-orchestration/i24/t001-rev/REVIEW.md`.
+  `local-scratch/i24/t001-rev/REVIEW.md`.
   1. **`embeddedArtifacts.CreateEntry` binds the workspace step-entry handle.**
      - Before `resolveCreateEntryTarget` / `StartPlanningRun`, resolve
        `ResolveSpineActorID(ctx, sc.WorkspaceID, auth.ActorIDFrom(ctx))`. That is
@@ -258,7 +258,7 @@ Implementation Notes record both runs.
 Branch `init/INIT-024-TASK-001-planning-starter-sod`, cut from `init/INIT-024-scaffold` `12376b55`
 (= Spine local `main` `a560c210` + the INIT-024 scaffold; no Go file differs from `a560c210`). Diff
 base: `git diff init/INIT-024-scaffold...HEAD`. Scratch (git-ignored, SMP working tree):
-`tmp/init027-orchestration/i24/t001/`.
+`local-scratch/i24/t001/`.
 
 ### Owner questions (defaults recorded, pending the owner)
 
@@ -527,7 +527,7 @@ override.
 
 ### Review round 1 (independent reviewer at `b1a1548c`; fixes in `8fe04d62`)
 
-Report: `tmp/init027-orchestration/i24/t001-rev/REVIEW.md` (SMP working tree, git-ignored). It found
+Report: `local-scratch/i24/t001-rev/REVIEW.md` (SMP working tree, git-ignored). It found
 no P1 or P2.
 
 - **P3, fixed: the recorded starter was never checked against the step-entry resolver.**

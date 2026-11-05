@@ -328,7 +328,7 @@ no auth service at all still answers `503` to a bearer.
 
 ### Gates
 
-At `087bc243` (code identical to these notes' commit). Logs in SMP `tmp/init027-orchestration/i24/t006/`.
+At `087bc243` (code identical to these notes' commit). Logs in SMP `local-scratch/i24/t006/`.
 
 | Gate | Result |
 |---|---|
@@ -464,7 +464,7 @@ missing workspace's `401`, status, body and headers; red at `000c5461`: five `50
 in `serve_builders.go` (`buildGitHTTPHandler`): this task's `TrustedCIDRsByWorkspace` and
 TASK-003's `TreeBudget` are both kept.
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |

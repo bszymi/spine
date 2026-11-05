@@ -197,7 +197,7 @@ workflow definition, or the guard over it, is less strict than the rest of the s
 
 Branch `init/INIT-024-TASK-002-workflow-definition-strictness`, cut from `init/INIT-024-scaffold`
 `12376b55` (no Go file differs from `a560c210`). Diff base: `git diff init/INIT-024-scaffold...HEAD`.
-Scratch (git-ignored, SMP working tree): `tmp/init027-orchestration/i24/t002/`. Databases used the
+Scratch (git-ignored, SMP working tree): `local-scratch/i24/t002/`. Databases used the
 prefix `s24002_` and were dropped.
 
 ### Owner questions (defaults recorded, pending the owner)
@@ -368,7 +368,7 @@ sub-session (`source: {"subagent":"review"}`, `cwd` = the worktree), model confi
 
 ### Review round 1 (no P1/P2; three P3s fixed)
 
-Report: SMP `tmp/init027-orchestration/i24/t002-reviews/REVIEW.md`, over `f6c81316`.
+Report: SMP `local-scratch/i24/t002-reviews/REVIEW.md`, over `f6c81316`.
 
 1. **The backstop governed the whole directory** (`422cb162`). It added each matched file's parent
    as a prefix entry, so a script, README or nested file the same merge changed beside a
@@ -441,7 +441,7 @@ TASK-001's `recordLifecycleStarter` (different functions); `go vet` of `core/eng
 plus `core/workflow`, `workflows` and `adapters/projection` passed at the phase-1 head. No
 coordination commit was needed.
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |

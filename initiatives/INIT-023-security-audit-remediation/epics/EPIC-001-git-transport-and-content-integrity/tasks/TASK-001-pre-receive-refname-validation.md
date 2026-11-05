@@ -130,7 +130,7 @@ documentation touches.
 >   - `KNOWN-LIMITATIONS.md` → Security Notes;
 >   - the `CHANGELOG.md` "Unreleased" staging section.
 > - **Prototype.** The prototype under
->   `tmp/init027-orchestration/spine-init023/prototypes/TASK-001/` (`overlay.json`) implements
+>   `local-scratch/spine-init023/prototypes/TASK-001/` (`overlay.json`) implements
 >   exactly these three non-test files. It also carries the five test files named in the ACs.
 
 ## Design
@@ -332,7 +332,7 @@ All existing tests pass un *[designer's text truncated here]*
 > mid-sentence at 11,330 bytes (last written 19:22). The rest of §5 and every later section were
 > never written: Decisions, Owner questions, Acceptance Criteria, Out of scope and Implementation
 > Notes. **Everything from here to the end of the file is design-check text.** It is built from:
-> - the designer's prototype (`tmp/init027-orchestration/spine-init023/prototypes/TASK-001/`);
+> - the designer's prototype (`local-scratch/spine-init023/prototypes/TASK-001/`);
 > - the sibling SMP INIT-027/EPIC-004 TASK-001 (`batch7/E4-TASK-001-nul-ref-push-gate.md`), kept at
 >   parity;
 > - the runs recorded against each AC.

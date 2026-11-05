@@ -256,7 +256,7 @@ interface (absent in v5.9.2 and v5.10.0).
 Also informational: `govulncheck -tags integration,scenario -test ./...` on the branch reports
 0 reachable, the same 3 module-level chi IDs.
 
-### Gates (branch head before this notes commit, `66cd0915`; logs in SMP repo `tmp/init027-orchestration/i24/t009/`)
+### Gates (branch head before this notes commit, `66cd0915`; logs in SMP repo `local-scratch/i24/t009/`)
 
 | Gate | Command | Result |
 |---|---|---|
@@ -344,7 +344,7 @@ Also informational: `govulncheck -tags integration,scenario -test ./...` on the 
 
 ### Review round 1 (2026-10-23, head `9e166eb2`): five P3s fixed
 
-The orchestrator saved the review at SMP repo `tmp/init027-orchestration/i24/t009-reviews/REVIEW.md`.
+The orchestrator saved the review at SMP repo `local-scratch/i24/t009-reviews/REVIEW.md`.
 It had no P1/P2 and five P3s, each fixed per the orchestrator's rulings. Commits:
 - `b2fff876`: pincheck rework, ci.yml, dependabot.yml comments;
 - `36465947`: docs;
@@ -415,7 +415,7 @@ commands for the owner or CI are `docker build --tag spine:ci .` (the CI `image-
 `make docker-build`, and `make test-db-up` / `docker compose -f docker-compose.test.yaml up -d`
 followed by `docker compose -f docker-compose.test.yaml ps`, on a machine that may pull.
 
-**Gates for the round** (on `29489ef8`; logs in SMP repo `tmp/init027-orchestration/i24/t009/r1/`):
+**Gates for the round** (on `29489ef8`; logs in SMP repo `local-scratch/i24/t009/r1/`):
 
 | Gate | Result |
 |---|---|
@@ -468,7 +468,7 @@ SMP: against the integration head, SMP `82899ace` builds and vets unchanged unde
 `-mod=readonly` and selects the same pgx v5.9.2 / x/text v0.42.0 / x/sync v0.23.0 / chi v5.2.5,
 so **no SMP go.mod or go.sum change** is needed (the handoff above holds).
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |

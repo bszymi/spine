@@ -76,7 +76,7 @@ Line numbers refer to Spine `main` at `61994fe`. SMP references are to SMP `main
    - This is a durable governance takeover without operator authority.
 5. **Re-verified for this design (2026-10-06).** The three audit PoCs were compiled into
    Spine `61994fe` with `go test -overlay` (overlay at
-   `tmp/init027-orchestration/spine-init023/_work/task006/overlay_poc.json` in SMP). All
+   `local-scratch/spine-init023/_work/task006/overlay_poc.json` in SMP). All
    three PASS, which proves the hole:
    - `TestPOC_R12_SelfReviewedRunSlipsGovernanceFilesIntoMain` (`poc/verify-r1-2`): `main`
      ends with `rules: []` and a task-default that has no `review` step.
@@ -87,7 +87,7 @@ Line numbers refer to Spine `main` at `61994fe`. SMP references are to SMP `main
 
    > **Design-check note (2026-10-06): the planned changed-path computation can be bypassed.**
    > The three PoCs were re-run at `61994fe` and still PASS. A new probe,
-   > `tmp/init027-orchestration/spine-init023/_work/task006/designcheck/zz_dc_task006_crisscross_test.go`
+   > `local-scratch/spine-init023/_work/task006/designcheck/zz_dc_task006_crisscross_test.go`
    > (overlay `designcheck/overlay.json`, `go test -overlay … -run TestDesignCheck_TASK006 ./core/engine/`),
    > PASSES and shows the bypass with Spine's real `CLIClient`:
    > - the attacker's run branch merges another run's branch (R2, which tightened
@@ -2397,7 +2397,7 @@ What changed for this task:
 **Gates.** The code gates ran on `a6acc720` unless the row names `96cf8e40`. The only code
 change after `96cf8e40` is `a6acc720`'s `HEAD` rewrite in `MergeBases`, which no engine or
 scenario caller reaches (they pass `main` or object ids). Logs are in
-`spine-management-platform/tmp/init027-orchestration/w4/agents/int-spine/`.
+`local-scratch/w4/agents/int-spine/`.
 
 | Gate | Result |
 |---|---|
@@ -2507,7 +2507,7 @@ findings read from the review sub-session JSONL under `~/.codex/sessions/2026/10
 session `01a154ce-eb74-7e82-90e2-2575bf420173`, no findings. Two clean rounds; no third was run.
 
 **Gates** (final code `f47131f4`; logs in
-`spine-management-platform/tmp/init027-orchestration/w4/agents/fix-spine/`, `chainD.out`,
+`local-scratch/w4/agents/fix-spine/`, `chainD.out`,
 `chainS.out` and the directories they name).
 
 | Gate | Result |
@@ -2614,7 +2614,7 @@ No SMP command failed, so there is no compatibility break, and no run against `.
 - Docker: the only containers were the `git-floor` run, the two Linux-only SMP runs and the
   `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
   VM had 5.8 GB free at the lowest check.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+- Logs: `local-scratch/w4/agents/gate-spine/`.
 
 ### Integration follow-up (wave 4) (2026-10-19)
 

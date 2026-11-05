@@ -1434,7 +1434,7 @@ came from self-review.
 
 Re-run on `a49d811` with the same results.
 
-SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T016/smp`, detached at `7d4e7cc9`, no `vendor/`
+SMP checkout `local-worktree`, detached at `7d4e7cc9`, no `vendor/`
 or `tmp/`; `go list -m` resolves `github.com/bszymi/spine => …/i23/s-T016/spine`. Not modified
 (`git status` clean after every step).
 

@@ -83,7 +83,7 @@ materialise the tree. This task closes the residual.
 *(Implementation, 2026-10-31. Branch `init/INIT-024-TASK-011-aggregate-checkout-bound`, cut from Spine local
 main `854a1e08` (INIT-024 TASK-001…009 + integration A). Run on macOS, git 2.54.0, go 1.26.5, and on git 2.39.5
 in the local `golang:1.26-bookworm` image for the `git-floor` job. Scratch logs: SMP repo
-`tmp/init027-orchestration/i24/t011/`. Status stays In Progress until review.)*
+`local-scratch/i24/t011/`. Status stays In Progress until review.)*
 
 ### What was built
 

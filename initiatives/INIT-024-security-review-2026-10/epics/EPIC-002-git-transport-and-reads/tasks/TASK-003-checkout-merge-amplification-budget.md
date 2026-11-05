@@ -231,7 +231,7 @@ record both runs.
 *(Implementation, 2026-10-23. Branch `init/INIT-024-TASK-003-checkout-merge-amplification-budget`, cut
 from `init/INIT-024-scaffold` `12376b55` (= `a560c210` + the INIT-024 artifacts; no code differs). Run
 on macOS, git 2.54.0, go 1.26.5, and on git 2.39.5 in the local `golang:1.26-bookworm` image for the
-`git-floor` job. Scratch logs: SMP repo `tmp/init027-orchestration/i24/t003/`.)*
+`git-floor` job. Scratch logs: SMP repo `local-scratch/i24/t003/`.)*
 
 ### Rulings and owner-question defaults (recorded, pending the owner)
 
@@ -708,7 +708,7 @@ auto-merged. Coordination `55789b28`:
 The phase-2 codex round (`--base main`, below) is the first codex review of `5636c02d` and
 `e57a6741`.
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |

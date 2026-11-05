@@ -352,7 +352,7 @@ Verified with overlay probes on 2026-10-06:
 
 > **Design-check note (2026-10-06): two content classes pass `Parse` but must still be rejected
 > here, or they wedge the sync as "infrastructure".** Re-verified with an independent overlay
-> probe (`tmp/init027-orchestration/spine-init023/design-check/task011/zz_probe_task011_test.go`).
+> probe (`local-scratch/spine-init023/design-check/task011/zz_probe_task011_test.go`).
 >
 > 1. **U+0000 in any string.** `name: "a\0b"`, or a `\0` inside `commit:` / `config:` map
 >    values, passes `Parse` *and* the round trip.
@@ -1515,7 +1515,7 @@ Adversarial design check, 2026-10-06, against Spine `61994fe` and SMP `80995559`
   was probed against attack bodies, the 15 shipped files, and all 55 workflow-shaped Go string
   literals in both repositories.
 - A git 2.54 scratch repository tested ref shadowing and gitlink reads.
-- The probe sources and overlays are in `tmp/init027-orchestration/spine-init023/design-check/task011/`.
+- The probe sources and overlays are in `local-scratch/spine-init023/design-check/task011/`.
 
 **What held:**
 - Every `file:line` reference that a design claim rests on was opened, about 60 across both
@@ -1806,7 +1806,7 @@ committed):
 
 ### SMP compatibility gate
 
-`/Users/bartoszszymichowski/42sid/i23/s-T011/smp` detached at SMP `7d4e7cc9`, `../spine` = this
+`local-worktree` detached at SMP `7d4e7cc9`, `../spine` = this
 worktree, no `vendor/`, no SMP file modified (`git status` empty after every run). Packages: the 31
 that depend on a changed Spine package (`go list -deps`) plus `internal/docmemory`.
 

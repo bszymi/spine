@@ -178,7 +178,7 @@ is standalone-only; it carries a parity note for SMP's own gateway.
 `init/INIT-024-wave3-base` `55789b28` (integration A with TASK-003 merged: TASK-001/002/003/006/007/
 008/009 in). Run on macOS (APFS, case- and normalization-insensitive), git 2.54.0, go 1.26.10, and on
 git 2.39.5 in the local `golang:1.26-bookworm` image (Linux, case-sensitive) for the `git-floor` job.
-Scratch logs: SMP repo `tmp/init027-orchestration/i24/t005/`. Line references below are to the
+Scratch logs: SMP repo `local-scratch/i24/t005/`. Line references below are to the
 branch.)*
 
 ### Rulings and owner-question defaults (recorded, pending the owner)
@@ -436,7 +436,7 @@ is internal to Spine), so it needs its own:
 
 ### Review round 1 (2026-10-28; security + correctness review of `f4baae12`: 0 P1/P2, 2 P3, P4s)
 
-Report: SMP repo `tmp/init027-orchestration/i24/t005-reviews/REVIEW.md`; the reviewer's probes and
+Report: SMP repo `local-scratch/i24/t005-reviews/REVIEW.md`; the reviewer's probes and
 mutants `i24/t005-rev/`. Rulings by the coordinator. Red runs at `f4baae12`: `go test -overlay`
 mapping the five githttp source files and the seams file to their `f4baae12` content (plus a
 no-op `pgrSetProbeRetry`), the round-1 internals-only test file removed (`rr1/overlay-f4ba.json`,

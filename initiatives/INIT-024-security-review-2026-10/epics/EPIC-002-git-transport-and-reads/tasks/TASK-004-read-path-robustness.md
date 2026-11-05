@@ -218,7 +218,7 @@ above was re-located on that base: the functions this task changes are byte-iden
 `parseNameStatusZ` hash the same; `refgrammar.go`, `discovery.go`, `sweep.go`, `service.go` and
 `output_evidence.go` are unchanged), so a red run at the base is a red run at `a560c210`. Run on
 macOS, git 2.54.0, go 1.26.10, and on git 2.39.5 in the local `golang:1.26-bookworm` image for the
-`git-floor` job. Scratch: SMP repo `tmp/init027-orchestration/i24/t004/`.)*
+`git-floor` job. Scratch: SMP repo `local-scratch/i24/t004/`.)*
 
 ### Rulings and owner-question defaults (recorded, pending the owner)
 
@@ -452,7 +452,7 @@ after; `s24004_*` databases dropped. No SMP change.
 
 ### Review round 1 (2026-10-28; correctness + security review of `d1f5e6e1`: 0 P1/P2, one P3, P4s)
 
-Report: SMP repo `tmp/init027-orchestration/i24/t004-reviews/REVIEW.md`; probes `i24/t004-rev/`.
+Report: SMP repo `local-scratch/i24/t004-reviews/REVIEW.md`; probes `i24/t004-rev/`.
 Fixes on this branch, rulings by the coordinator:
 
 | Ruling | Finding | What was done | Tests (red at `d1f5e6e1` / mutation) |
