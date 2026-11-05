@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: Secrets, Delivery and Projection
-status: In Progress
+status: Completed
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
@@ -93,9 +93,10 @@ Nothing in this epic adds runtime schema.
 All three tasks are wave 2 and independent of each other. EPIC-001 TASK-003 rebases on
 TASK-011, and EPIC-002 TASK-006 is blocked by it.
 
-**Status (2026-11-05):** TASK-009 and TASK-010 are Completed (TASK-009's last item, AC19, was
-waived by the owner on 2026-11-05). TASK-011 is In Progress; its "Status after GitHub CI" note
-lists what remains. The epic stays In Progress.
+**Status (2026-11-05):** All three tasks are Completed. TASK-010 closed first; TASK-009 (AC19
+waived) and TASK-011 (AC 18 and AC 26 scenario clauses waived, AC 24 met through SMP's GitHub CI)
+closed on the owner's rulings of 2026-11-05. The acceptance criteria in §6 are met by the tasks.
+The epic is Completed.
 
 ---
 

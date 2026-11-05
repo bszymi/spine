@@ -6,7 +6,7 @@ status: In Progress
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md
@@ -84,6 +84,11 @@ The PoC directories are under the audit's `poc/`, which is held out of tree. Eac
 the exact PoC files it scales down into committed tests. The self-review chain behind F3
 (`skeptic-selfreview`) is TASK-007's separation-of-duties test. TASK-006 holds the governance
 paths regardless.
+
+**Status (2026-11-05):** TASK-005, TASK-007 and TASK-017 are Completed. TASK-008 closed on the
+owner's ruling of 2026-11-05 (the wording amendments to AC 10, 11, 14 and 21). TASK-006 is In
+Progress: ADR-016's sign-off (AC 1) and the AC 11 and AC 18 amendments wait for the owner. The epic
+stays In Progress.
 
 ---
 

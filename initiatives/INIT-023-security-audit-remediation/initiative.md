@@ -723,6 +723,16 @@ questions stay in that task.
   `TestRunModeDatabaseDefault` fixture defect is filed as a follow-up there), accepted TASK-013's
   Deviation 10 (AC 16), and confirmed TASK-015 OQ2 "never". Ten of the 17 tasks are Completed;
   the epics and the initiative stay In Progress.
+- 2026-11-05 — **Owner rulings; TASK-001, TASK-003, TASK-008, TASK-011, TASK-012 and TASK-016
+  Completed.** By delegation to the recorded recommendations, the owner ratified TASK-001 AC 9's
+  two deviations and accepted its direct merge `ee3c249e` as AC 13's evidence; adopted the proposed
+  amendments to TASK-003 AC 5 and AC 11.4 and recorded its AC 16 and AC 17 as met; adopted the
+  wording amendments to TASK-008 AC 10, 11, 14 and 21; waived TASK-011's `make test-scenario`
+  clauses (AC 18, AC 26) and accepted SMP's GitHub CI for its AC 24; waived TASK-012 AC 23 and
+  accepted Deviation 16 for AC 15's push half; and ratified TASK-016's DC-8 amendment (AC 16).
+  Sixteen of the 17 tasks are Completed. EPIC-001, EPIC-003 and EPIC-004 are Completed. EPIC-002
+  and the initiative stay In Progress: TASK-006 waits for the owner's ADR-016 sign-off (AC 1) and
+  its AC 11 and AC 18 amendments.
 
 ---
 

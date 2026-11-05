@@ -2,12 +2,12 @@
 id: TASK-003
 type: Task
 title: "Bounded blob reads and NUL-delimited Diff/ListFiles in the git CLI client"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -976,6 +976,12 @@ explicit options, or derived from the exported defaults, so owner question 1 doe
    > (`ErrKindNotFound`). The test pins Kind and Message parity with the unbounded read on `main`
    > instead (Deviation 2). The proposed replacement text is in Implementation Notes, Review
    > round 2.
+   >
+   > **Amended by the owner (2026-11-05).** The two rows read: unknown ref → `ErrKindNotFound`,
+   > and path present in the working tree but not at the ref → `ErrKindNotFound` (both as on Spine
+   > `main` after TASK-002: `fatal: bad revision`), with Kind and Message equal to the unbounded
+   > `git show [eoo] <spec> --`. I2 is re-based from "every input `61994fe` handled" to "every input
+   > Spine `main` (after TASK-002) handled". `TestReadFile_ErrorKindParity` pins both rows.
 6. **Output ceiling.** With `WithMaxOutputBytes(4 KiB)`:
    - `ListFiles` over 300 files → `errors.Is(err, git.ErrOutputTooLarge)`;
    - `Log` over a commit whose message is 8 KiB → the same.
@@ -1043,6 +1049,14 @@ explicit options, or derived from the exported defaults, so owner question 1 doe
        > workflow is a `read_bounds` rejection and the sync advances; only
        > `.spine/branch-protection.yaml` stays a held sync error (Deviation 1). The proposed
        > replacement text is in Implementation Notes, Review round 2.
+       >
+       > **Amended by the owner (2026-11-05).** Item 4 reads: an oversized `workflows/x.yaml` is a
+       > `projection_workflow_rejected` with check `read_bounds` (TASK-011 D2): a verified previous
+       > row stays quarantined at its commit, a new file is not projected, no
+       > `projection_file_skipped` is emitted, and the state is `idle` at the new head. An oversized
+       > `.spine/branch-protection.yaml` holds the state at `error`, `LastSyncedCommit` does not
+       > advance, and the rules stay (I4). `TotalAlloc` < 2 MiB.
+       > `TestProjection_OversizedGovernanceFiles` pins it.
     5. `FullRebuild` over `initiatives/\xff/x.md`: `UpsertArtifactProjection` is **never called
        with invalid UTF-8**. The fake store fails the test if it is.
     6. An unsafe-named `workflows/a\tb.yaml` added on `main` is recorded and not projected.
@@ -1076,11 +1090,22 @@ explicit options, or derived from the exported defaults, so owner question 1 doe
     > **Implementation note (2026-10-14) — for the orchestrator to record.** It passes except for
     > three SMP tests that fail identically with Spine `main` (SMP TASK-004's tests pin SMP's
     > pre-wave-2 Spine; SMP TASK-008 / TASK-012 adapt them at the bump). See Review round 2.
+    >
+    > **Recorded (owner ruling, 2026-11-05): met.** The gate passed on SMP `f5c6fd6d` except
+    > three SMP tests that failed identically with Spine `main` `d23b897`, because SMP TASK-004's
+    > tests pinned SMP's pre-wave-2 Spine; SMP adapted them at the bump, and all three passed in the
+    > wave 4 acceptance gate (SMP `1ae9b0e3`). Discovery over SMP's own repository refused 0 files
+    > (Review round 1, the AC 16 note row).
 17. **Merge ordering.** The PR merges to Spine `main` only after SMP TASK-003 is on SMP `main`.
     The PR description names the SMP commit.
     > **Implementation note (2026-10-14) — the orchestrator's.** The precondition holds: SMP
     > TASK-003 is on SMP `main` `f5c6fd6d`. The PR and its description are not made from the
     > branch.
+    >
+    > **Recorded (owner ruling, 2026-11-05): met by the direct merge.** No PR was opened. SMP
+    > TASK-003 was on SMP `main` `f5c6fd6d` before this task reached Spine `main` in the wave 3
+    > merge (`ae513dca`), which is on GitHub `main`; this note names that SMP commit in place of a
+    > PR description.
 
 *ACs 18–22 were added by the 2026-10-06 design check.*
 
@@ -2318,3 +2343,11 @@ after them. The shared roles were untouched. Docker: the only container was the 
   - **AC 17 (orchestrator):** its precondition held (SMP TASK-003 was on SMP `main` `f5c6fd6d`
     before the wave 3 merge, `ae513dca`); no PR was opened, so the PR-description clause needs the
     orchestrator's record.
+- **2026-11-05: AC 5 and AC 11.4 amended, AC 16 and AC 17 recorded by the owner; Completed.** The
+  owner adopted the replacement texts from review round 2 for AC 5 (both miss rows are
+  `ErrKindNotFound`, as on `main` after TASK-002) and AC 11.4 (an oversized workflow is a
+  `read_bounds` rejection under TASK-011 D2; an oversized branch-protection file still holds the
+  sync). AC 16 and AC 17 are recorded as met (inline notes on each AC). AC 15's scenario row stays
+  "as on `main`" under the orchestrator's rule for the known pre-existing failures, as for TASK-005.
+  Those were the last open items; the owner questions stay at their recorded defaults, and no AC
+  needs the owner's decision.

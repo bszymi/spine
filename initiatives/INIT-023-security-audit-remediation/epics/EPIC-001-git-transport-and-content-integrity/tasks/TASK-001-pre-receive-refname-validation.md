@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Reject NUL/control-byte and invalid refs on every pre-receive command line"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
@@ -668,6 +668,11 @@ without answers, using the stated defaults.)*
        - a byte-identical commit.
      - These scenarios skip locally without `SPINE_TEST_DATABASE_URL`, so a local run proves nothing
        for them.
+   > **Owner ruling (2026-11-05).** Both recorded deviations are ratified: the CI job runs the
+   > `TestGitHTTP_*` scenarios this AC names (it fails on any skip), in place of the whole scenario
+   > suite, whose 30 failures are the same on `main` and outside this task; and "`make lint`" is
+   > read as "no new issues" (0 new; the repository-wide baseline is unchanged). See Deviations
+   > and Review round 1.
 10. **SMP compatibility (this task makes no SMP change).**
     - **Suites:**
       - with `../spine` at this task's merge commit, SMP's CI (which has no `vendor/`) is green;
@@ -711,6 +716,11 @@ without answers, using the stated defaults.)*
     - This PR's merge commit is the one that SMP's later `.spine-revision` bump names.
     - The PR description links SMP INIT-027/EPIC-004 TASK-001.
     - It states that SMP's parser fix does **not** wait for this task.
+    > **Owner ruling (2026-11-05): met by the direct merge.** No PR was opened. The task merged to
+    > `main` as `ee3c249e`, which is on GitHub `main`. SMP's later `.spine-revision` bumps name
+    > `main` commits that contain it (`49fad9c0`, then `ce0b9c9e`). The PR description it would
+    > have carried is recorded in Implementation Notes ("PR description (draft, AC 13)"): it links
+    > SMP INIT-027/EPIC-004 TASK-001 and states that SMP's parser fix does not wait for this task.
 
 ## Out of scope / follow-ups
 
@@ -922,7 +932,8 @@ The worktree itself was never reverted.
   optional).
 - **Added: the byte-sweep test, and the delete test's `release/*` row.** These keep parity with
   SMP AC 5 and AC 2.
-- **AC 9, CI wiring scoped to `TestGitHTTP_*`.** Closest safe alternative.
+- **AC 9, CI wiring scoped to `TestGitHTTP_*`.** Closest safe alternative. *(Ratified by the
+  owner on 2026-11-05.)*
   - **Why scoped.** The full `go test -tags scenario ./service/scenariotest/...` is **not green on
     `main`**. Locally, `-p 1` against PostgreSQL 17 gave the same 31-failure set on a pristine
     `main` export and on this branch (before the fixture fix); after it, 30. The failures are
@@ -1161,7 +1172,8 @@ against real git and Docker) before anything was changed.
     scenario package.
   - **Reading of the AC.** A green `make lint` needs a repository-wide cleanup. That is out of
     scope for a P1 fix whose diff scope AC 11 limits. AC 9's lint clause is therefore read as
-    "no new issues", and that is recorded as a deviation.
+    "no new issues", and that is recorded as a deviation. *(Ratified by the owner on
+    2026-11-05.)*
 - **AC 4: SHA-256 PASS not yet observed on the ubuntu runner. Partly closed.**
   - **Touched packages on Linux.** In `golang:1.26-bookworm` (Linux, git 2.39.5, `CI=true`), every
     touched-package test passes:
@@ -1540,6 +1552,13 @@ integration branch (SMP TASK-001 to TASK-003).
   owner or the orchestrator:
   - **AC 9:** ratify the two recorded deviations (above).
   - **AC 13:** record the merge without a PR as the evidence, or amend the AC (above).
+- **2026-11-05: AC 9 deviations ratified and AC 13 recorded by the owner; Completed.** The owner
+  ratified AC 9's two recorded deviations: the CI job scoped to the `TestGitHTTP_*` scenarios the
+  AC names, and "`make lint`" read as no new issues. For AC 13 the owner accepted the direct merge
+  as the evidence: `ee3c249e` is on GitHub `main`, SMP's `.spine-revision` bumps (`49fad9c0`, then
+  `ce0b9c9e`) contain it, and the PR description draft above is the record. Those were the last
+  open items; the owner questions stay at their recorded defaults, and no AC needs the owner's
+  decision.
 
 ## Design check
 
