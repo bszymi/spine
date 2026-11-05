@@ -5,7 +5,7 @@ title: Security Review Remediation (2026-10)
 status: In Progress
 owner: bszymi
 created: 2026-10-23
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: related_to
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md
@@ -219,6 +219,7 @@ Task IDs are unique across the initiative, as in INIT-023.
 | EPIC-003 | TASK-007 | Session and auth hygiene: SSE revalidation, no pre-auth ServiceSet, explicit `SPINE_ENV`, evidence provenance | N-14, N-15, N-16, N-17 | M | no |
 | EPIC-003 | TASK-008 | Wire the multi-workspace scheduler into shared-mode `spine serve` | P3-27 (open half) | M | no |
 | EPIC-004 | TASK-009 | Toolchain and dependency bumps, Dockerfile and CI pinning, govulncheck, Dependabot | SC-01 (Spine), SC-06, SC-08, SC-09 | S | yes (MVS) |
+| EPIC-004 | TASK-013 | Dependency refresh: postgres digest, the gomod group (pgx v5.11.0), LocalStack 4.14.0 (replaces Dependabot #602 and #604) | — | S | yes (MVS; `TypeMap` on SMP's fakes) |
 | EPIC-005 | TASK-010 | Initiative close: integration, gates, documentation and the SMP hand-off | — | S | yes (closing pin) |
 
 **Grouping notes.**
@@ -393,6 +394,9 @@ Each task works with its stated default. Tasks cite these as "INIT-024 owner que
   answer just after a decision's deadline. TASK-012 (EPIC-002) was added and is Completed: the server
   now sends no answer once the decision's context has ended. EPIC-002 stays Completed; SMP's pin is
   unaffected (`service/internal` is not importable by SMP).
+- 2026-11-05: the owner ruled to replace Dependabot PRs #602 (postgres digest) and #604 (the gomod
+  group, with pgx v5.11.0) with our own fixed change, and to move LocalStack to 4.14.0. TASK-013
+  (EPIC-004) is added for it.
 
 ---
 
