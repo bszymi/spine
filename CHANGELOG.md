@@ -6,6 +6,54 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-024 — Security Review Remediation (EPIC-004 TASK-014: Go 1.27)
+
+Replaces Dependabot PR #598. Spine builds with Go 1.27.3, and the workflow projection no longer
+depends on which `encoding/json` engine the binary is built with. No runtime schema change; the
+stored projection JSON of an accepted workflow is unchanged.
+
+### Changed
+
+- **Go toolchain go1.27.3.** go.mod's `toolchain` line, the Dockerfile builder, the CI git-floor
+  container and the Makefile's `DOCKER_GO` move to `golang:1.27.3-bookworm@sha256:b08bc994…`
+  (the index of 2026-11-05; `GOLANG_VERSION=1.27.3` on every platform), and every setup-go step
+  installs 1.27.3. The `go` line stays `go 1.26.0`, so embedders can still build Spine with Go
+  1.26.
+- **golangci-lint v2.15.0** (`GOLANGCI_LINT_VERSION` in the Makefile; v2.11.4 cannot load Go 1.27
+  code).
+
+### Fixed
+
+- **The projection refuses non-string YAML mapping keys explicitly.** Go 1.27 runs the v1
+  `encoding/json` API on the v2 engine (`GOEXPERIMENT=jsonv2` is on by default). Go 1.26's
+  `json.Marshal` refused every `map[interface{}]interface{}`, which yaml.v3 builds for a mapping
+  whose keys are not all plain strings, and the projection's round-trip check (INIT-023 TASK-011)
+  relied on that. The v2 engine marshals integer and tagged-string keys as JSON strings, so under
+  Go 1.27 `commit: {1: x}` would have projected as `{"1":"x"}`, and a `!!binary`-tagged key as
+  the field name it decodes to. `ProjectionDefinition` now walks the decoded document and refuses
+  such a mapping, and any NaN or infinite number, before it encodes. That is exactly what Go 1.26
+  refused, now under every Go version and every JSON engine.
+
+### Changed (embedders)
+
+- `workflow.ProjectionDefinition` refuses the same files as under Go 1.26 whatever toolchain the
+  embedder uses, still with `ErrProjectionRoundTrip`. The error now names the mapping or number
+  ("the mapping at … has a key that is not a plain YAML string", "… is a non-finite number")
+  instead of the encoder's message.
+- **SMP:** take this commit before (or together with) moving to Go 1.27. With an older Spine pin,
+  SMP on Go 1.27 would project workflows that Spine and SMP on Go 1.26 refuse.
+
+### Tests
+
+- New tests pin the refusal for every key shape yaml.v3 produces, at every map-valued position
+  strict Parse accepts, and on the walker alone (no JSON encoder involved). A test built only
+  with the legacy engine shows that the walker refuses exactly what that engine refuses.
+- `TestMetadataParseMatchesTheJSONEngine` (adapters/delivery) checks the two properties of the
+  JSON engine that the webhook TLS decision relies on: struct fields match keys exactly when
+  `strings.EqualFold` does, and a repeated key keeps the last value.
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-005 TASK-010: GitHub CI after the push — git identity)
 
 The first GitHub CI run after the INIT-023/INIT-024 push (run 41856447149) failed three tests:

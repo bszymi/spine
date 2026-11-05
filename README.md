@@ -350,7 +350,8 @@ To move the Go toolchain:
 2. Point all three golang references at the new `golang:<version>-bookworm` tag and its index
    digest (`docker buildx imagetools inspect golang:<version>-bookworm`).
 3. Set every setup-go `go-version` to the new version.
-4. Run `make toolchain-parity` and `make vuln`.
+4. Check that the Makefile's `GOLANGCI_LINT_VERSION` supports the new Go release.
+5. Run `make toolchain-parity` and `make vuln`.
 
 Dependabot (`.github/dependabot.yml`) proposes module, action and image updates weekly. It does
 not move the toolchain line or the setup-go version.
