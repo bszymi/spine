@@ -2,12 +2,12 @@
 id: TASK-004
 type: Task
 title: "Confine worktree writes against symlinked path components and .git/"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -1252,7 +1252,8 @@ every "fails on 61994fe" claim below was measured against `main` and holds for `
     `NOT REPRODUCED` for both the absolute and relative variants. Re-run after review round 1 at
     `04e7486` with the same result, and after review round 2 at `55d6863` with the same result
     (`poc/git` and `poc/parsing` pass with the non-nil refusal logged). **Still partial:** it
-    must be re-run on the merge commit.
+    must be re-run on the merge commit. *2026-11-05: met; re-run at the merge commit `d23b897`
+    and at `main` `f6132470` with the same result (Status after GitHub CI, below).*
 15. **AC15** — (a) `TestF5_WorkflowUpdate_LeafLinkToDevZero_RefusedWithoutRead`: refused
     `ErrInvalidParams`/`ErrUnsafePath` in < 0.1 s, `TotalAlloc` growth < 16 MiB; on `main` its
     watchdog ends the process at 0.19 s with HeapAlloc 264 MiB. (b) `TestTree_ReadFileOverLimit`:
@@ -1357,7 +1358,7 @@ results); the platform-DB suites at `3f7a7c3`:
   ./internal/customer/workspace/workspacetest/` (SMP CI runs them).
 - `TestObjectsCopyModeLiveMinIO` (needs `TEST_MINIO_*`).
 - AC14 against the merge commit: run against the branch head; re-run with the same overlay after
-  the merge.
+  the merge. *Done 2026-11-05 (Status after GitHub CI, below).*
 - Databases used: `s004_scen`, `s004_scenmain`, `s004_scenh` (unused), `s004_proj`, `s004_smp_it`,
   `s004_spine_rt` on the shared PostgreSQL 17.10 (CI uses 18); all dropped after the gates.
 
@@ -1625,3 +1626,17 @@ directory. The read descriptor is blocking again before its first read. Windows 
     `poc/verify-r1-8`) with `go test -overlay` against the merge commit (`main` `d23b897`, the wave
     2 merge) and record the result here. They ran only against the branch head (review round 2,
     "Gaps").
+- **2026-11-05: AC 14 met; Completed.** The three original audit PoCs (`poc/git`, `poc/parsing`,
+  `poc/verify-r1-8`; held out of tree) ran with `go test -overlay` (the PoC files overlaid into
+  `core/artifact/`, shape `go test -overlay <overlay.json> -count=1 -v -run <the PoC's tests>
+  ./core/artifact/`; go1.26.10, macOS) against two commits: the merge commit `main` `d23b897`
+  (the wave 2 merge, a detached read-only checkout whose `git status` stayed clean) and current
+  `main` `f6132470`. None reproduces, with the same result at both commits:
+  - `poc/git`: passes and logs the non-nil refusal `invalid_params: unsafe path: component
+    "a.md" is a symbolic link`;
+  - `poc/parsing`: passes; the refusal (`component "dir/a.md" is a symbolic link`) is logged;
+  - `poc/verify-r1-8`: both the absolute and the relative variant stop at their
+    `NOT REPRODUCED` fatal, and `Create` returns `invalid_params` for the symlinked component.
+
+  That was the last open item: every AC is met. The three owner questions stay at their stated
+  defaults (Orchestrator rulings, above), and no AC needs the owner's decision.
