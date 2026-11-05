@@ -2,12 +2,12 @@
 id: TASK-002
 type: Task
 title: "Workflow definition strictness: shipped validate steps fail closed, one YAML document, nested workflow directories guarded"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-001-engine-and-governance/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-001-engine-and-governance/epic.md
@@ -462,3 +462,10 @@ Codex (`codex review --base main`, plain, from the integration worktree): round 
 review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
 actionable regressions were identified"). It covered every merged task and coordination commit,
 including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs; GitHub CI was the one item under "Not run". Every AC is met,
+  and the owner questions stay at their recorded defaults.

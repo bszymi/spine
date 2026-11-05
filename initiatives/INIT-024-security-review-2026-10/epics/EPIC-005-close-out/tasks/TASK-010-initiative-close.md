@@ -550,3 +550,14 @@ Identity: Spine's Fallback").
 (its source is not traced here), now in the public history; rewriting it is the owner's call. `spine init-repo` (operator CLI) still commits
 with the operator's identity, and with none it exits 0 without committing (KNOWN-LIMITATIONS).
 Statuses are unchanged.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** The owner approved the push on 2026-11-04 (AC 8): Spine `main`
+  `fd35f802`, the INIT-024 closing commit (AC 6), is on GitHub, followed by `ce0b9c9e` (the
+  git-identity fix above, whose SMP compatibility gate passed). GitHub CI run 41875102030 at
+  `ce0b9c9e` passed all 8 jobs, among them `image-build` and `git-floor` on the pinned image, which
+  this close could not run. TASK-001 … TASK-008 and TASK-011 are Completed, and EPIC-001, EPIC-002
+  and EPIC-003 with them. Remaining (AC 1):
+  - TASK-009's AC 8, the compose bring-up (its notes). Then TASK-009, EPIC-004, this task, EPIC-005
+    and the initiative move to Completed.

@@ -2,10 +2,10 @@
 id: INIT-024
 type: Initiative
 title: Security Review Remediation (2026-10)
-status: Pending
+status: In Progress
 owner: bszymi
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: related_to
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md
@@ -378,6 +378,14 @@ Each task works with its stated default. Tasks cite these as "INIT-024 owner que
   cross-task review (two skeptics: N-1 and N-2 closed) added TASK-011 (aggregate checkout bound),
   merged on Spine local `main` (`ea77cff6`) and into the close branch. Tasks stay In Progress until
   GitHub CI runs on the pushed closing commit. Not pushed (owner question 1: hold).
+- 2026-11-04: pushed with the owner's approval (owner question 1): Spine `main` `fd35f802` (the
+  closing commit), then `ce0b9c9e` (TASK-010's git-identity fix, found by the first run). GitHub CI
+  run 41875102030 at `ce0b9c9e` passed all 8 jobs; the first run, 41856447149 at `fd35f802`, failed
+  only `go test ./...`, on that identity defect. TASK-001 … TASK-008 and TASK-011 are Completed, and
+  EPIC-001, EPIC-002 and EPIC-003 with them. TASK-009 stays In Progress for one live check (AC 8,
+  the compose bring-up on a host that may pull), so EPIC-004, TASK-010 (its AC 1), EPIC-005 and the
+  initiative are In Progress. With the owner: the repository settings in §7d, and the owner
+  questions, which stay at their recorded defaults.
 
 ---
 

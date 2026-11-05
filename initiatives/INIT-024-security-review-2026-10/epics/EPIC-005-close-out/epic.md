@@ -2,11 +2,11 @@
 id: EPIC-005
 type: Epic
 title: Close-out and SMP Hand-off
-status: Pending
+status: In Progress
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 owner: bszymi
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/initiative.md

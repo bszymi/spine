@@ -2,12 +2,12 @@
 id: TASK-007
 type: Task
 title: "Session and auth hygiene: SSE revalidation, no pre-auth ServiceSet, explicit SPINE_ENV, evidence provenance"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
@@ -695,3 +695,10 @@ the line only on an I/O error or a crash. `TestPreauth_PendingRenormalisationIsI
 cannot bypass either (`5ae1e563`, `5ae28915`). The property is unchanged: a pending
 renormalisation is invisible to an unauthenticated caller on `/api/v1` and `/git`. Gates: see
 TASK-003's Integration A, phase 4.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs. Every AC is met, and the owner questions stay at their
+  recorded defaults.

@@ -2,12 +2,12 @@
 id: TASK-005
 type: Task
 title: "Standalone push-gate races: case-folding storage, the review-freeze window, git slot starvation"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-27
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
@@ -542,3 +542,11 @@ Gates at `fcf54411`:
 Codex (`codex review --base init/INIT-024-integration-a-p4`, `gpt-6.1-sol`): round 1, session
 `01a18ee8-725f-7db2-81ac-f88c8ee60e53` on `fcf54411`: no findings. No second round was needed.
 Statuses stay as they are; nothing is pushed.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs, among them `git-floor` on the pinned image and the
+  `scenario-git-http` job on Linux storage, where the real probe runs. Every AC is met, and the
+  owner questions stay at their recorded defaults.
