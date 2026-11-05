@@ -203,7 +203,7 @@ TASK-016.
 It also includes the regression tests and migrated tests listed in the Acceptance Criteria.
 
 A design-phase prototype of every change is at
-`spine-management-platform/tmp/init027-orchestration/spine-init023/_work/task015/` (`README.txt`).
+`local-scratch/spine-init023/_work/task015/` (`README.txt`).
 It covers the overlay sources, migrated tests, regression tests and 13 mutation overlays, and
 compiles and passes against `61994fe`. It is a starting point, not a mandate.
 
@@ -1582,7 +1582,7 @@ No finding was rejected.
 
 ### SMP compatibility gate
 
-SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T015/smp`, detached at `f5c6fd6d`, no `vendor/`
+SMP checkout `local-worktree`, detached at `f5c6fd6d`, no `vendor/`
 or `tmp/`; `go list -m github.com/bszymi/spine` resolves to this worktree; `GOFLAGS=-mod=readonly`;
 `git status` clean after every step. Spine at `95f8fc1`.
 
@@ -1835,7 +1835,7 @@ afterwards):
 | `-tags integration -race -p 1` (`SPINE_TEST_DATABASE_URL` = `s3i_it`; `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3i_reg`, migrated from `migrations/registry`) on the touched packages with integration tests | `adapters/delivery` 315, `adapters/projection` 180, `service/cmd/spine` 184, `service/internal/workspace` 225 PASS (subtests counted), 0 FAIL, 0 SKIP |
 | CI `scenario-git-http` job, its four steps run verbatim (`bash -eo pipefail`) on a fresh `s3i_ci3` | `TestGitHTTP_*` 20 PASS (8 `TestGitHTTP_Push*`), 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS; `TestWorkflowLifecycle_*` 4 PASS (incl. `_UpdateExisting`, `_UpdateExisting_DraftAuthorCannotReview`), with the harness's merge binding on; `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS; 0 SKIP |
 | `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` (`s3i_scen3`, registry `s3i_reg3` migrated) vs a `git archive main` export on its own databases | 31 top-level FAIL, the **same set as `main`**: the 30 known pre-existing failures plus `TestWorkspace_ScopedServices` (pre-existing with the registry URL set). With an unmigrated registry database both trees also fail `TestWorkspace_BatchMigration` and `TestWorkspace_Lifecycle` (33 each, identical sorted `--- FAIL` lists, 70 lines with subtests); `main` passes those two with the registry migrated (checked) |
-| `golangci-lint` v2.11.4 (`tmp/init027-orchestration/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
+| `golangci-lint` v2.11.4 (`local-scratch/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
 | `--enable-only=gosec` on the touched packages (`integration,scenario` tags) and on `./...` | 0 issues |
 | `gofmt -l` on every changed `.go` file | empty |
 | CI `git-floor` steps in the local `golang:1.26-bookworm` image (git 2.39.5; `--pull=never --rm`, read-only mounts, `GOPROXY=off`), plus `adapters/projection` | all ok; no container left |
@@ -1857,7 +1857,7 @@ Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3
 `s3c_*` (SMP) databases were created, and all were dropped afterwards; the SMP suites' own `ws_*`
 databases and roles were cleaned up by the suites (none left, checked). The only containers
 started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
-`spine-management-platform/tmp/init027-orchestration/wave3-int/`.
+`local-scratch/wave3-int/`.
 
 ### Cross-task review (wave 3) (2026-10-14)
 
@@ -1907,7 +1907,7 @@ the Docker VM had 6.2 GB free; the new real-git tests use only porcelain any git
 `localhost:55630`; only `s3f_*` databases were created and all were dropped afterwards; the SMP
 suites' `ws_*` databases and roles were cleaned up by the suites (none left, checked). No container
 was started apart from `docker run --rm alpine:3 df` disk checks. Logs:
-`spine-management-platform/tmp/init027-orchestration/wave3-fix-spine-s3f/`.
+`local-scratch/wave3-fix-spine-s3f/`.
 
 ### Acceptance (wave 3) (2026-10-14)
 
@@ -1993,7 +1993,7 @@ clean.
   suites ran and none after.
 - Docker: the only containers started were the `git-floor` run (`--rm`) and the `alpine:3 df`
   disk checks. Nothing was pulled. The Docker VM had 6.3 GB free.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w3final/`.
+- Logs: `local-scratch/w3final/`.
 
 ### Status after GitHub CI (2026-11-04)
 

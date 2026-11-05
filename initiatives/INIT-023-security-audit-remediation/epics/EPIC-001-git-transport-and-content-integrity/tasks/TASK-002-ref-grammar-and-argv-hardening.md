@@ -1083,7 +1083,7 @@ unrelated "committer identity" reason in a clean container.
 
 There is a design-validation prototype. It is not the implementation; the tests in the Acceptance
 Criteria still have to be written properly. It lives at
-`tmp/init027-orchestration/spine-init023/prototypes/TASK-002/task-002-prototype.diff` in SMP and
+`local-scratch/spine-init023/prototypes/TASK-002/task-002-prototype.diff` in SMP and
 applies cleanly to `61994fe` (`git apply --check`).
 
 Test runs on 2026-10-06, overlay only:
@@ -1117,7 +1117,7 @@ Remaining differences from the prototype:
 >     `_work/task002-check/proto/tree/adapters/git/zz_dc_bypass_test.go`.
 > - **Amended design-check prototype.** It implements DC-1, DC-2, DC-4 and DC-6, but not DC-5 or
 >   DC-7, which were verified with shell probes.
->   - Diff: `tmp/init027-orchestration/spine-init023/_work/task002-check/task-002-design-check-amended.diff`.
+>   - Diff: `local-scratch/spine-init023/_work/task002-check/task-002-design-check-amended.diff`.
 >     It applies cleanly to `61994fe`.
 >   - Overlay: `_work/task002-check/overlay-amended.json`.
 >   - Results:
@@ -1141,7 +1141,7 @@ Adversarial check on 2026-10-06, against Spine `61994fe` and SMP `80995559`.
   re-run under both.
 
 **Repositories untouched.** Neither repository was modified. All artifacts are under
-`tmp/init027-orchestration/spine-init023/_work/task002-check/`.
+`local-scratch/spine-init023/_work/task002-check/`.
 
 | # | Change | Why |
 |---|---|---|
@@ -1332,7 +1332,7 @@ refs/heads/<n>`; `clone --no-tags -- <url> <path>`; `EnterBranch`: lookup, `work
 
 ### SMP compatibility gate
 
-SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T002/smp`, detached at SMP `7d4e7cc9`, `../spine`
+SMP checkout `local-worktree`, detached at SMP `7d4e7cc9`, `../spine`
 = this worktree, no `vendor/`, no `tmp/`; `GOFLAGS=-mod=readonly`; the checkout stayed clean. Run at
 `4b989d2` and re-run in full at the final code commit `0e98f31` (same results).
 

@@ -1027,7 +1027,7 @@ the test DB, and the run is recorded in the Implementation Notes.
 
     **Design-phase evidence (2026-10-06).** A prototype of §1–§3 and drafts of the AC3–AC12 tests
     exist under the SMP checkout's
-    `tmp/init027-orchestration/spine-init023/_work/task009/` (`proto/`, `overlay-proto.json`,
+    `local-scratch/spine-init023/_work/task009/` (`proto/`, `overlay-proto.json`,
     `mut/`). Results:
     - all draft tests passed;
     - each of these mutations failed exactly the intended tests:
@@ -1363,7 +1363,7 @@ No migration, column or table (AC17). `go.mod`/`go.sum` unchanged; `core/crypto`
 
 ### SMP compatibility gate
 
-SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T009/smp` at SMP `main` `7d4e7cc9`, `replace ../spine`
+SMP checkout `local-worktree` at SMP `main` `7d4e7cc9`, `replace ../spine`
 → this worktree (`go list -m` confirms), unmodified (`git status` clean).
 
 - `go build ./...` exit 0; `go vet ./...` exit 0; `go vet -tags integration ./...` exit 0.

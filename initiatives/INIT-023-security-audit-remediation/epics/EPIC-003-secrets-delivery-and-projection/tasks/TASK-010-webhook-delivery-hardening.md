@@ -38,9 +38,9 @@ audit:
 - **P3-26** — secret URL parts leak into error columns and logs.
 
 Line numbers refer to Spine `61994fe` unless marked "SMP", which means SMP `80995559`. The
-audit's proofs of concept are under `tmp/init027-orchestration/spine-audit/poc/` in the SMP tree.
+audit's proofs of concept are under `local-scratch/spine-audit/poc/` in the SMP tree.
 The design-phase prototype and regression tests are under
-`tmp/init027-orchestration/spine-init023/_work/task010/`.
+`local-scratch/spine-init023/_work/task010/`.
 
 ### P3-11: the signature covers only the body, so a captured delivery replays forever
 
@@ -1562,7 +1562,7 @@ Recorded as **defaults pending the owner**:
    killed: empty version rewrites metadata.
 7. **Contract with SMP's receiver.** The design-phase contract test
    (`_work/task010/smp/spine_webhook_v2_contract_test.go`) was run from the SMP checkout
-   (`/Users/bartoszszymichowski/42sid/i23/s-T010/smp`, SMP `7d4e7cc9`, `../spine` = this worktree)
+   (`local-worktree`, SMP `7d4e7cc9`, `../spine` = this worktree)
    with `go test -overlay <scratch>/overlay-contract.json -count=1 -run TestSpineV2Contract -v
    ./internal/customer/runner/` — the overlay adds the file without writing into SMP's tree:
    `TestSpineV2Contract_DispatcherToEventReceiver` PASS (two attempts accepted, two nonces
@@ -1747,7 +1747,7 @@ No scenario suite exercises webhook delivery, so none beyond `scenario-git-http`
 
 ### SMP compatibility gate
 
-SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T010/smp` at `7d4e7cc9` (no `vendor/`, no
+SMP checkout `local-worktree` at `7d4e7cc9` (no `vendor/`, no
 `tmp/`), `../spine` = this worktree at `d082e97` (final run; an earlier run at `1b223ec` gave the
 same results); its tree stayed clean (`git status --short` empty).
 
@@ -1909,7 +1909,7 @@ that was then restored. SQL mutations ran against real Postgres.
 All `s010_*` databases (`s010_delivery`, `s010_store`, `s010_gw`, `s010_scenario`,
 `s010_storemain`, `s010_perf`) were dropped afterwards.
 
-**SMP compatibility gate (round 1).** The SMP checkout is `/Users/bartoszszymichowski/42sid/i23/s-T010/smp`
+**SMP compatibility gate (round 1).** The SMP checkout is `local-worktree`
 at `7d4e7cc9`, with `../spine` = this worktree. Its tree was clean afterwards.
 
 | Command | Result |
@@ -2031,7 +2031,7 @@ initiative's Rule 4 row)**
 All `s010_*` databases (`s010_delivery`, `s010_store`, `s010_gw`, `s010_scenario`, and
 `s010_mut` for the real-Postgres mutation checks) were dropped afterwards.
 
-**SMP compatibility gate (round 2).** The SMP checkout is `/Users/bartoszszymichowski/42sid/i23/s-T010/smp`
+**SMP compatibility gate (round 2).** The SMP checkout is `local-worktree`
 at `7d4e7cc9`, with `../spine` = this worktree at `c3d1457`. Its tree was clean afterwards.
 
 | Command | Result |

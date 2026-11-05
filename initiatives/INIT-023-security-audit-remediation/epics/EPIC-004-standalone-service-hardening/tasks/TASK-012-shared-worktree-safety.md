@@ -38,7 +38,7 @@ links:
 ## Purpose
 
 Findings: **F8 (P2, standalone)**, **F9 (P2, standalone)** and **P3-27 (P3, standalone)** from the
-2026-10-06 security audit (`tmp/init027-orchestration/spine-audit/REPORT.md` in SMP).
+2026-10-06 security audit (`local-scratch/spine-audit/REPORT.md` in SMP).
 
 Spine line numbers refer to `61994fe`. SMP line numbers refer to `80995559`. Every PoC named
 below was re-run for this design with `go test -overlay` against `61994fe` and reproduces.
@@ -880,7 +880,7 @@ silent fallback.
 ### 8. Design validation
 
 A prototype of §1, §2 and the engine part of §2.7 was built as `-overlay` copies (no repository
-edit) under SMP `tmp/init027-orchestration/spine-init023/_work/task012/` (see `README.txt` there;
+edit) under SMP `local-scratch/spine-init023/_work/task012/` (see `README.txt` there;
 §3 was not prototyped). Results on this machine (git 2.54, Go 1.26.5):
 
 - The engine-level inverted PoCs (AC 1, 6, 7, 8, 9) **fail on unmodified `61994fe`** (a copy
@@ -2314,7 +2314,7 @@ retry budget and the take-backs agree with them:
 **Gates.** The code gates ran on `a6acc720` unless the row names `96cf8e40`. The only code
 change after `96cf8e40` is `a6acc720`'s `HEAD` rewrite in `MergeBases`, which no engine or
 scenario caller reaches (they pass `main` or object ids). Logs are in
-`spine-management-platform/tmp/init027-orchestration/w4/agents/int-spine/`.
+`local-scratch/w4/agents/int-spine/`.
 
 | Gate | Result |
 |---|---|
@@ -2469,7 +2469,7 @@ No SMP command failed, so there is no compatibility break, and no run against `.
 - Docker: the only containers were the `git-floor` run, the two Linux-only SMP runs and the
   `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
   VM had 5.8 GB free at the lowest check.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+- Logs: `local-scratch/w4/agents/gate-spine/`.
 
 ### Integration follow-up (wave 4) (2026-10-19)
 

@@ -220,7 +220,7 @@ SMP, and SMP's `dev/lint-spine-internals` forbids `service/...` and `cmd/...`).
 
 "Red at the base" = the branch's new test file copied into a `git archive init/INIT-024-scaffold`
 extracted under scratch `t007/base` (since cleaned of the copies; re-create with `git archive
-init/INIT-024-scaffold | tar -x -C <dir>`). Logs are in SMP `tmp/init027-orchestration/i24/t007/`.
+init/INIT-024-scaffold | tar -x -C <dir>`). Logs are in SMP `local-scratch/i24/t007/`.
 
 1. **Regression N-14** — `TestEventStream_ClosesOnRevocation`
    (`service/internal/gateway/sse_revalidation_test.go`), the SA-3 PoC ported: a real `httptest`
@@ -667,7 +667,7 @@ single mode. Later coordination involving this task:
   context's logger already carries; they now log it once (`TestPreauthLog_NamesTheWorkspaceOnce`,
   red without the change: every line carried two).
 
-Gates at `377c3343` (logs in the SMP repo, `tmp/init027-orchestration/i24/int-a/`; heavy legs under
+Gates at `377c3343` (logs in the SMP repo, `local-scratch/i24/int-a/`; heavy legs under
 the shared heavy-suite lock):
 
 | Gate | Result |

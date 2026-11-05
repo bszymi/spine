@@ -62,7 +62,7 @@ task ships with its PR, its codex pass and its regression tests. The PoCs become
 
 **The audit record.** The full report and its PoCs contain working exploit steps, so neither is
 committed to either repository. The owner holds them, in the SMP working tree under the
-git-ignored `tmp/init027-orchestration/spine-audit/` (`REPORT.md`, `poc/`). This initiative
+git-ignored `local-scratch/spine-audit/` (`REPORT.md`, `poc/`). This initiative
 summarises each finding in one line (§7c). Each task restates only what its fix needs.
 
 **The SMP half.** SMP owns its own git gateway, its git plumbing and its event receiver, and it

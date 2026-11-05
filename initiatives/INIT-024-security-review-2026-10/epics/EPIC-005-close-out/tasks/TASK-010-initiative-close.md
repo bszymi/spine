@@ -171,7 +171,7 @@ gates; nothing was rewritten.
 
 Two independent skeptics reviewed the two P2s across tasks (N-1: TASK-003 with TASK-004's read
 paths; N-2: TASK-006 with TASK-005/007/008), read-only on the same tree (`i23/s24-T003`, detached at
-`a28b3248`); their reports go to the orchestrator (SMP repo `tmp/init027-orchestration/i24/t010/`).
+`a28b3248`); their reports go to the orchestrator (SMP repo `local-scratch/i24/t010/`).
 
 - **Skeptic A: no P1 or P2.** Both PoCs reproduce at the pre-fix base `49fad9c0` and are refused
   at the closing tree for the right reason, on the host git and on git 2.39.5: N-1 with
@@ -204,7 +204,7 @@ paths; N-2: TASK-006 with TASK-005/007/008), read-only on the same tree (`i23/s2
 
 ### Step 3 — gates at the closing tree
 
-Logs: SMP repo `tmp/init027-orchestration/i24/t010/`. Heavy legs ran under the shared heavy-suite
+Logs: SMP repo `local-scratch/i24/t010/`. Heavy legs ran under the shared heavy-suite
 lock. Go `go1.26.10` (go.mod's toolchain) for every Spine leg on the host.
 
 | Gate | Command | Result |

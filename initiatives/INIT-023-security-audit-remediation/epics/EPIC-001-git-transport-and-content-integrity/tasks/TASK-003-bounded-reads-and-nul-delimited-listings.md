@@ -162,7 +162,7 @@ Line numbers refer to Spine `61994fe` unless stated. "SMP" means `spine-manageme
 
 ### Evidence (scaled PoCs, re-run 2026-10-06 against `61994fe`)
 
-The overlay tests in `tmp/init027-orchestration/spine-init023/_work/task003/` use only the
+The overlay tests in `local-scratch/spine-init023/_work/task003/` use only the
 `61994fe` API. All six **fail on `61994fe`** and are written to pass once this task lands:
 
 | PoC (source finding) | Result on `61994fe` |
@@ -1526,7 +1526,7 @@ incremental workflow loop (AC 11.6).
 
 ### SMP compatibility gate
 
-`/Users/bartoszszymichowski/42sid/i23/s-T003/smp` detached at SMP `main` **`f5c6fd6d`** (EPIC-004 wave 1
+`local-worktree` detached at SMP `main` **`f5c6fd6d`** (EPIC-004 wave 1
 incl. SMP TASK-003, and TASK-004), `../spine` = this worktree, no `vendor/`, no `tmp/`; `git status`
 clean after every run. Final run at `a7d0478` (fresh, re-migrated databases); the earlier runs at
 `ff98809` and `ba2e1d2` gave the same results.
@@ -1649,7 +1649,7 @@ tmpfs-backed `pgvector/pgvector:pg18` container (PostgreSQL 18.4, `--pull=never`
 `platform_audit_retention`, `smp_prov`, posture `f`). The container and everything in it were
 removed at the end.
 
-**SMP compatibility gate at this round** (`/Users/bartoszszymichowski/42sid/i23/s-T003/smp`
+**SMP compatibility gate at this round** (`local-worktree`
 detached at **`f5c6fd6d`**, `../spine` = this worktree; `git status` clean after every run):
 
 | Command (in the SMP checkout) | Result |
@@ -1765,7 +1765,7 @@ re-review at `02000ff` raised nothing.
 | `codex review --base main` | Plain, it stops with `The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account`, as in every earlier round. With `-c model=gpt-5.6-sol`, the run at `d92e8cf` raised one P2 (C1, fixed in `02000ff`), and the run at `02000ff` said "No actionable correctness regressions were identified" |
 | `git diff --stat 61994fe -- migrations/`; `git diff --stat main...HEAD -- migrations go.mod go.sum` | empty (no schema change) |
 
-**SMP compatibility gate at this round** (`/Users/bartoszszymichowski/42sid/i23/s-T003/smp`
+**SMP compatibility gate at this round** (`local-worktree`
 detached at **`f5c6fd6d`**, `../spine` = this worktree; `git status` clean after every run):
 
 | Command (in the SMP checkout) | Result |
@@ -1868,7 +1868,7 @@ afterwards):
 | `-tags integration -race -p 1` (`SPINE_TEST_DATABASE_URL` = `s3i_it`; `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3i_reg`, migrated from `migrations/registry`) on the touched packages with integration tests | `adapters/delivery` 315, `adapters/projection` 180, `service/cmd/spine` 184, `service/internal/workspace` 225 PASS (subtests counted), 0 FAIL, 0 SKIP |
 | CI `scenario-git-http` job, its four steps run verbatim (`bash -eo pipefail`) on a fresh `s3i_ci3` | `TestGitHTTP_*` 20 PASS (8 `TestGitHTTP_Push*`), 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS; `TestWorkflowLifecycle_*` 4 PASS (incl. `_UpdateExisting`, `_UpdateExisting_DraftAuthorCannotReview`), with the harness's merge binding on; `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS; 0 SKIP |
 | `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` (`s3i_scen3`, registry `s3i_reg3` migrated) vs a `git archive main` export on its own databases | 31 top-level FAIL, the **same set as `main`**: the 30 known pre-existing failures plus `TestWorkspace_ScopedServices` (pre-existing with the registry URL set). With an unmigrated registry database both trees also fail `TestWorkspace_BatchMigration` and `TestWorkspace_Lifecycle` (33 each, identical sorted `--- FAIL` lists, 70 lines with subtests); `main` passes those two with the registry migrated (checked) |
-| `golangci-lint` v2.11.4 (`tmp/init027-orchestration/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
+| `golangci-lint` v2.11.4 (`local-scratch/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
 | `--enable-only=gosec` on the touched packages (`integration,scenario` tags) and on `./...` | 0 issues |
 | `gofmt -l` on every changed `.go` file | empty |
 | CI `git-floor` steps in the local `golang:1.26-bookworm` image (git 2.39.5; `--pull=never --rm`, read-only mounts, `GOPROXY=off`), plus `adapters/projection` | all ok; no container left |
@@ -1890,7 +1890,7 @@ Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3
 `s3c_*` (SMP) databases were created, and all were dropped afterwards; the SMP suites' own `ws_*`
 databases and roles were cleaned up by the suites (none left, checked). The only containers
 started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
-`spine-management-platform/tmp/init027-orchestration/wave3-int/`.
+`local-scratch/wave3-int/`.
 
 ### Cross-task review (wave 3) (2026-10-14)
 
@@ -1941,7 +1941,7 @@ the Docker VM had 6.2 GB free; the new real-git tests use only porcelain any git
 `localhost:55630`; only `s3f_*` databases were created and all were dropped afterwards; the SMP
 suites' `ws_*` databases and roles were cleaned up by the suites (none left, checked). No container
 was started apart from `docker run --rm alpine:3 df` disk checks. Logs:
-`spine-management-platform/tmp/init027-orchestration/wave3-fix-spine-s3f/`.
+`local-scratch/wave3-fix-spine-s3f/`.
 
 ### Acceptance (wave 3) (2026-10-14)
 
@@ -2029,7 +2029,7 @@ clean.
   suites ran and none after.
 - Docker: the only containers started were the `git-floor` run (`--rm`) and the `alpine:3 df`
   disk checks. Nothing was pulled. The Docker VM had 6.3 GB free.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w3final/`.
+- Logs: `local-scratch/w3final/`.
 
 ### Post-merge fix (wave 4 integration) (2026-10-19)
 
@@ -2191,7 +2191,7 @@ this worktree (`aadd43e5`) and `GOFLAGS=-mod=readonly`. The checkout was never m
 - Docker: the only containers were the `git-floor` run and an `alpine:3 df` check, both
   `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker VM had 6.1 GB free.
 - The throwaway mutation worktree `i23/s-int4/fu-mut` was removed with `git worktree remove`.
-- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/fu-fix/`.
+- Logs: `local-scratch/w4/agents/fu-fix/`.
 
 ### Adversarial review of the follow-up (2026-10-20)
 
@@ -2328,7 +2328,7 @@ allowances skip on macOS; the other steps of SMP's integration job and the image
 created, all were dropped, and there were no `ws_*` databases or roles before the SMP suites or
 after them. The shared roles were untouched. Docker: the only container was the `git-floor` run
 (`--rm --pull=never`); nothing was pulled, built or pruned. Logs:
-`spine-management-platform/tmp/init027-orchestration/w4/agents/fu-fix2/`.
+`local-scratch/w4/agents/fu-fix2/`.
 
 ### Status after GitHub CI (2026-11-04)
 
