@@ -2,11 +2,11 @@
 id: EPIC-002
 type: Epic
 title: Git Transport and Reads
-status: Completed
+status: In Progress
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 owner: bszymi
 created: 2026-10-23
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/initiative.md
@@ -69,6 +69,7 @@ checks out or merges a pushed tree, or what Spine **keeps** when it lists one.
 | TASK-004 | Read-path robustness | N-6, N-10, N-11, N-12 | 3 (soft: TASK-003) | — | `scratch/secrets-delivery-projection/projection/zz_outputcap_wedge_test.go`; `scratch/git/f4/zz_rv_f10_test.go`; `scratch/git/f4/zz_rv_log_test.go` | yes: streamed listings are shared |
 | TASK-005 | Standalone push-gate races | N-8, N-9, N-13 | 3 (soft: TASK-003) | — | `scratch/git/f1` `TestRV_F1_CaseFoldRef`, `TestRV_PushAdmission_FreezeRace` | no (a parity note for SMP's gateway) |
 | TASK-011 | Aggregate checkout bound: one writer per branch, bounded in-flight checkout bytes | X-1 (TASK-010 cross-task review, P3 next to N-1) | close-out follow-up (after TASK-003) | — | the cross-task review's concurrent-entry probes → regression tests in `adapters/git` and `core/artifact` (the task's AC 1–2) | no at the bump (the ceiling is library opt-in; a concurrent same-branch entry is refused before writing instead of after); a parity note for SMP's own branch writes |
+| TASK-012 | Push re-check: no answer once the decision's deadline has passed | R-1 (GitHub CI run 42047981897, P3 next to N-9) | close-out follow-up (after TASK-005) | — | the CI failure's subtest `TestRecheck_StalledDecisionIsBoundedAndCancelled` plus a named test against a decider that admits after its context ended (the task's AC 2–3) | no (`service/internal/githttp` is not importable by SMP) |
 
 ---
 
