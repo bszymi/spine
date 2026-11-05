@@ -454,7 +454,7 @@ func keywordValueSettings(s string) [][2]string {
 	const ws = " \t\n\r\v\f"
 	var out [][2]string
 	s = strings.TrimLeft(s, ws)
-	for len(s) > 0 {
+	for s != "" {
 		eq := strings.IndexByte(s, '=')
 		if eq < 0 {
 			break
@@ -469,7 +469,8 @@ func keywordValueSettings(s string) [][2]string {
 			i := 1
 			for ; i < len(s) && s[i] != '\''; i++ {
 				if s[i] == '\\' {
-					if i++; i == len(s) {
+					i++
+					if i == len(s) {
 						break
 					}
 				}
@@ -483,7 +484,8 @@ func keywordValueSettings(s string) [][2]string {
 			i := 0
 			for ; i < len(s) && !strings.ContainsRune(ws, rune(s[i])); i++ {
 				if s[i] == '\\' {
-					if i++; i == len(s) {
+					i++
+					if i == len(s) {
 						break
 					}
 				}

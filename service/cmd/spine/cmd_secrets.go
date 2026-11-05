@@ -438,9 +438,9 @@ func describeDBError(err error, dsn string) string {
 	msg := err.Error()
 	// Longest first, so a piece of a password cannot break up the whole
 	// and leave the rest of it in the text.
-	secrets := dsnSecrets(dsn)
-	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
-	for _, secret := range secrets {
+	creds := dsnSecrets(dsn)
+	sort.SliceStable(creds, func(i, j int) bool { return len(creds[i]) > len(creds[j]) })
+	for _, secret := range creds {
 		msg = strings.ReplaceAll(msg, secret, "xxxxx")
 	}
 	return msg
