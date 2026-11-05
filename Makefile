@@ -66,7 +66,7 @@ DOCKER_GO = docker run --rm \
 	-v "$(CURDIR)":/app \
 	-v spine-gomod:/go/pkg/mod \
 	-v spine-gocache:/root/.cache/go-build \
-	-w /app golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af
+	-w /app golang:1.27.3-bookworm@sha256:b08bc99468058b6d8a0ada17fa54996b910d5e82a7e95bee0372e3bd98415258
 
 docker-test:
 	$(DOCKER_GO) go test ./...
@@ -74,7 +74,7 @@ docker-test:
 docker-test-v:
 	$(DOCKER_GO) go test ./... -v
 
-GOLANGCI_LINT_VERSION ?= v2.11.4
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 docker-lint:
 	$(DOCKER_GO) sh -c 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) && golangci-lint run ./...'

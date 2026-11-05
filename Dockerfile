@@ -1,11 +1,12 @@
 # ── Build stage ──
-# Pinned by digest (INIT-024 TASK-009, SC-09): golang:1.26.10-bookworm, the
-# image index of 2026-10-21. The image sets GOTOOLCHAIN=local, so its own
-# GOLANG_VERSION is the compiler — it must equal go.mod's `toolchain` line,
-# and `go run ./dev/pincheck` (CI job toolchain-parity) fails when they
-# drift. Move the tag, the digest, go.mod, the ci.yml git-floor container and
-# the Makefile's DOCKER_GO together.
-FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS builder
+# Pinned by digest (INIT-024 TASK-009, SC-09; Go 1.27 since TASK-014):
+# golang:1.27.3-bookworm, the image index of 2026-11-05. The image sets
+# GOTOOLCHAIN=local, so its own GOLANG_VERSION is the compiler — it must
+# equal go.mod's `toolchain` line, and `go run ./dev/pincheck` (CI job
+# toolchain-parity) fails when they drift. Move the tag, the digest, go.mod,
+# the ci.yml git-floor container and setup-go versions, and the Makefile's
+# DOCKER_GO together.
+FROM golang:1.27.3-bookworm@sha256:b08bc99468058b6d8a0ada17fa54996b910d5e82a7e95bee0372e3bd98415258 AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
