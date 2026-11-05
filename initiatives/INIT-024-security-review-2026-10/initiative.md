@@ -390,8 +390,9 @@ Each task works with its stated default. Tasks cite these as "INIT-024 owner que
   questions, which stay at their recorded defaults.
 - 2026-11-05: GitHub CI run 42047981897 at `main` `39841330` (an INIT-023 status commit) failed one
   subtest of TASK-005's apply-time re-check, which showed that the re-check server could still
-  answer just after a decision's deadline. TASK-012 (EPIC-002) is added to close it; EPIC-002 is In
-  Progress until it is Completed.
+  answer just after a decision's deadline. TASK-012 (EPIC-002) was added and is Completed: the server
+  now sends no answer once the decision's context has ended. EPIC-002 stays Completed; SMP's pin is
+  unaffected (`service/internal` is not importable by SMP).
 
 ---
 

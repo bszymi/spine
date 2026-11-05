@@ -2,7 +2,7 @@
 id: EPIC-002
 type: Epic
 title: Git Transport and Reads
-status: In Progress
+status: Completed
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 owner: bszymi
 created: 2026-10-23

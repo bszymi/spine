@@ -2,7 +2,7 @@
 id: TASK-012
 type: Task
 title: "Push re-check: no answer once the decision's deadline has passed"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
@@ -79,3 +79,72 @@ no refusals when its context ends, is what exposes it.
 ---
 
 ## Implementation Notes
+
+Branch `init/INIT-024-TASK-012-recheck-answer-after-deadline` from `main` `39841330`. Commits: the
+task artifact (`c3f19cf5`), then the fix and its test (`f3174bd7`), then these notes.
+
+### Change
+
+- `service/internal/githttp/admission_recheck.go`, `recheckSession.handle`: after `s.decide`
+  returns, `if dctx.Err() != nil { return }` before `reply`. A decision whose context ended (its
+  deadline passed, or `close` cancelled it) gets no answer, whatever it returned, and the deferred
+  `conn.Close` ends the connection; the hook then gets no well-formed answer and refuses
+  (`errRecheckFailed`). The comment now states this rule and why the connection's deadline alone
+  does not enforce it.
+- `push_gate_recheck_test.go`: `TestRecheck_NoAnswerAfterTheDecisionContextEnded`, two subtests
+  (a decider that returns an admission, and one that returns a refusal, after its context ended).
+  The context ends through the request's context while the connection's deadline is a minute away
+  and the session stays open, so the result does not depend on timer order.
+- No other file changed outside `initiatives/`. The hook's side and `refadmit` are unchanged.
+
+### Root cause, confirmed
+
+`handle` set `conn.SetDeadline(deadline)` and gave the decision `context.WithDeadline(s.ctx,
+deadline)` with the same instant. These are separate runtime timers. When the context's timer fires
+first, a decider that returns on `ctx.Done()` reaches `reply` while the connection's deadline has
+not yet been marked expired, and the write succeeds. The CI subtest's stalled decider returns no
+refusals when its context ends, so the answer written was `ok`.
+
+### Production before the fix: fail closed
+
+The shipped decider is `Handler.recheckAdmission`. It calls `refadmit.Evaluator.Decide`, whose run,
+step-execution and branch reads take the decision's context (`core/refadmit/evaluator.go`,
+`getRun`, `listExecs`, `findBranch`). A read under an ended context returns an error, `Decide`
+returns it, and `recheckAdmission` turns it into a refusal (`refadmit.EvaluationErrorMessage`). An
+unresolvable step definition refuses as well (`ReasonStepUnresolved`). Refs that need no read
+(ordinary branches, operators, invalid refs) are decided by the ref and actor alone, so their
+answer does not depend on timing. Before the fix, then, an answer written after the deadline was a
+refusal or a decision computed from completed reads, never an admission from an interrupted read.
+The fix makes the server enforce the rule itself.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| Fail-first: `go test -race -count=200 -cpu 1,2,8 -run 'TestRecheck_StalledDecisionIsBoundedAndCancelled/a_decision' ./service/internal/githttp/` at `c3f19cf5` (no code change yet) | 7 FAIL of 600 runs, each `an answer after the deadline: "ok\n"`, the CI failure |
+| The same command with the fix | 600 PASS, 0 FAIL |
+| `go test -race -count=300 -run TestRecheck_StalledDecisionIsBoundedAndCancelled ./service/internal/githttp/` (AC 2) | PASS |
+| `TestRecheck_NoAnswerAfterTheDecisionContextEnded`, `-race -count=20` | PASS |
+| Mutation: the `dctx.Err()` check removed | the new test fails 5 of 5 runs, both subtests (`"ok\n"` and `"refuse\npush refused\n"` written); restored |
+| `go build ./...`; `go vet ./...` | OK; clean |
+| `go test -count=1 ./...` | 41 packages ok, rc 0 |
+| `gofmt -l` on the two touched Go files | empty |
+| `golangci-lint run --new-from-rev main ./service/internal/githttp/...` | 0 issues |
+| `./dev/lint-boundaries.sh` | OK |
+| `codex review --base main` (gpt-6.1-sol) | No findings: "The change correctly suppresses replies when the decision context has ended, and the added regression test covers both admission and refusal responses." |
+
+### SMP
+
+`service/internal/githttp` sits under Spine's `service/internal/`, which Go's internal-package rule
+keeps out of reach of any package outside `service/`, so SMP cannot import it, and SMP's Go code
+has no import of `spine/service/internal`. SMP's pin is unaffected. Since `ce0b9c9e` (SMP's
+`.spine-revision`), the only change outside `initiatives/` is this task's two files.
+
+### Acceptance Criteria
+
+1. Met: the context check in `handle` (Change, above).
+2. Met: 300 of 300 at `-race`; the fail-first run reproduced 7 of 600 before the fix.
+3. Met: `TestRecheck_NoAnswerAfterTheDecisionContextEnded`; the mutation fails it deterministically.
+4. Met: every other `TestRecheck_*` and push-gate test passes in the full `go test ./...`.
+5. Met: every gate in the table, and codex has no findings.
+6. Met: SMP is unaffected (SMP, above).
