@@ -367,8 +367,13 @@ func TestGitAuth_SharedModeNoPreAuthOracle(t *testing.T) {
 var _ store.Store = tokenStoreErrStore{}
 
 // badDSN is a workspace connection string whose password pgconn's parse
-// error repeats verbatim.
-const badDSN = "postgres://u@127.0.0.1:1/db?password=TOPSECRET-N15&connect_timeout=no"
+// error repeats verbatim. Since pgx v5.11.0 pgconn masks a query-parameter
+// password (the shape this test first used, ?password=…), but its
+// keyword/value masking still misses whitespace around the `=`, which libpq
+// syntax allows (INIT-024 TASK-013). Spine's withholding must not depend on
+// either: TestDescribePreauthErr_WithholdsEveryParseError checks it against a
+// parse error that carries the password whatever pgconn masks.
+const badDSN = "host=127.0.0.1 port=1 user=u password = TOPSECRET-N15 connect_timeout=no"
 
 // syncBuffer is an io.Writer safe for the handler goroutines' log writes.
 type syncBuffer struct {

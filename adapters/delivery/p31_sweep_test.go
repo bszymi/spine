@@ -26,6 +26,7 @@ import (
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // p31DB holds event_subscriptions rows (12 columns in SELECT order).
@@ -124,6 +125,10 @@ func (r *p31Rows) Scan(d ...any) error                          { return p31Assi
 func (r *p31Rows) Values() ([]any, error)                       { return r.d[r.i], nil }
 func (r *p31Rows) RawValues() [][]byte                          { return nil }
 func (r *p31Rows) Conn() *pgx.Conn                              { return nil }
+
+// TypeMap is part of pgx.Rows since pgx v5.11.0. These rows are decoded by
+// Scan above, not through a pgtype.Map, so there is none to return.
+func (r *p31Rows) TypeMap() *pgtype.Map { return nil }
 
 func p31Random(t *testing.T, n int) []byte {
 	t.Helper()

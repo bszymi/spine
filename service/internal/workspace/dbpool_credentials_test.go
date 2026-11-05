@@ -12,18 +12,26 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // leakyDSNs are connection strings pgx refuses to parse, each with
 // credentials only this test knows. want is a fragment of the reason that
 // must survive.
+//
+// pgx v5.11.0 masks the query-parameter passwords of A2–A4 and A8, which
+// v5.9.2 printed (INIT-024 TASK-013). It still prints a key/value password
+// written with whitespace around the `=` (libpq syntax allows it), so A9–A11
+// keep the precondition below true. The fixtures pgx now masks stay: Spine's
+// withholding must hold for them too.
 var leakyDSNs = []struct {
 	name, dsn, want string
 }{
@@ -34,6 +42,9 @@ var leakyDSNs = []struct {
 	{"key=value password, bad option", "host=127.0.0.1 port=1 user=u password=TOPSECRET-A5 connect_timeout=no", "connect_timeout"},
 	{"key=value quoted password, bad sslmode", "host=127.0.0.1 user=u password='TOPSECRET-A6' sslmode=bogus", "sslmode"},
 	{"both passwords, bad pool option", "postgres://u:TOPSECRET-A7@127.0.0.1:1/db?password=TOPSECRET-A8&pool_max_conns=x", "pool_max_conns"},
+	{"key=value password, spaces around =", "host=127.0.0.1 port=1 user=u password = TOPSECRET-A9 connect_timeout=no", "connect_timeout"},
+	{"key=value password, space after =", "host=127.0.0.1 port=1 user=u password= TOPSECRET-A10 sslmode=bogus", "sslmode"},
+	{"key=value sslpassword, tab before =", "host=127.0.0.1 port=1 user=u sslpassword\t=TOPSECRET-A11 connect_timeout=no", "connect_timeout"},
 }
 
 func TestBuildPgxpoolConfig_ParseErrorCarriesNoConnectionString(t *testing.T) {
@@ -56,8 +67,77 @@ func TestBuildPgxpoolConfig_ParseErrorCarriesNoConnectionString(t *testing.T) {
 		})
 	}
 	// The fixtures are meaningful only if pgx itself leaks some of them.
+	// TestConnStringFreeError_WithholdsWhateverPgxMasks covers the guarantee
+	// without depending on that.
 	if leaked == 0 {
 		t.Fatal("precondition: pgx no longer repeats any fixture's password; rework the fixtures")
+	}
+}
+
+// INIT-024 TASK-013: connStringFreeError's guarantee is Spine's, not
+// pgconn's. pgconn's masking of the connection string is best effort and
+// changes between releases, and it never masks the reason (msg, and the
+// wrapped error). These parse errors carry the connection string and its
+// password in the reason, so they leak whatever pgconn masks; the returned
+// error must carry neither, and keep the reason's other text.
+func TestConnStringFreeError_WithholdsWhateverPgxMasks(t *testing.T) {
+	cases := []struct {
+		name, dsn string
+		err       error
+		secrets   []string
+		want      string
+	}{
+		{
+			name:    "the string in the reason",
+			dsn:     "postgres://u:TOPSECRET-D1@127.0.0.1:1/db?sslmode=bogus",
+			err:     pgconn.NewParseConfigError("postgres://u:TOPSECRET-D1@127.0.0.1:1/db?sslmode=bogus", "bad sslmode in postgres://u:TOPSECRET-D1@127.0.0.1:1/db?sslmode=bogus", nil),
+			secrets: []string{"TOPSECRET-D1", "127.0.0.1"},
+			want:    "bad sslmode in xxxxx",
+		},
+		{
+			name:    "a query password in the wrapped error",
+			dsn:     "postgres://u@127.0.0.1:1/db?password=TOPSECRET-D2&connect_timeout=no",
+			err:     pgconn.NewParseConfigError("postgres://u@127.0.0.1:1/db?password=TOPSECRET-D2&connect_timeout=no", "invalid connect_timeout", errors.New("near password=TOPSECRET-D2")),
+			secrets: []string{"TOPSECRET-D2"},
+			want:    "invalid connect_timeout (near password=xxxxx)",
+		},
+		{
+			name:    "a percent-encoded password, decoded in the reason",
+			dsn:     "postgres://u:TOP%2BSECRET-D3@127.0.0.1:1/db?sslmode=bogus",
+			err:     fmt.Errorf("open: %w", pgconn.NewParseConfigError("postgres://u:TOP%2BSECRET-D3@127.0.0.1:1/db?sslmode=bogus", "password TOP+SECRET-D3 rejected", nil)),
+			secrets: []string{"TOP+SECRET-D3", "TOP%2BSECRET-D3"},
+			want:    "password xxxxx rejected",
+		},
+		{
+			name:    "a key/value password",
+			dsn:     "host=127.0.0.1 user=u password='TOPSECRET-D4' sslmode=bogus",
+			err:     pgconn.NewParseConfigError("host=127.0.0.1 user=u password='TOPSECRET-D4' sslmode=bogus", "sslmode is invalid for TOPSECRET-D4", nil),
+			secrets: []string{"TOPSECRET-D4"},
+			want:    "sslmode is invalid for xxxxx",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.err.Error(), tc.secrets[0]) {
+				t.Fatalf("precondition: the parse error must carry the password, or the case is vacuous: %v", tc.err)
+			}
+			got := connStringFreeError(tc.err, tc.dsn)
+			for _, s := range tc.secrets {
+				if strings.Contains(got.Error(), s) {
+					t.Fatalf("error carries %q: %v", s, got)
+				}
+			}
+			if !errors.Is(got, ErrInvalidDatabaseURL) {
+				t.Fatalf("error = %v, want ErrInvalidDatabaseURL", got)
+			}
+			if want := ErrInvalidDatabaseURL.Error() + ": " + tc.want; got.Error() != want {
+				t.Fatalf("error = %q, want %q", got, want)
+			}
+			var parseErr *pgconn.ParseConfigError
+			if errors.As(got, &parseErr) {
+				t.Fatal("the returned error still wraps the ParseConfigError, whose Error() is the leak")
+			}
+		})
 	}
 }
 

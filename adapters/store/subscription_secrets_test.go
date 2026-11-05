@@ -23,6 +23,7 @@ import (
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // Column indexes in the 12-column SELECT order of postgres_subscriptions.go.
@@ -194,6 +195,10 @@ func (r *memRows) Scan(d ...any) error                          { return assignS
 func (r *memRows) Values() ([]any, error)                       { return r.d[r.i], nil }
 func (r *memRows) RawValues() [][]byte                          { return nil }
 func (r *memRows) Conn() *pgx.Conn                              { return nil }
+
+// TypeMap is part of pgx.Rows since pgx v5.11.0. These rows are decoded by
+// Scan above, not through a pgtype.Map, so there is none to return.
+func (r *memRows) TypeMap() *pgtype.Map { return nil }
 
 // ── fixtures ──
 

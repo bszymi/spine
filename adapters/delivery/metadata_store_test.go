@@ -20,6 +20,7 @@ import (
 	"github.com/bszymi/spine/adapters/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // subscriptionsDB holds runtime.event_subscriptions rows as the column
@@ -132,6 +133,10 @@ func (r *fakeRows) Scan(dest ...any) error                       { return assign
 func (r *fakeRows) Values() ([]any, error)                       { return r.data[r.i], nil }
 func (r *fakeRows) RawValues() [][]byte                          { return nil }
 func (r *fakeRows) Conn() *pgx.Conn                              { return nil }
+
+// TypeMap is part of pgx.Rows since pgx v5.11.0. These rows are decoded by
+// Scan above, not through a pgtype.Map, so there is none to return.
+func (r *fakeRows) TypeMap() *pgtype.Map { return nil }
 
 func TestStoreBackedResolverReportsV2(t *testing.T) {
 	ctx := context.Background()

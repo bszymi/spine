@@ -22,6 +22,7 @@ import (
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // subsDB is a minimal in-memory event_subscriptions table (12 columns in
@@ -158,6 +159,10 @@ func (r *subsRows) Scan(d ...any) error                          { return subsAs
 func (r *subsRows) Values() ([]any, error)                       { return r.d[r.i], nil }
 func (r *subsRows) RawValues() [][]byte                          { return nil }
 func (r *subsRows) Conn() *pgx.Conn                              { return nil }
+
+// TypeMap is part of pgx.Rows since pgx v5.11.0. These rows are decoded by
+// Scan above, not through a pgtype.Map, so there is none to return.
+func (r *subsRows) TypeMap() *pgtype.Map { return nil }
 
 func subsCipher(t *testing.T) *spinecrypto.SecretCipher {
 	t.Helper()
