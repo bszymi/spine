@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-14
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
@@ -1992,3 +1992,12 @@ clean.
 - Docker: the only containers started were the `git-floor` run (`--rm`) and the `alpine:3 df`
   disk checks. Nothing was pulled. The Docker VM had 6.3 GB free.
 - Logs: `spine-management-platform/tmp/init027-orchestration/w3final/`.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. Remaining (owner): confirm OQ2. The
+  orchestrator ruled "never", so AC 12's first half, AC 13 and AC 22's `InheritProcessAuth=true`
+  half are unbuilt and AC 21 holds trivially. If the owner chooses "yes, exact host and port",
+  §5.1–5.3 and real tests for those ACs come before the close (review rounds 1 and 2).

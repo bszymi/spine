@@ -2,11 +2,11 @@
 id: EPIC-001
 type: Epic
 title: Git Transport and Content Integrity
-status: Pending
+status: In Progress
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md

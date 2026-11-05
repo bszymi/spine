@@ -5,7 +5,7 @@ title: "Submit ownership, step-output evidence and compare-and-swap state writes
 status: In Progress
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-19
+last_updated: 2026-11-04
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -1996,3 +1996,12 @@ into `core/engine/state_cas_test.go`:
 
 Gates and codex for the follow-up as a whole are in TASK-003's "Post-merge fix (wave 4
 integration)" note.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs, this task's store compare-and-swap
+  and step-output evidence step included. Remaining (owner): the wording amendments the Handoffs
+  list, for AC 11 and AC 21 (proposed in review round 1) and for AC 10 and AC 14 (review round 2;
+  Deviations 18 and 17).

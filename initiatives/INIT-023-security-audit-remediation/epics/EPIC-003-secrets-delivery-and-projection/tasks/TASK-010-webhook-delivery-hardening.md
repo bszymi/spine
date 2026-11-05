@@ -2,12 +2,12 @@
 id: TASK-010
 type: Task
 title: "Opt-in v2 webhook signatures matching SMP's receiver, plus delivery-queue, breaker, SSRF and redaction fixes"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-07
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
@@ -2088,3 +2088,11 @@ file, after which `go vet` and `go test -race ./adapters/git/...` were re-run, o
 | SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 38 SMP packages depending on a changed Spine package (`go list -test -deps`) plus `./internal/customer/...` (67 packages): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2i_smp_spine_runtime` and `s2i_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. Extra: eventdelivery, projectionwriter, stepevents testgate: 35 passed, 6 allowed skips. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope). |
 
 All `s2i_*` databases were dropped afterwards; the only container started was removed.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** Spine `main` was pushed on 2026-11-04 with the owner's approval. GitHub
+  CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802` plus INIT-024
+  TASK-010's git-identity fix) passed all 8 jobs. Every AC is met: AC 19's `make test-integration`
+  fails only the pre-existing `TestRunModeDatabaseDefault` (review round 1, finding 7), and the
+  owner questions stay at their recorded defaults.

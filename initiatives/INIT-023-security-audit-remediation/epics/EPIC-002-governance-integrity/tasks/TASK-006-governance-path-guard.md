@@ -5,7 +5,7 @@ title: "Governance-path guard on governed merges and protection-removal guard in
 status: In Progress
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-19
+last_updated: 2026-11-04
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -2659,3 +2659,14 @@ skip):
 The golden-path lifecycle scenarios, run under the guard, are still held after the fix, and that
 is correct. Their synthetic actor `scenario-test-actor` drafts and reviews, so the exemption
 refuses them as "the reviewer is an author of the run". They run with the guard off, as before.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs, the governance-path guard scenario
+  and store step included. That closes the GitHub CI item under "Not run". Remaining (owner):
+  - **AC 1:** ADR-016 is `Proposed`; it becomes `Accepted` with the owner's sign-off on OQ1.
+  - **AC 11:** a ruling or an AC amendment for the permanent route of an unevaluable merge
+    (Deviation 22).
+  - **AC 18:** the amendment of the `FullRebuild` sentence (Deviation 12).

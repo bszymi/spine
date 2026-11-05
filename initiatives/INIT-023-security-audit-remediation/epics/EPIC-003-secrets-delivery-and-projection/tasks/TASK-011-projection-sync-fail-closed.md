@@ -5,7 +5,7 @@ title: "Projection sync integrity: close the workflow parser differential, stop 
 status: In Progress
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-14
+last_updated: 2026-11-04
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -2208,3 +2208,13 @@ Recorded in full on TASK-003 ("Adversarial review of the follow-up"); fixed in `
   `TestIncrementalSync_FileEntryRecordingATreeOrCommitAdvances` pin both; each fails without the
   fix. AC 28 (branch validation ignores `ReadErrors`) is unchanged: such a file is a refusal now,
   not a read error, so `TestValidateBranch_FileEntryRecordingANonBlobObjectFails` fails it.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. Remaining (owner; gaps G3 and G4 of
+  review round 2):
+  - **AC 18 (third bullet) and AC 26:** a waiver or an amended AC for "`make test-scenario` passes"
+    (the failures equal `main`'s).
+  - **AC 24:** a waiver or a deferral for the `TEST_PROVISIONING_DSN` SMP suites.

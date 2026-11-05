@@ -2,12 +2,12 @@
 id: TASK-005
 type: Task
 title: "Bind the governed merge to the commit that passed validation and review"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-14
+last_updated: 2026-11-04
 # Depends on spine TASK-002 (CLIClient ref grammar and Merge argv). Add the
 # blocked_by link once TASK-002's epic path is fixed in this initiative.
 links:
@@ -2115,3 +2115,12 @@ clean.
 - Docker: the only containers started were the `git-floor` run (`--rm`) and the `alpine:3 df`
   disk checks. Nothing was pulled. The Docker VM had 6.3 GB free.
 - Logs: `spine-management-platform/tmp/init027-orchestration/w3final/`.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** Spine `main` was pushed on 2026-11-04 with the owner's approval. GitHub
+  CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802` plus INIT-024
+  TASK-010's git-identity fix) passed all 8 jobs, among them the `scenario-git-http` job on
+  PostgreSQL 18, the last item under "Not run". AC 19 and AC 23's scenario suite stay "as on `main`"
+  under the orchestrator's rule for the known pre-existing failures (review round 2), and the owner
+  questions stay at their recorded defaults.

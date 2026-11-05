@@ -2,11 +2,11 @@
 id: EPIC-003
 type: Epic
 title: Secrets, Delivery and Projection
-status: Pending
+status: In Progress
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/initiative.md

@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transp
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-19
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -2304,3 +2304,17 @@ created, all were dropped, and there were no `ws_*` databases or roles before th
 after them. The shared roles were untouched. Docker: the only container was the `git-floor` run
 (`--rm --pull=never`); nothing was pulled, built or pruned. Logs:
 `spine-management-platform/tmp/init027-orchestration/w4/agents/fu-fix2/`.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. That closes the GitHub CI item under
+  "Not run". Remaining:
+  - **AC 5 and AC 11.4 (owner):** the amendment, with the replacement texts proposed in review round
+    2 (Deviations 2 and 1).
+  - **AC 16 (orchestrator):** the record proposed in review round 2. The three SMP tests it names
+    passed in the wave 4 acceptance gate (SMP `1ae9b0e3` against the wave 4 tree, no failure).
+  - **AC 17 (orchestrator):** its precondition held (SMP TASK-003 was on SMP `main` `f5c6fd6d`
+    before the wave 3 merge, `ae513dca`); no PR was opened, so the PR-description clause needs the
+    orchestrator's record.

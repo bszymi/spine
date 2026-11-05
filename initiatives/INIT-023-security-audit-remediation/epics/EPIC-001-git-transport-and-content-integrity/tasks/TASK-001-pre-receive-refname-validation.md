@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transp
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-10-07
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -1513,6 +1513,23 @@ integration branch (SMP TASK-001 to TASK-003).
 > this PR.
 > It ships independently, with no `.spine-revision` bump. This PR's merge commit is the one SMP's
 > later `.spine-revision` bump names (SMP TASK-012 adds the `Evaluate` pin test).
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. That closes this task's Spine-side
+  post-push clauses: AC 4 (the SHA-256 test fails rather than skips under `CI`, so it passed on the
+  ubuntu runner) and AC 9's `scenario-git-http` job on GitHub. Remaining:
+  - **AC 9:** the two recorded deviations, the CI job scoped to `TestGitHTTP_*` and "`make lint`
+    passes" read as no new issues, still await the owner's or the orchestrator's ratification
+    (review round 2).
+  - **AC 10:** SMP's CI green with `../spine` at a pin that contains this task (SMP pins
+    `49fad9c0`). SMP's first run since the push, 41859131740 at SMP `main` `efe1dec2`, failed
+    `test`, `integration` and `images` for SMP-side causes, which SMP is fixing.
+  - **AC 13 (orchestrator):** no PR was opened; the task merged to `main` as `ee3c249e`, which
+    reached GitHub with the push. The PR description is the draft above. Record that as the
+    evidence, or amend the AC.
 
 ## Design check
 

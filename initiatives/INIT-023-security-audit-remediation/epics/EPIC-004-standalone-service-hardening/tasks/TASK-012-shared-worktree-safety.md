@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-19
+last_updated: 2026-11-04
 # Also blocked by spine TASK-002 (CLIClient ref grammar and Merge/Checkout argv), transitively
 # through TASK-005. Add the blocked_by link once TASK-002's epic path is fixed in this initiative.
 # Design check (2026-10-06): TASK-002's path is fixed, so the link is added below. TASK-011 is
@@ -2481,3 +2481,14 @@ The same commit makes TASK-008's `failRunOnMergeError` row race inside the merge
 this re-check had made the old row's race moot (see TASK-008's "Integration follow-up (wave 4)").
 Gates and codex for the follow-up as a whole are in TASK-003's "Post-merge fix (wave 4
 integration)" note.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. Remaining (the rulings "Not run /
+  notes for the orchestrator" lists, still open):
+  - **AC 23:** a waiver for `make test-scenario` (G1: the 31 pre-existing failures, identical to
+    `main`).
+  - **AC 15:** a ruling on the push half (Deviation 16); INIT-023 §7f lists it as an owner wording
+    amendment.
