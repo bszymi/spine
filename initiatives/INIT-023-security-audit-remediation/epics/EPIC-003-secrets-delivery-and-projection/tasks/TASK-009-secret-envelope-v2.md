@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-de
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-07
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
@@ -1711,3 +1711,12 @@ is invisible, and no shipped Spine or SMP workflow has a `convergence` or untype
 | SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 67 packages (dependents of a changed Spine package plus `./internal/customer/...`): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2f_smp_spine_runtime` and `s2f_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope) |
 
 All `s2f_*` databases were dropped afterwards, and no container was started.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs. Remaining (owner):
+  - **AC19:** the waiver for `make test-integration`'s pre-existing failures
+    (`TestRunModeDatabaseDefault`, and `TestAWSClient_Contract_LocalStack`, which needs LocalStack),
+    still outstanding (review round 2).

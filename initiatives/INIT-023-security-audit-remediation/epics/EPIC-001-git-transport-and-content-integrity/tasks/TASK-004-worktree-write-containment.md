@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transp
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-14
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -1614,3 +1614,14 @@ directory. The read descriptor is blocking again before its first read. Windows 
 
 **Gates and the Codex round** are recorded once, in TASK-011's "Codex 6.1 catch-up" subsection
 (the same branch, the same runs).
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** Spine `main` was pushed on 2026-11-04 with the owner's
+  approval. GitHub CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802`
+  plus INIT-024 TASK-010's git-identity fix) passed all 8 jobs; AC 16's Linux descriptor count ran
+  on GitHub's runner in the `go test ./...` job. Remaining:
+  - **AC 14 (a check):** run the three original audit PoCs (`poc/git`, `poc/parsing`,
+    `poc/verify-r1-8`) with `go test -overlay` against the merge commit (`main` `d23b897`, the wave
+    2 merge) and record the result here. They ran only against the branch head (review round 2,
+    "Gaps").

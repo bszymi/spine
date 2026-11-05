@@ -2,12 +2,12 @@
 id: TASK-008
 type: Task
 title: "Wire the multi-workspace scheduler into shared-mode spine serve"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-003-standalone-server-hardening/epic.md
@@ -518,3 +518,11 @@ both waits. Gates at `a33e399c`, including `-race` and `-tags integration` on
 `service/internal/workspace` and `service/cmd/spine`, the scenario-git-http job (with
 `TestServe_DBModeMultiSchedulerFiresAcrossWorkspaces`) and the SMP legs: see TASK-003's Integration A
 phase 3.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs, the shared-mode scheduler step included. Every AC is met; the
+  live `spine serve` run under "Not run" is covered by the lifecycle and db-mode tests and is not an
+  AC, and the owner questions stay at their recorded defaults.

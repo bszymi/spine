@@ -2,10 +2,10 @@
 id: INIT-023
 type: Initiative
 title: Security Audit Remediation
-status: Pending
+status: In Progress
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-10-20
+last_updated: 2026-11-04
 links:
   - type: related_to
     target: /initiatives/INIT-018-branch-protection/initiative.md
@@ -697,6 +697,21 @@ questions stay in that task.
   Proposed until signed off; TASK-006 AC 11/18, TASK-008 AC 10/11/21 and TASK-012
   AC 15 wording amendments; whether an approved governance merge restarts its
   retry count. Tasks stay In Progress until GitHub CI runs. Not pushed.
+- 2026-11-04 — **Pushed; statuses after GitHub CI.** The owner approved the push. Spine `main` on
+  GitHub now carries INIT-023 (waves 1–4, `a560c210`) and INIT-024 (its closing commit `fd35f802`,
+  then `ce0b9c9e`, a git-identity fix the first run found). GitHub CI run 41875102030 at `ce0b9c9e`
+  passed all 8 jobs (41856447149 at `fd35f802` failed only `go test ./...`, on that defect).
+  Completed: TASK-002, TASK-005, TASK-007, TASK-010, TASK-014 and TASK-017. The other eleven stay In
+  Progress; each task's "Status after GitHub CI" note lists what is left:
+  - owner: the ADR-016 sign-off (TASK-006 AC 1, OQ1); TASK-015 OQ2; AC amendments or rulings in
+    TASK-003 (AC 5, 11.4), TASK-006 (AC 11, 18), TASK-008 (AC 10, 11, 14, 21), TASK-012 (AC 15) and
+    TASK-016 (AC 16); waivers in TASK-009 (AC19), TASK-011 (AC 18, 24, 26) and TASK-013 (AC 16);
+  - owner or orchestrator: TASK-001 AC 9's deviations, TASK-012 AC 23's waiver, and the records for
+    TASK-001 AC 13 and TASK-003 AC 16 and AC 17;
+  - checks: TASK-004 AC 14 (the audit PoCs at the merge commit) and TASK-001 AC 10 (SMP's CI green;
+    its first run since the push is red for SMP-side causes).
+
+  All four epics and the initiative are In Progress.
 
 ---
 

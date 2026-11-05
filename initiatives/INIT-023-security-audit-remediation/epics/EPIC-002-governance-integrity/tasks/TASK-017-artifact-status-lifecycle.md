@@ -2,12 +2,12 @@
 id: TASK-017
 type: Task
 title: "Declared artifact-status lifecycle and run-owned merge cascade (opt-in)"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-16
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
@@ -1890,3 +1890,10 @@ No SMP command failed, so there is no compatibility break, and no run against `.
   `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
   VM had 5.8 GB free at the lowest check.
 - Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** Spine `main` was pushed on 2026-11-04 with the owner's approval. GitHub
+  CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802` plus INIT-024
+  TASK-010's git-identity fix) passed all 8 jobs, the status-lifecycle scenarios and pooled
+  validator step included. Every AC is met, and the owner questions stay at their recorded defaults.

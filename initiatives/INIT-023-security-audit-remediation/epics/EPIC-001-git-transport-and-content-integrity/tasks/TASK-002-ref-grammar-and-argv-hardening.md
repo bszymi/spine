@@ -2,12 +2,12 @@
 id: TASK-002
 type: Task
 title: "One ref grammar for the git CLI client: qualified branch arguments, validated refs, --end-of-options"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-10-07
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -1700,3 +1700,13 @@ is invisible, and no shipped Spine or SMP workflow has a `convergence` or untype
 | SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 67 packages (dependents of a changed Spine package plus `./internal/customer/...`): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2f_smp_spine_runtime` and `s2f_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope) |
 
 All `s2f_*` databases were dropped afterwards, and no container was started.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** Spine `main` was pushed on 2026-11-04 with the owner's approval. GitHub
+  CI run 41875102030 at `main` `ce0b9c9e` (the INIT-024 closing commit `fd35f802` plus INIT-024
+  TASK-010's git-identity fix) passed all 8 jobs, among them the `git-floor` job on the shipped git
+  2.39.x in the pinned `golang:1.26.10-bookworm` image: AC 13's CI clause, the last open item. AC
+  14's scenario suite keeps review round 1's reading (the failures are `main`'s pre-existing set),
+  AC 15's run is recorded in these notes (no PR was opened), and the owner questions stay at their
+  recorded defaults.

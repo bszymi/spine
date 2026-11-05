@@ -7,7 +7,7 @@ epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-004-supply-chain/
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-23
-last_updated: 2026-10-23
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-004-supply-chain/epic.md
@@ -489,3 +489,17 @@ Codex (`codex review --base main`, plain, from the integration worktree): round 
 review sub-session `01a17e99-5b95-71f3-995c-e5f81a1d37b2`, model `gpt-6.1-sol`: no findings ("No
 actionable regressions were identified"). It covered every merged task and coordination commit,
 including TASK-003's `5636c02d` and `e57a6741`, which had no task-level codex round.
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: stays In Progress.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this
+  initiative's closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus
+  TASK-010's git-identity fix) passed all 8 jobs. That closes what waited for CI: AC 4's Dockerfile
+  build (`image-build`: the pinned bases build, and the image runs with the shipped git), AC 2 and
+  AC 5 on GitHub (`vuln`, `toolchain-parity`), AC 6 (every pinned job ran), and `git-floor` on the
+  pinned `golang:1.26.10-bookworm` image. GitHub's Dependabot runs at `fd35f802` and `ce0b9c9e`
+  succeeded (AC 7). Remaining:
+  - **AC 8 (a live check):** bring both compose stacks up on a host that may pull the pinned images:
+    `make test-db-up`, then `docker compose -f docker-compose.test.yaml ps`, and `make docker-up`.
+    GitHub's scenario job pulled and ran the same pinned `postgres:18-bookworm` digest; the compose
+    stacks and the pinned LocalStack have not been brought up anywhere.

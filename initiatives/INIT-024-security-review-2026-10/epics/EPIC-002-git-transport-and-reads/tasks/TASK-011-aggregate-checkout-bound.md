@@ -2,12 +2,12 @@
 id: TASK-011
 type: Task
 title: "Aggregate checkout bound: one writer per branch, bounded in-flight checkout bytes"
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 work_type: security
 created: 2026-10-31
-last_updated: 2026-11-02
+last_updated: 2026-11-04
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/epics/EPIC-002-git-transport-and-reads/epic.md
@@ -548,3 +548,10 @@ run above replaces that one.*
 
 - Codex (the budget is spent): `db8545c2`, `43bcc31b` and `71db73ca` go to the independent delta check.
 - The full `make test-scenario` with a registry database, GitHub CI, the tests on Windows (vet only).
+
+### Status after GitHub CI (2026-11-04)
+
+- **2026-11-04: Completed.** GitHub CI run 41875102030 at Spine `main` `ce0b9c9e` (this initiative's
+  closing commit `fd35f802`, pushed on 2026-11-04 with the owner's approval, plus TASK-010's
+  git-identity fix) passed all 8 jobs. Every AC is met. The round 2 fixes passed the independent
+  delta check (no P1–P3); its P4, stale worktree registrations, is a follow-up in TASK-010's notes.
