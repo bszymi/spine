@@ -396,7 +396,8 @@ Each task works with its stated default. Tasks cite these as "INIT-024 owner que
   unaffected (`service/internal` is not importable by SMP).
 - 2026-11-05: the owner ruled to replace Dependabot PRs #602 (postgres digest) and #604 (the gomod
   group, with pgx v5.11.0) with our own fixed change, and to move LocalStack to 4.14.0. TASK-013
-  (EPIC-004) is added for it.
+  (EPIC-004) is added for it and is Completed on its branch (not pushed). EPIC-004 stays In Progress
+  for TASK-009's AC 8.
 
 ---
 
