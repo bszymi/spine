@@ -6,7 +6,7 @@ status: In Progress
 initiative: /initiatives/INIT-024-security-review-2026-10/initiative.md
 owner: bszymi
 created: 2026-10-23
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 links:
   - type: parent
     target: /initiatives/INIT-024-security-review-2026-10/initiative.md
@@ -55,6 +55,7 @@ fork.
 | ID | Title | Findings | Wave | Blocked by | SMP impact |
 |---|---|---|---|---|---|
 | TASK-009 | Toolchain and dependency bumps, Dockerfile and CI pinning, govulncheck, Dependabot | SC-01 (Spine half), SC-06, SC-08, SC-09 | 2 (first in practice) | — | yes: MVS raises SMP's pgx, x/text and chi |
+| TASK-013 | Dependency refresh: postgres digest, the gomod group (pgx v5.11.0), LocalStack 4.14.0 (replaces Dependabot #602 and #604) | — (follow-up to TASK-009) | close-out follow-up (after TASK-009) | — | yes: MVS raises SMP's pgx, chi, cobra, AWS SDK and x/sync/x/time floors; SMP's `pgx.Rows` fakes need `TypeMap` |
 
 ---
 

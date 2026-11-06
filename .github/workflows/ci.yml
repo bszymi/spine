@@ -134,9 +134,9 @@ jobs:
     needs: boundary-lint
     services:
       postgres:
-        # PostgreSQL 18.6 (index of 2026-10-21). dev/pincheck requires this ref to
+        # PostgreSQL 18.6 (index of 2026-10-28). dev/pincheck requires this ref to
         # equal the compose files' postgres ref, tag and digest.
-        image: postgres:18-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc
+        image: postgres:18-bookworm@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8
         env:
           POSTGRES_USER: spine_test
           POSTGRES_PASSWORD: spine_test

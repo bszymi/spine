@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -359,14 +360,143 @@ func parseEventLogNotifyBridge(raw string) bool {
 
 // requireSecureDBURL rejects connection strings that use sslmode=disable
 // unless SPINE_INSECURE_LOCAL=1 is set.
-func requireSecureDBURL(url string) error {
-	if !strings.Contains(url, "sslmode=disable") {
+func requireSecureDBURL(dbURL string) error {
+	if !sslModeDisabled(dbURL) {
 		return nil
 	}
 	if os.Getenv("SPINE_INSECURE_LOCAL") == "1" {
 		return nil
 	}
 	return fmt.Errorf("database URL uses sslmode=disable; set SPINE_INSECURE_LOCAL=1 to acknowledge (local development only) or use sslmode=require/verify-full")
+}
+
+// sslModeDisabled reports whether dsn sets sslmode to disable in any
+// spelling pgx reads as disable (INIT-024 TASK-013).
+//
+// The gate used to look for the literal text "sslmode=disable". pgx
+// v5.11.0 parses URIs as libpq does: it trims spaces around a query key
+// and value, and the last of a repeated parameter wins, so
+// `?sslmode= disable` and `?sslmode=require&sslmode= disable` now connect
+// without TLS (v5.9.2 refused the first and kept TLS for the second), and
+// the literal check passed both. Percent-encoding (`%64isable`,
+// `ssl%6Dode`) and key/value spacing, quoting and escapes (`sslmode =
+// disable`, `sslmode='disable'`) passed it with every pgx release.
+//
+// The settings are read with pgx v5.11.0's structure (uriQuerySettings,
+// keywordValueSettings), so text inside a password or another quoted
+// value is not taken for a setting. Every sslmode setting that reads as
+// disable refuses, not only the one pgx applies: refusing is the safe
+// side, and SPINE_INSECURE_LOCAL=1 is the same acknowledgement. The
+// literal check stays first, so nothing the gate refused before passes
+// now. Settings pgx merges from the environment (PGSSLMODE) are not read
+// here, as before.
+func sslModeDisabled(dsn string) bool {
+	if strings.Contains(dsn, "sslmode=disable") {
+		return true
+	}
+	var settings [][2]string
+	if rest, ok := strings.CutPrefix(dsn, "postgres://"); ok {
+		settings = uriQuerySettings(rest)
+	} else if rest, ok := strings.CutPrefix(dsn, "postgresql://"); ok {
+		settings = uriQuerySettings(rest)
+	} else {
+		settings = keywordValueSettings(dsn)
+	}
+	for _, kv := range settings {
+		if kv[0] == "sslmode" && kv[1] == "disable" {
+			return true
+		}
+	}
+	return false
+}
+
+// uriQuerySettings returns the query settings of a connection URI (the
+// text after its scheme) where pgx v5.11.0 finds them: the userinfo ends
+// at the first '@' before any '/', the query begins at the first '?' after
+// it, and its pairs are split at '&'. Each key and value is decoded as
+// pgx decodes it (uriSetting).
+func uriQuerySettings(rest string) [][2]string {
+	if i := strings.IndexAny(rest, "@/"); i >= 0 && rest[i] == '@' {
+		rest = rest[i+1:]
+	}
+	q := strings.IndexByte(rest, '?')
+	if q < 0 {
+		return nil
+	}
+	var out [][2]string
+	for _, pair := range strings.Split(rest[q+1:], "&") {
+		if k, v, ok := strings.Cut(pair, "="); ok {
+			out = append(out, [2]string{uriSetting(k), uriSetting(v)})
+		}
+	}
+	return out
+}
+
+// uriSetting decodes one URI query component the way pgx v5.11.0 does,
+// leniently: an invalid escape leaves the component as written (pgx then
+// refuses the string).
+func uriSetting(s string) string {
+	s = strings.Trim(s, " ")
+	if dec, err := url.PathUnescape(s); err == nil {
+		s = dec
+	}
+	return strings.Trim(s, " ")
+}
+
+// keywordValueSettings returns the settings of a key/value connection
+// string as pgx v5.11.0 (like libpq) reads them: a keyword, optional
+// whitespace, '=', optional whitespace, then a value that is quoted
+// ('…', ending at the first unescaped quote) or runs to the next
+// whitespace; in both, a backslash is dropped and the character after it
+// kept. Where pgx refuses the string (whitespace inside a keyword, an
+// unterminated quote, no '='), reading stops: pgx does not connect.
+func keywordValueSettings(s string) [][2]string {
+	const ws = " \t\n\r\v\f"
+	var out [][2]string
+	s = strings.TrimLeft(s, ws)
+	for s != "" {
+		eq := strings.IndexByte(s, '=')
+		if eq < 0 {
+			break
+		}
+		key := strings.Trim(s[:eq], ws)
+		if strings.ContainsAny(key, ws) {
+			break
+		}
+		s = strings.TrimLeft(s[eq+1:], ws)
+		var val strings.Builder
+		if strings.HasPrefix(s, "'") {
+			i := 1
+			for ; i < len(s) && s[i] != '\''; i++ {
+				if s[i] == '\\' {
+					i++
+					if i == len(s) {
+						break
+					}
+				}
+				val.WriteByte(s[i])
+			}
+			if i >= len(s) {
+				break
+			}
+			s = s[i+1:]
+		} else {
+			i := 0
+			for ; i < len(s) && !strings.ContainsRune(ws, rune(s[i])); i++ {
+				if s[i] == '\\' {
+					i++
+					if i == len(s) {
+						break
+					}
+				}
+				val.WriteByte(s[i])
+			}
+			s = s[i:]
+		}
+		out = append(out, [2]string{key, val.String()})
+		s = strings.TrimLeft(s, ws)
+	}
+	return out
 }
 
 // resolveRuntimeEnv returns the normalized SPINE_ENV value: production,

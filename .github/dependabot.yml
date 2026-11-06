@@ -69,3 +69,11 @@ updates:
       compose-minor-patch:
         patterns: ["*"]
         update-types: [minor, patch]
+    # INIT-024 TASK-013: LocalStack stays on 4.14.0, the last release of the
+    # open-source image. Its later tags are date-numbered (2026.x), which
+    # Dependabot reads as a new major; those images are LocalStack's
+    # consolidated image and need an account token to start, which the test
+    # stack does not have. Moving off 4.14.0 is a deliberate change by hand.
+    ignore:
+      - dependency-name: localstack/localstack
+        update-types: ["version-update:semver-major"]
