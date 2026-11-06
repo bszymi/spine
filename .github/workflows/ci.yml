@@ -49,7 +49,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.3'
 
       - name: Dependency-direction guard
         run: ./dev/lint-boundaries.sh
@@ -65,7 +65,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.3'
 
       - name: Build service binary
         run: make build
@@ -87,7 +87,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.3'
 
       # INIT-024 / TASK-010 (GitHub CI after the push): git is given no
       # identity and may not guess one. The runner configures no
@@ -157,7 +157,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.3'
 
       - name: TestGitHTTP_* scenarios (must pass, never skip)
         shell: bash
@@ -342,7 +342,7 @@ jobs:
   # adapter and the artifact/workflow services that drive it.
   #
   # INIT-024 / EPIC-004 / TASK-009: the container is the Dockerfile's
-  # builder image, pinned by digest (golang:1.26.10-bookworm = go.mod's
+  # builder image, pinned by digest (golang:1.27.3-bookworm = go.mod's
   # toolchain; dev/pincheck keeps the three references equal), so the git
   # and the Go this job tests are reproducible and are the shipped ones.
   git-floor:
@@ -350,7 +350,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: boundary-lint
     container:
-      image: golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af
+      image: golang:1.27.3-bookworm@sha256:b08bc99468058b6d8a0ada17fa54996b910d5e82a7e95bee0372e3bd98415258
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -387,7 +387,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.3'
 
       - name: The Go in use is go.mod's toolchain
         shell: bash
@@ -435,7 +435,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.3'
 
       - name: The checks refuse the mismatched fixtures
         run: go test -count=1 -v ./dev/pincheck/

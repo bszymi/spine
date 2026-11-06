@@ -43,16 +43,21 @@ type stubStore struct {
 // returns an authenticated admin actor instead of (nil, nil, nil) —
 // authMiddleware passes and the probe exercises handler-level wiring.
 func (stubStore) GetActorByTokenHash(ctx context.Context, tokenHash string) (*domain.Actor, *domain.Token, error) {
-	return &domain.Actor{
-			ActorID: "smoke-test-actor",
-			Type:    domain.ActorTypeHuman,
-			Name:    "smoke",
-			Role:    domain.RoleAdmin,
-			Status:  domain.ActorStatusActive,
-		}, &domain.Token{
-			TokenID: "tok_smoke",
-			ActorID: "smoke-test-actor",
-		}, nil
+	// Built as variables, not inline in the return: gofmt 1.26 and 1.27
+	// indent a multi-line composite literal in a multi-value return
+	// differently, so the inline form is clean under only one of them.
+	actor := &domain.Actor{
+		ActorID: "smoke-test-actor",
+		Type:    domain.ActorTypeHuman,
+		Name:    "smoke",
+		Role:    domain.RoleAdmin,
+		Status:  domain.ActorStatusActive,
+	}
+	token := &domain.Token{
+		TokenID: "tok_smoke",
+		ActorID: "smoke-test-actor",
+	}
+	return actor, token, nil
 }
 
 var _ store.Store = stubStore{}
