@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: Assumption Type and Links
-status: In Progress
+status: Completed
 initiative: /initiatives/INIT-025-assumption-artifacts/initiative.md
 owner: bszymi
 created: 2026-11-10
