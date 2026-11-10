@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
 )
 
 func structuralRules() []Rule {
@@ -185,6 +185,7 @@ func (r *ruleSI005) Evaluate(_ context.Context, proj *store.ArtifactProjection, 
 		domain.ArtifactTypeArchitecture: "architecture/",
 		domain.ArtifactTypeGovernance:   "governance/",
 		domain.ArtifactTypeProduct:      "product/",
+		domain.ArtifactTypeAssumption:   "assumptions/",
 	}
 
 	prefix, ok := expectedPrefixes[artType]

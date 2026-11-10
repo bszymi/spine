@@ -11,6 +11,10 @@ const (
 	ArtifactTypeGovernance   ArtifactType = "Governance"
 	ArtifactTypeArchitecture ArtifactType = "Architecture"
 	ArtifactTypeProduct      ArtifactType = "Product"
+	// ArtifactTypeAssumption is one claim a decision or plan relies on,
+	// written so it can be shown true or false (ADR-017). Its status says
+	// what is recorded about the claim, never that the claim is certain.
+	ArtifactTypeAssumption ArtifactType = "Assumption"
 	// ArtifactTypeWorkflow refers to a workflow definition (ADR-007). Workflow
 	// definitions are YAML resources, not Markdown-with-frontmatter artifacts,
 	// so they do not appear in the artifact parser — this constant exists so
@@ -28,7 +32,7 @@ func ValidArtifactTypes() []ArtifactType {
 	return []ArtifactType{
 		ArtifactTypeInitiative, ArtifactTypeEpic, ArtifactTypeTask,
 		ArtifactTypeADR, ArtifactTypeGovernance, ArtifactTypeArchitecture,
-		ArtifactTypeProduct, ArtifactTypeWorkflow,
+		ArtifactTypeProduct, ArtifactTypeAssumption, ArtifactTypeWorkflow,
 	}
 }
 
@@ -40,7 +44,7 @@ func ValidMarkdownArtifactTypes() []ArtifactType {
 	return []ArtifactType{
 		ArtifactTypeInitiative, ArtifactTypeEpic, ArtifactTypeTask,
 		ArtifactTypeADR, ArtifactTypeGovernance, ArtifactTypeArchitecture,
-		ArtifactTypeProduct,
+		ArtifactTypeProduct, ArtifactTypeAssumption,
 	}
 }
 
@@ -78,6 +82,14 @@ const (
 	StatusStable         ArtifactStatus = "Stable"
 )
 
+// Assumption statuses (ADR-017 §2). Proposed, Rejected and Superseded are
+// shared with the ADR and Task sets above.
+const (
+	StatusUntested     ArtifactStatus = "Untested"
+	StatusSupported    ArtifactStatus = "Supported"
+	StatusContradicted ArtifactStatus = "Contradicted"
+)
+
 // ValidStatusesForType returns the allowed status values for a given artifact type.
 func ValidStatusesForType(t ArtifactType) []ArtifactStatus {
 	switch t {
@@ -93,6 +105,8 @@ func ValidStatusesForType(t ArtifactType) []ArtifactStatus {
 		return []ArtifactStatus{StatusLivingDocument, StatusStable, StatusSuperseded}
 	case ArtifactTypeProduct:
 		return []ArtifactStatus{StatusLivingDocument, StatusStable, StatusSuperseded}
+	case ArtifactTypeAssumption:
+		return []ArtifactStatus{StatusProposed, StatusUntested, StatusSupported, StatusContradicted, StatusRejected, StatusSuperseded}
 	default:
 		return nil
 	}
@@ -114,6 +128,12 @@ const (
 	LinkTypeParent    LinkType = "parent"
 	LinkTypeBlockedBy LinkType = "blocked_by"
 	LinkTypeRelatedTo LinkType = "related_to"
+	// ADR-017 §3. depends_on: the source relies on the target. supports and
+	// refutes: the source is evidence for or against the target Assumption.
+	// None has a required inverse; the reverse direction is a lookup by target.
+	LinkTypeDependsOn LinkType = "depends_on"
+	LinkTypeSupports  LinkType = "supports"
+	LinkTypeRefutes   LinkType = "refutes"
 )
 
 // Link represents a relationship between two artifacts.

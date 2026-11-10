@@ -310,7 +310,7 @@ func TestValidateValidLinks(t *testing.T) {
 func TestValidateInvalidLinkType(t *testing.T) {
 	a := validGovernance()
 	a.Links = []domain.Link{
-		{Type: "depends_on", Target: "/path.md"},
+		{Type: "not_a_link_type", Target: "/path.md"},
 	}
 	r := artifact.Validate(a)
 	assertHasError(t, r, "links[0].type", "unknown link type")

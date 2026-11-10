@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: The Assumption type, its lifecycle and the three link types
-status: Pending
+status: Completed
 created: 2026-11-10
 last_updated: 2026-11-10
 epic: /initiatives/INIT-025-assumption-artifacts/epics/EPIC-001-assumption-type-and-links/epic.md
@@ -44,3 +44,12 @@ Implement ADR-017 §1–§3: Core accepts `type: Assumption` and the `depends_on
 - A link of each new type validates; an unknown type is still refused.
 - An Assumption is discovered (`IsArtifact`) and therefore projected.
 - `go test ./...` passes.
+
+## Notes (2026-11-10)
+
+- Implemented as specified. One existing test (`TestValidateInvalidLinkType`) used `depends_on` as
+  its example of an unknown link type; it now uses a type that is still unknown.
+- Gates: `go test ./...` 41 packages ok; `dev/lint-boundaries.sh` OK; codex review (gpt-6.1-sol)
+  against `main`: no actionable defects.
+- Executed by branch and merge, not a Spine run: the change adds an artifact type the running
+  engine does not know yet.

@@ -184,6 +184,21 @@ func TestSI005_PathMismatch(t *testing.T) {
 	}
 }
 
+// ADR-017 §1: an Assumption lives under assumptions/.
+func TestSI005_Assumption(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "assumptions/ASM-001-x.md", "Assumption", "Untested", nil, nil)
+	addArtifact(fs, "architecture/ASM-002-y.md", "Assumption", "Untested", nil, nil)
+
+	e := validation.NewEngine(fs)
+	if hasRuleError(e.Validate(context.Background(), "assumptions/ASM-001-x.md"), "SI-005") {
+		t.Error("unexpected SI-005 for an Assumption under assumptions/")
+	}
+	if !hasRuleError(e.Validate(context.Background(), "architecture/ASM-002-y.md"), "SI-005") {
+		t.Error("expected SI-005 for an Assumption outside assumptions/")
+	}
+}
+
 func TestSI005_PathCorrect(t *testing.T) {
 	fs := newFakeStore()
 	addArtifact(fs, "initiatives/test/task.md", "Task", "Pending", nil, nil)

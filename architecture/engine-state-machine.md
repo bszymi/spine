@@ -287,6 +287,7 @@ unknown type. `Workflow` definitions carry no status and are not in the table.
 | Type | Initial (may be created with) | Transitions |
 |---|---|---|
 | ADR | Proposed | Accepted → Deprecated, Accepted → Superseded, Proposed → Accepted, Proposed → Deprecated, Proposed → Superseded |
+| Assumption | Proposed, Untested | Contradicted → Superseded, Contradicted → Supported, Contradicted → Untested, Proposed → Contradicted, Proposed → Rejected, Proposed → Supported, Proposed → Untested, Supported → Contradicted, Supported → Superseded, Supported → Untested, Untested → Contradicted, Untested → Superseded, Untested → Supported |
 | Architecture | Living Document, Stable | Living Document → Stable, Living Document → Superseded, Stable → Living Document, Stable → Superseded |
 | Epic | Draft, Pending | Draft → Pending, Draft → Superseded, In Progress → Completed, In Progress → Superseded, Pending → Completed, Pending → In Progress, Pending → Superseded |
 | Governance | Foundational, Living Document | Foundational → Living Document, Foundational → Superseded, Living Document → Foundational, Living Document → Superseded |

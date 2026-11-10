@@ -19,6 +19,10 @@ var validLinkTypes = map[domain.LinkType]bool{
 	"follow_up_to":   true,
 	"follow_up_from": true,
 	"related_to":     true,
+	// ADR-017 §3: no required inverse.
+	"depends_on": true,
+	"supports":   true,
+	"refutes":    true,
 }
 
 // ID format patterns per naming-conventions.md §2.
@@ -27,6 +31,7 @@ var idPatterns = map[domain.ArtifactType]*regexp.Regexp{
 	domain.ArtifactTypeEpic:       regexp.MustCompile(`^EPIC-\d{3}$`),
 	domain.ArtifactTypeTask:       regexp.MustCompile(`^TASK-\d{3}$`),
 	domain.ArtifactTypeADR:        regexp.MustCompile(`^ADR-\d{3,4}$`),
+	domain.ArtifactTypeAssumption: regexp.MustCompile(`^ASM-\d{3}$`),
 }
 
 // Validate checks an artifact against the schema rules defined in
@@ -125,7 +130,8 @@ func ValidateField(a *domain.Artifact, field string) *domain.ValidationError {
 	case "id":
 		// Check if ID is required for this type
 		switch a.Type {
-		case domain.ArtifactTypeInitiative, domain.ArtifactTypeEpic, domain.ArtifactTypeTask, domain.ArtifactTypeADR:
+		case domain.ArtifactTypeInitiative, domain.ArtifactTypeEpic, domain.ArtifactTypeTask, domain.ArtifactTypeADR,
+			domain.ArtifactTypeAssumption:
 			if a.ID == "" {
 				e := fieldError(a.Path, "id", fmt.Sprintf("required for %s", a.Type))
 				return &e
@@ -193,6 +199,15 @@ func validateTypeSpecificFields(a *domain.Artifact) []domain.ValidationError {
 		}
 		if a.Metadata["decision_makers"] == "" {
 			errors = append(errors, fieldError(a.Path, "decision_makers", "required for ADR"))
+		}
+	case domain.ArtifactTypeAssumption:
+		if a.ID == "" {
+			errors = append(errors, fieldError(a.Path, "id", "required for Assumption"))
+		}
+		if a.Metadata["created"] == "" {
+			errors = append(errors, fieldError(a.Path, "created", "required for Assumption"))
+		} else if !isValidDate(a.Metadata["created"]) {
+			errors = append(errors, fieldError(a.Path, "created", fmt.Sprintf("invalid date format %q (expected YYYY-MM-DD)", a.Metadata["created"])))
 		}
 	}
 

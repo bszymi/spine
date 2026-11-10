@@ -192,6 +192,13 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 		if parsed.DecisionMakers == "" {
 			return nil, &ParseError{Path: path, Message: "missing required field: decision_makers (ADR)"}
 		}
+	case domain.ArtifactTypeAssumption:
+		if parsed.ID == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: id (Assumption)"}
+		}
+		if parsed.Created == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: created (Assumption)"}
+		}
 	}
 
 	return &domain.Artifact{
