@@ -52,7 +52,9 @@ func (f *fakeStore) QueryArtifactLinksByTarget(_ context.Context, targetPath str
 	var result []store.ArtifactLink
 	for _, links := range f.links {
 		for _, l := range links {
-			if l.TargetPath == targetPath {
+			// Both path forms, as the Postgres store matches them (ADR-017 §5).
+			bare, canonical := store.LinkTargetForms(targetPath)
+			if l.TargetPath == bare || l.TargetPath == canonical {
 				result = append(result, l)
 			}
 		}

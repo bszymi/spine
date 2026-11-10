@@ -85,6 +85,12 @@ These rules ensure governed relationships are bidirectionally consistent.
 | `LC-003` | For each `supersedes` link, the target must have a corresponding `superseded_by` link | All with links | Warning |
 | `LC-004` | Link targets must resolve to existing artifacts | All with links | Error |
 | `LC-005` | Link targets must use the canonical path format | All with links | Error |
+| `AL-001` | An Assumption with status `Supported` must have at least one other artifact linking to it with `supports` (ADR-017 §4) | Assumption | Warning |
+| `AL-002` | An Assumption with status `Contradicted` must have at least one other artifact linking to it with `refutes` (ADR-017 §4) | Assumption | Warning |
+
+`AL-001` and `AL-002` read links by their target. A link target is stored as written in front
+matter, with a leading slash, and an artifact path has none; the lookup matches both forms
+(ADR-017 §5).
 
 ### 3.4 Status Consistency Rules
 

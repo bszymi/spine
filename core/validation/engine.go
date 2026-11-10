@@ -241,6 +241,7 @@ func NewEngine(st store.Store, opts ...Option) *Engine {
 	}
 	e.rules = append(e.rules, structuralRules()...)
 	e.rules = append(e.rules, linkRules(e.governedFileResolver)...)
+	e.rules = append(e.rules, assumptionRules()...)
 	e.rules = append(e.rules, statusRules()...)
 	e.rules = append(e.rules, scopeRules()...)
 	e.rules = append(e.rules, prereqRules()...)
