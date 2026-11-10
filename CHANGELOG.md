@@ -6,7 +6,7 @@ release is cut — this file is a staging area.
 
 ---
 
-## INIT-025 — Assumption Artifacts (EPIC-001 TASK-001: the Assumption type and three link types)
+## INIT-025 — Assumption Artifacts (EPIC-001: the Assumption type, three link types, links found by target)
 
 ADR-017. No migration and no change to stored rows.
 
@@ -23,6 +23,21 @@ ADR-017. No migration and no change to stored rows.
   `depends_on` has no effect on execution; only `blocked_by` blocks a task. Front matter that
   already used `depends_on` was projected but refused by `Validate`; it now validates, provided
   its target is a canonical path.
+
+- **Rules `AL-001` and `AL-002` (warnings).** An Assumption that is `Supported` with no artifact
+  linking to it with `supports`, or `Contradicted` with none linking with `refutes`, is reported.
+
+### Fixed
+
+- **Links are found by their target.** A link target is stored as written in front matter, with a
+  leading slash (`/initiatives/…`), and artifact paths have none. `QueryArtifactLinksByTarget`
+  compared the two exactly, so a lookup by artifact path returned nothing. It now matches the
+  target with and without the leading slash. Stored rows are unchanged.
+- **Behaviour change that follows from it:** when a task completes, the tasks that are
+  `blocked_by` it are now found, so the blocking-transition event (`task_unblocked`) is emitted
+  for each one that has no other open blocker. Before, the lookup found no dependents and the
+  event was never emitted for a canonical `blocked_by` link. An embedder that listens for the
+  event begins to receive it.
 
 ### Embedders
 

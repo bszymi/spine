@@ -211,10 +211,26 @@ func (s *PostgresStore) QueryArtifactLinks(ctx context.Context, sourcePath strin
 	return links, rows.Err()
 }
 
+// LinkTargetForms returns the two forms a link target naming targetPath can
+// be stored in: without a leading slash (the form of a projection key) and
+// with one (the canonical form written in front matter, artifact-schema.md
+// §3.2). The projection stores a link target as written, so a lookup by
+// target has to accept both (ADR-017 §5).
+func LinkTargetForms(targetPath string) (bare, canonical string) {
+	bare = strings.TrimPrefix(targetPath, "/")
+	return bare, "/" + bare
+}
+
+// QueryArtifactLinksByTarget returns the links that point at targetPath. The
+// path is matched with and without its leading slash (ADR-017 §5): link
+// targets are stored as written in front matter (/a/b.md) while callers hold
+// projection paths (a/b.md), and an exact match found nothing for them.
 func (s *PostgresStore) QueryArtifactLinksByTarget(ctx context.Context, targetPath string) ([]ArtifactLink, error) {
+	bare, canonical := LinkTargetForms(targetPath)
 	rows, err := s.pool.Query(ctx, `
 		SELECT source_path, target_path, link_type
-		FROM projection.artifact_links WHERE target_path = $1`, targetPath)
+		FROM projection.artifact_links WHERE target_path = $1 OR target_path = $2
+		ORDER BY source_path, link_type, target_path`, bare, canonical)
 	if err != nil {
 		return nil, err
 	}
