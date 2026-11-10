@@ -115,6 +115,13 @@ Links represent governed relationships between artifacts. The following link typ
 | `follow_up_to` | `follow_up_from` | This artifact is follow-up work from the target |
 | `follow_up_from` | `follow_up_to` | This artifact produced follow-up work in the target |
 | `related_to` | `related_to` | Informational relationship (symmetric) |
+| `depends_on` | — | This artifact relies on the target. A decision that relies on an assumption links to it this way (ADR-017) |
+| `supports` | — | This artifact is evidence for the target Assumption (ADR-017) |
+| `refutes` | — | This artifact is evidence against the target Assumption (ADR-017) |
+
+`depends_on`, `supports` and `refutes` have no inverse link type. The reverse direction is read by
+looking links up by their target, so the artifact that is depended on is not edited when a new
+dependent appears. `depends_on` has no effect on execution: only `blocked_by` blocks a task.
 
 ### 4.2 Link Format in Front Matter
 
@@ -434,6 +441,53 @@ The `name` segment is a short kebab-case label chosen by the author (e.g. `api-c
 
 ---
 
+### 5.10 Assumption
+
+One claim that a decision or plan relies on, written so that it can be shown true or false
+(ADR-017). Assumptions live under `/assumptions/`.
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `id` | yes | string | `ASM-NNN` |
+| `type` | yes | string | Always `Assumption` |
+| `title` | yes | string | The claim, as one sentence |
+| `status` | yes | enum | `Proposed`, `Untested`, `Supported`, `Contradicted`, `Rejected`, `Superseded` |
+| `created` | yes | date | YYYY-MM-DD |
+| `impact` | optional | string | `high`, `medium` or `low`. Carried as metadata; not interpreted by Spine |
+| `proposed_by` | optional | string | `human` or `ai`. Carried as metadata; not interpreted by Spine |
+| `owner` | optional | string | Who answers for the claim |
+| `links` | optional | list | Typed artifact links |
+
+A status says what is recorded about the claim. It is never a statement of certainty.
+
+| Status | Meaning |
+|--------|---------|
+| `Proposed` | Suggested as an assumption. Nobody with authority has confirmed it |
+| `Untested` | Confirmed as a real assumption. No evidence either way is recorded |
+| `Supported` | Recorded evidence supports it (an artifact links to it with `supports`) |
+| `Contradicted` | Recorded evidence contradicts it (an artifact links to it with `refutes`) |
+| `Rejected` | Not an assumption anyone relies on. Final |
+| `Superseded` | Replaced or no longer relevant. Final |
+
+Example:
+
+```yaml
+---
+id: ASM-004
+type: Assumption
+title: "The primary data source meets the bulk-update latency target"
+status: Untested
+created: 2026-11-10
+impact: high
+proposed_by: human
+---
+```
+
+An artifact that relies on the assumption links to it with `depends_on`. An artifact that is
+evidence links to it with `supports` or `refutes`. The assumption file itself carries neither.
+
+---
+
 ## 6. Status Enums
 
 Different artifact types use different status values:
@@ -447,6 +501,7 @@ Different artifact types use different status values:
 | Governance | `Living Document`, `Foundational`, `Superseded` |
 | Architecture | `Living Document`, `Stable`, `Superseded` |
 | Product | `Living Document`, `Stable`, `Superseded` |
+| Assumption | `Proposed`, `Untested`, `Supported`, `Contradicted`, `Rejected`, `Superseded` |
 | Validation Policy | `draft`, `active`, `deprecated`, `superseded` (per-policy `status` field; lower-case to match the on-disk YAML enum) |
 
 ---

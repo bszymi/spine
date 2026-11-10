@@ -21,17 +21,19 @@ type FileLister interface {
 // idPrefixes maps artifact types to their ID prefix strings.
 var idPrefixes = map[domain.ArtifactType]string{
 	domain.ArtifactTypeInitiative: "INIT",
-	domain.ArtifactTypeEpic:      "EPIC",
-	domain.ArtifactTypeTask:      "TASK",
-	domain.ArtifactTypeADR:       "ADR",
+	domain.ArtifactTypeEpic:       "EPIC",
+	domain.ArtifactTypeTask:       "TASK",
+	domain.ArtifactTypeADR:        "ADR",
+	domain.ArtifactTypeAssumption: "ASM",
 }
 
 // idPadding maps artifact types to their zero-padding width.
 var idPadding = map[domain.ArtifactType]int{
 	domain.ArtifactTypeInitiative: 3,
-	domain.ArtifactTypeEpic:      3,
-	domain.ArtifactTypeTask:      3,
-	domain.ArtifactTypeADR:       4,
+	domain.ArtifactTypeEpic:       3,
+	domain.ArtifactTypeTask:       3,
+	domain.ArtifactTypeADR:        4,
+	domain.ArtifactTypeAssumption: 3,
 }
 
 // NextID scans the parent directory at the given ref for existing artifacts
@@ -178,6 +180,7 @@ var DocumentDirs = map[domain.ArtifactType]string{
 //   - Epic: parentDir/EPIC-XXX-slug/epic.md (directory + file)
 //   - Initiative: parentDir/INIT-XXX-slug/initiative.md (directory + file)
 //   - ADR: parentDir/ADR-XXXX-slug.md (file)
+//   - Assumption: parentDir/ASM-XXX-slug.md (file)
 //   - Document types: parentDir/slug.md
 func BuildArtifactPath(artifactType domain.ArtifactType, id, slug, parentDir string) string {
 	dirSlug := strings.ToLower(id) + "-" + slug
@@ -190,7 +193,7 @@ func BuildArtifactPath(artifactType domain.ArtifactType, id, slug, parentDir str
 		return filepath.Join(parent, dirSlug, "epic.md")
 	case domain.ArtifactTypeInitiative:
 		return filepath.Join(parent, dirSlug, "initiative.md")
-	case domain.ArtifactTypeADR:
+	case domain.ArtifactTypeADR, domain.ArtifactTypeAssumption:
 		return filepath.Join(parent, dirSlug+".md")
 	default:
 		// Document types (Governance, Architecture, Product): parentDir/slug.md

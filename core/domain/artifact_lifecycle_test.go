@@ -45,6 +45,9 @@ const (
 	living  = domain.StatusLivingDocument
 	found   = domain.StatusFoundational
 	stable  = domain.StatusStable
+	untest  = domain.StatusUntested
+	support = domain.StatusSupported
+	contra  = domain.StatusContradicted
 )
 
 // golden is the §1 table of TASK-017, written out edge by edge in sorted
@@ -83,6 +86,16 @@ var golden = map[domain.ArtifactType]struct {
 		edges: cat(
 			edges(accept, deprec, superd),
 			edges(propose, accept, deprec, superd),
+		),
+	},
+	// ADR-017 §2.
+	domain.ArtifactTypeAssumption: {
+		initial: []domain.ArtifactStatus{propose, untest},
+		edges: cat(
+			edges(contra, superd, support, untest),
+			edges(propose, contra, reject, support, untest),
+			edges(support, contra, superd, untest),
+			edges(untest, contra, superd, support),
 		),
 	},
 	domain.ArtifactTypeGovernance: {
@@ -254,6 +267,15 @@ func TestDefaultStatusLifecycle_Prohibited(t *testing.T) {
 		{domain.ArtifactTypeInitiative, done, pending},
 		{domain.ArtifactTypeGovernance, superd, living},
 		{domain.ArtifactTypeArchitecture, living, found},
+		// ADR-017 §2: nothing returns to Proposed, a dismissed or retired
+		// assumption stays so, and Proposed cannot be retired unconfirmed.
+		{domain.ArtifactTypeAssumption, untest, propose},
+		{domain.ArtifactTypeAssumption, support, propose},
+		{domain.ArtifactTypeAssumption, reject, untest},
+		{domain.ArtifactTypeAssumption, superd, untest},
+		{domain.ArtifactTypeAssumption, propose, superd},
+		{domain.ArtifactTypeAssumption, untest, reject},
+		{domain.ArtifactTypeAssumption, propose, accept},
 	} {
 		if l.Allows(c.typ, c.from, c.to) {
 			t.Errorf("%s %s -> %s must be prohibited", c.typ, c.from, c.to)
@@ -272,6 +294,10 @@ func TestDefaultStatusLifecycle_Prohibited(t *testing.T) {
 		{domain.ArtifactTypeADR, propose, accept},
 		{domain.ArtifactTypeADR, propose, deprec},
 		{domain.ArtifactTypeInitiative, draft, pending},
+		{domain.ArtifactTypeAssumption, propose, untest},
+		{domain.ArtifactTypeAssumption, propose, reject},
+		{domain.ArtifactTypeAssumption, support, untest},
+		{domain.ArtifactTypeAssumption, contra, support},
 	} {
 		if !l.Allows(c.typ, c.from, c.to) {
 			t.Errorf("%s %s -> %s must be allowed", c.typ, c.from, c.to)

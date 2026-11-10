@@ -6,6 +6,31 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-025 — Assumption Artifacts (EPIC-001 TASK-001: the Assumption type and three link types)
+
+ADR-017. No migration and no change to stored rows.
+
+### Added
+
+- **A new Markdown artifact type, `Assumption`.** One claim a decision or plan relies on, under
+  `/assumptions/`, with ID `ASM-NNN` and required `id` and `created`. Statuses: `Proposed`,
+  `Untested`, `Supported`, `Contradicted`, `Rejected`, `Superseded`. The lifecycle is declared in
+  `domain.DefaultStatusLifecycle()` and documented in `architecture/engine-state-machine.md` §5A:
+  `Proposed` and `Untested` are initial, `Rejected` and `Superseded` are final, and nothing
+  returns to `Proposed`. A binary without this change skips `Assumption` files, as it skips any
+  type it does not know.
+- **Three link types: `depends_on`, `supports`, `refutes`.** None has a required inverse.
+  `depends_on` has no effect on execution; only `blocked_by` blocks a task. Front matter that
+  already used `depends_on` was projected but refused by `Validate`; it now validates, provided
+  its target is a canonical path.
+
+### Embedders
+
+- A workflow may now declare `applies_to: [Assumption]`.
+- Lists of artifact types or link types kept outside Core need the new values.
+
+---
+
 ## INIT-024 — Security Review Remediation (EPIC-004 TASK-013: dependency refresh — pgx v5.11.0, chi v5.5.0, LocalStack 4.14.0)
 
 Replaces Dependabot #602 (postgres digest) and #604 (the Go module group) with the same versions,

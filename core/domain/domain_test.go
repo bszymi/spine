@@ -143,15 +143,15 @@ func TestSpineError(t *testing.T) {
 
 func TestValidArtifactTypes(t *testing.T) {
 	types := domain.ValidArtifactTypes()
-	if len(types) != 8 {
-		t.Errorf("expected 8 artifact types, got %d", len(types))
+	if len(types) != 9 {
+		t.Errorf("expected 9 artifact types, got %d", len(types))
 	}
 }
 
 func TestValidMarkdownArtifactTypes(t *testing.T) {
 	types := domain.ValidMarkdownArtifactTypes()
-	if len(types) != 7 {
-		t.Errorf("expected 7 markdown artifact types, got %d", len(types))
+	if len(types) != 8 {
+		t.Errorf("expected 8 markdown artifact types, got %d", len(types))
 	}
 	for _, tp := range types {
 		if tp == domain.ArtifactTypeWorkflow {

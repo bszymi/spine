@@ -107,7 +107,20 @@ func defaultLifecycleSpecs() map[ArtifactType]lifecycleSpec {
 			edgesFrom(StatusStable, StatusLivingDocument, StatusSuperseded),
 		),
 	}
+	// ADR-017 §2. Proposed is content nobody with authority has confirmed;
+	// leaving it is a governed change. Supported and Contradicted may fall
+	// back to Untested when the evidence itself stops holding.
+	assumption := lifecycleSpec{
+		initial: []ArtifactStatus{StatusProposed, StatusUntested},
+		edges: concatEdges(
+			edgesFrom(StatusProposed, StatusUntested, StatusSupported, StatusContradicted, StatusRejected),
+			edgesFrom(StatusUntested, StatusSupported, StatusContradicted, StatusSuperseded),
+			edgesFrom(StatusSupported, StatusContradicted, StatusUntested, StatusSuperseded),
+			edgesFrom(StatusContradicted, StatusSupported, StatusUntested, StatusSuperseded),
+		),
+	}
 	return map[ArtifactType]lifecycleSpec{
+		ArtifactTypeAssumption:   assumption,
 		ArtifactTypeInitiative:   planned,
 		ArtifactTypeEpic:         planned,
 		ArtifactTypeTask:         task,
