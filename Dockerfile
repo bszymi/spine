@@ -6,7 +6,7 @@
 # toolchain-parity) fails when they drift. Move the tag, the digest, go.mod,
 # the ci.yml git-floor container and setup-go versions, and the Makefile's
 # DOCKER_GO together.
-FROM golang:1.27.3-bookworm@sha256:b08bc99468058b6d8a0ada17fa54996b910d5e82a7e95bee0372e3bd98415258 AS builder
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
